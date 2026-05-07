@@ -1,0 +1,154 @@
+# GoReleaser config for the four ans binaries:
+#   ans-ra      — Registration Authority server   (CGO; linux only)
+#   ans-tl      — Transparency Log server         (CGO; linux only)
+#   ans-verify  — offline verifier                (pure Go; cross-platform)
+#   ans-dns     — development DNS server          (pure Go; cross-platform)
+#
+# The two server binaries link github.com/mattn/go-sqlite3 transitively,
+# which requires CGO. Cross-compiling cgo to linux/arm64 from a linux/amd64
+# runner needs gcc-aarch64-linux-gnu, installed by .github/workflows/release.yml
+# before goreleaser runs. Darwin/Windows server builds are intentionally
+# omitted: the servers are deployed via the Dockerfile.* images or as
+# linux-native binaries; cross-CGO to darwin/windows would multiply the
+# cross-compiler requirements without serving real demand.
+#
+# ans-verify and ans-dns don't link SQLite (`go list -deps` confirms),
+# so they ship cross-platform with CGO_ENABLED=0.
+#
+# One archive per (goos, goarch). Goreleaser groups whichever build
+# IDs match that target — so linux archives contain all four binaries,
+# darwin/windows archives contain only the two pure-Go tools.
+#
+# Library consumers continue to use `go get` / module versions — only
+# the binaries are packaged here.
+# Docs: https://goreleaser.com/customization/
+version: 2
+
+project_name: ans
+
+before:
+  hooks:
+    - go mod tidy
+
+# ldflags target `main.version` etc. to match how the Makefile
+# (-X main.version=...) and the cmd/*/main.go vars are wired.
+# ans-ra and ans-tl actually consume these vars; ans-verify and
+# ans-dns don't declare them today and the linker silently ignores
+# unmatched -X targets, which keeps the build matrix uniform.
+builds:
+  # ─── Server binaries: CGO required (mattn/go-sqlite3), linux only ─────
+  - id: ans-ra
+    main: ./cmd/ans-ra
+    binary: ans-ra
+    env:
+      - CGO_ENABLED=1
+      # CC is set per-arch so cross-compiling linux/arm64 from a
+      # linux/amd64 runner uses the gcc-aarch64-linux-gnu toolchain
+      # installed by the workflow. amd64 falls through to the default
+      # /usr/bin/cc (gcc).
+      - >-
+        {{- if eq .Arch "arm64" -}}
+          CC=aarch64-linux-gnu-gcc
+        {{- end -}}
+    goos: [linux]
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+  - id: ans-tl
+    main: ./cmd/ans-tl
+    binary: ans-tl
+    env:
+      - CGO_ENABLED=1
+      - >-
+        {{- if eq .Arch "arm64" -}}
+          CC=aarch64-linux-gnu-gcc
+        {{- end -}}
+    goos: [linux]
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+  # ─── Tools: pure Go, cross-platform ────────────────────────────────────
+  - id: ans-verify
+    main: ./cmd/ans-verify
+    binary: ans-verify
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+  - id: ans-dns
+    main: ./cmd/ans-dns
+    binary: ans-dns
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+      - -X main.commit={{.ShortCommit}}
+      - -X main.date={{.Date}}
+
+# One archive per (goos, goarch). Goreleaser only includes builds
+# whose target matches, so linux archives get all four binaries,
+# darwin/windows get only ans-verify + ans-dns.
+archives:
+  - id: ans
+    ids:
+      - ans-ra
+      - ans-tl
+      - ans-verify
+      - ans-dns
+    name_template: "ans_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    formats:
+      - tar.gz
+    format_overrides:
+      - goos: windows
+        formats:
+          - zip
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-snapshot-{{ .ShortCommit }}"
+
+# release-please owns the changelog and the GitHub Release body.
+# GoReleaser only attaches binaries + checksums to the existing release.
+changelog:
+  disable: true
+
+release:
+  mode: append
+  github:
+    owner: godaddy
+    name: ans
