@@ -117,6 +117,12 @@ builds:
 # One archive per (goos, goarch). Goreleaser only includes builds
 # whose target matches, so linux archives get all four binaries,
 # darwin/windows get only ans-verify + ans-dns.
+#
+# allow_different_binary_count: true is required because of the
+# heterogeneous binary count above. Without it, goreleaser v2 errors
+# out on the assumption that a missing binary signals a misconfigured
+# build. Here it's by design: ans-ra and ans-tl are CGO-linked server
+# binaries that intentionally don't ship for darwin/windows.
 archives:
   - id: ans
     ids:
@@ -124,6 +130,7 @@ archives:
       - ans-tl
       - ans-verify
       - ans-dns
+    allow_different_binary_count: true
     name_template: "ans_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
