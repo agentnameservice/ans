@@ -1,0 +1,302 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Attestations": {
+      "properties": {
+        "clientCertFingerprint": {
+          "description": "SHA256 fingerprint of the client certificate",
+          "pattern": "^SHA256:[a-f0-9]+$",
+          "type": "string"
+        },
+        "csrSubmission": {
+          "description": "Status of Certificate Signing Request submission",
+          "enum": [
+            "success",
+            "failed",
+            "pending"
+          ],
+          "type": "string"
+        },
+        "dnsRecordsProvisioned": {
+          "$ref": "#/definitions/DnsRecordsProvisioned"
+        },
+        "dnsRecordsProvisionedStatus": {
+          "description": "Status of DNS record provisioning",
+          "enum": [
+            "success",
+            "failed",
+            "pending",
+            "partial"
+          ],
+          "type": "string"
+        },
+        "dnssecStatus": {
+          "description": "DNSSEC validation status",
+          "enum": [
+            "success",
+            "failed",
+            "not_configured",
+            "pending"
+          ],
+          "type": "string"
+        },
+        "domainValidation": {
+          "description": "ACME challenge type used for domain validation",
+          "enum": [
+            "acme-dns-01",
+            "acme-http-01",
+            "acme-tls-alpn-01"
+          ],
+          "type": "string"
+        },
+        "domainValidationStatus": {
+          "description": "Status of domain validation",
+          "enum": [
+            "success",
+            "failed",
+            "pending"
+          ],
+          "type": "string"
+        },
+        "identityCertType": {
+          "description": "Type of identity certificate",
+          "enum": [
+            "x509-dv-client",
+            "x509-ov-client",
+            "x509-ev-client"
+          ],
+          "type": "string"
+        },
+        "protocolExtensionsVerified": {
+          "description": "Status of protocol extensions verification",
+          "enum": [
+            "success",
+            "failed",
+            "not_applicable"
+          ],
+          "type": "string"
+        },
+        "serverCertFingerprint": {
+          "description": "SHA256 fingerprint of the server certificate",
+          "pattern": "^SHA256:[a-f0-9]+$",
+          "type": "string"
+        },
+        "serverCertType": {
+          "description": "Type of server certificate",
+          "enum": [
+            "x509-dv-server",
+            "x509-ov-server",
+            "x509-ev-server"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "DnsRecordsProvisioned": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Map of DNS record names to their values",
+      "type": "object"
+    },
+    "Event": {
+      "properties": {
+        "agentFqdn": {
+          "description": "Fully qualified domain name of the agent",
+          "format": "hostname",
+          "type": "string"
+        },
+        "agentId": {
+          "description": "Unique identifier for the agent (UUIDv7)",
+          "format": "uuid",
+          "type": "string"
+        },
+        "ansName": {
+          "description": "Fully qualified ANS name in protocol URI format",
+          "example": "mcp://agent-0.capability.provider.v1.0.0.domain.com",
+          "pattern": "^([^.]+)://([^.]+)\\.([^.]+)\\.([^.]+)\\.v(\\d+)\\.(\\d+)\\.(\\d+)(?:\\.(.+))?$",
+          "type": "string"
+        },
+        "eventType": {
+          "description": "Type of event being logged",
+          "enum": [
+            "AGENT_ACTIVE",
+            "AGENT_REVOCATION",
+            "CERTIFICATE_EXPIRING",
+            "CERTIFICATE_RENEWED",
+            "agent_active",
+            "agent_revocation",
+            "certificate_expiring",
+            "certificate_renewed"
+          ],
+          "type": "string"
+        },
+        "metadata": {
+          "$ref": "#/definitions/EventMetadata"
+        },
+        "protocol": {
+          "description": "Agent protocol type",
+          "type": "string"
+        },
+        "raBadge": {
+          "$ref": "#/definitions/RaBadge"
+        },
+        "timestamp": {
+          "description": "Event timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "agentFqdn",
+        "agentId",
+        "ansName",
+        "eventType",
+        "protocol",
+        "raBadge",
+        "timestamp"
+      ],
+      "type": "object"
+    },
+    "EventMetadata": {
+      "properties": {
+        "agentCardUrl": {
+          "description": "URL to the agent card JSON document",
+          "format": "uri",
+          "type": "string"
+        },
+        "ansCapabilities": {
+          "description": "List of ANS capabilities supported by the agent",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "description": {
+          "description": "Human-readable description of the event or agent",
+          "type": "string"
+        },
+        "endpoint": {
+          "description": "Agent service endpoint URL",
+          "format": "uri",
+          "type": "string"
+        },
+        "raBadgeUrl": {
+          "description": "URL to the RA badge verification page",
+          "format": "uri",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "Producer": {
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/Event"
+        },
+        "keyId": {
+          "description": "Identifier for the signing key used",
+          "type": "string"
+        },
+        "signature": {
+          "description": "JWS detached signature of the event payload",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "keyId",
+        "signature"
+      ],
+      "type": "object"
+    },
+    "RaBadge": {
+      "properties": {
+        "ansCapabilitiesHash": {
+          "description": "SHA256 hash of the ANS capabilities list",
+          "pattern": "^SHA256:[a-f0-9]+$",
+          "type": "string"
+        },
+        "attestations": {
+          "$ref": "#/definitions/Attestations"
+        },
+        "badgeUrlStatus": {
+          "description": "Verification status of the badge URL",
+          "enum": [
+            "verified_link",
+            "pending_verification",
+            "verification_failed",
+            "not_found"
+          ],
+          "type": "string"
+        },
+        "expiresAt": {
+          "description": "Badge expiration timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "issuedAt": {
+          "description": "Badge issuance timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "raId": {
+          "description": "Registration Authority identifier",
+          "type": "string"
+        },
+        "renewalStatus": {
+          "description": "Status of certificate renewal",
+          "enum": [
+            "success",
+            "pending",
+            "failed",
+            "not_applicable"
+          ],
+          "type": "string"
+        },
+        "revocationReasonCode": {
+          "description": "RFC 5280 revocation reason code",
+          "enum": [
+            "AA_COMPROMISE",
+            "AFFILIATION_CHANGED",
+            "CA_COMPROMISE",
+            "CERTIFICATE_HOLD",
+            "CESSATION_OF_OPERATION",
+            "EXPIRED_CERT",
+            "KEY_COMPROMISE",
+            "PRIVILEGE_WITHDRAWN",
+            "REMOVE_FROM_CRL",
+            "SUPERSEDED",
+            "UNSPECIFIED"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "attestations",
+        "badgeUrlStatus",
+        "issuedAt",
+        "raId"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "A transparency log entry for ANS (Agent Name System) Registry events with RA badge attestations",
+  "properties": {
+    "logId": {
+      "description": "Unique identifier for this log entry (UUIDv7)",
+      "format": "uuid",
+      "type": "string"
+    },
+    "producer": {
+      "$ref": "#/definitions/Producer"
+    }
+  },
+  "required": [
+    "logId",
+    "producer"
+  ],
+  "title": "ANS Transparency Log Entry V0",
+  "type": "object"
+}

@@ -1,0 +1,54 @@
+server:
+  host: "0.0.0.0"
+  port: 18080
+
+auth:
+  type: static
+  static:
+    api-key: "ans-dev-key-change-me"
+
+ca:
+  type: self
+  self:
+    org: "ANS Local Dev CA"
+    validity-days: 365
+    data-dir: "./data/ra/ca"
+
+dns:
+  # "noop" (default) accepts any DNS state — the quickstart demo uses
+  # it so registrations succeed without a real nameserver. Flip to
+  # "lookup" to query a real nameserver via miekg/dns, and set
+  # `dns.server` to point at the bundled `ans-dns` dev server (or
+  # any authoritative nameserver). When the resolver sets the AD
+  # bit on TLSA responses, the RA surfaces DNSSECVerified=true on
+  # the resulting TL attestation.
+  type: noop
+  # server: "127.0.0.1:15353"
+
+keys:
+  type: file
+  file:
+    path: "./data/ra/keys"
+
+store:
+  type: sqlite
+  sqlite:
+    path: "./data/ra/ans.db"
+
+tl-client:
+  base-url: "http://localhost:18081"
+  api-key: "tl-internal-key"
+  timeout: 10s
+
+# signer: names the KeyManager key + RA identifier used to produce the
+# detached-JWS the TL will verify on ingest. The keyId is auto-created
+# on first run; the TL operator must register the matching public key
+# under producerKeys[] in tl-local.yaml (use `keymanager` tooling to
+# export the .pub file once ans-ra has started).
+signer:
+  keyId: "ans-ra-signer"
+  raId: "ans-ra-local"
+
+log:
+  level: info
+  format: text

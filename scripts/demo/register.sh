@@ -1,0 +1,179 @@
+#!/usr/bin/env bash
+# Register a fresh agent and drive it to ACTIVE on the chosen lane.
+# Focused building block for end-to-end testing — stops at ACTIVE, no
+# audit/receipt flow (see run-lifecycle{,-v1}.sh for the full demo).
+#
+# Writes the new agentId to:
+#   data/demo/last-agent-id-v1    (for --v1)
+#   data/demo/last-agent-id       (for --v2)
+# so downstream scripts (renewal.sh, revoke.sh) can pick it up
+# without arguments.
+#
+# Usage:
+#   scripts/demo/register.sh --v1                            # random host, V1 lane
+#   scripts/demo/register.sh --v2                            # random host, V2 lane
+#   scripts/demo/register.sh --v1 myagent.example.com        # specific host
+#   scripts/demo/register.sh --v2 myagent.example.com 2.1.0  # specific host + version
+#   scripts/demo/register.sh --v1 --register-only            # stop after POST /register (don't activate)
+#
+# Exits 0 on success; agentId is echoed on the FINAL line of stdout so
+# callers can `AGENT_ID=$(register.sh --v1)` if they want.
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
+# ----- arg parsing -----
+LANE=""
+REGISTER_ONLY=0
+ARGS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --v1) LANE="v1"; shift ;;
+    --v2) LANE="v2"; shift ;;
+    --register-only) REGISTER_ONLY=1; shift ;;
+    --help|-h)
+      grep '^#' "$0" | sed 's/^# \?//' >&2
+      exit 0
+      ;;
+    *) ARGS+=("$1"); shift ;;
+  esac
+done
+if [ -z "$LANE" ]; then
+  fail "must specify --v1 or --v2"
+fi
+
+ARG_HOST="${ARGS[0]:-}"
+ARG_VERSION="${ARGS[1]:-}"
+AGENT_VERSION="${AGENT_VERSION:-${ARG_VERSION:-1.0.0}}"
+if [ -n "${AGENT_HOST:-}" ]; then
+  :  # env wins
+elif [ -n "$ARG_HOST" ]; then
+  AGENT_HOST="$ARG_HOST"
+else
+  AGENT_HOST="${LANE}demo-$(openssl rand -hex 4).example.com"
+fi
+ANS_NAME="ans://v${AGENT_VERSION}.${AGENT_HOST}"
+
+header "Register on lane $LANE"
+printf "  ansName   %s\n" "$ANS_NAME" >&2
+printf "  host      %s\n" "$AGENT_HOST" >&2
+printf "  version   %s\n" "$AGENT_VERSION" >&2
+
+if ! curl -sSf "$RA_URL/v2/admin/ready" >/dev/null 2>&1; then
+  fail "ans-ra isn't reachable at $RA_URL — run scripts/demo/start.sh first"
+fi
+
+# ----- Generate identity CSR (URI SAN = ANS name) -----
+CSR_DIR="$DATA/csr"
+rm -rf "$CSR_DIR"
+mkdir -p "$CSR_DIR"
+cat >"$CSR_DIR/identity.cnf" <<CNF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+[req_dn]
+CN = $ANS_NAME
+[v3_req]
+subjectAltName = URI:$ANS_NAME
+CNF
+openssl ecparam -name prime256v1 -genkey -noout -out "$CSR_DIR/identity.key" 2>/dev/null
+openssl req -new -key "$CSR_DIR/identity.key" \
+  -config "$CSR_DIR/identity.cnf" \
+  -out "$CSR_DIR/identity.csr" 2>/dev/null
+IDENTITY_CSR_PEM=$(cat "$CSR_DIR/identity.csr")
+
+# ----- Generate server CSR (DNS SAN = agent FQDN) -----
+#
+# Matches the reference's default registration shape: the RA signs
+# the server TLS cert through its configured ServerCertificateAuthority
+# port. The demo config wires a ServerSelfCA that handles this.
+cat >"$CSR_DIR/server.cnf" <<CNF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+[req_dn]
+CN = $AGENT_HOST
+[v3_req]
+subjectAltName = DNS:$AGENT_HOST
+CNF
+openssl ecparam -name prime256v1 -genkey -noout -out "$CSR_DIR/server.key" 2>/dev/null
+openssl req -new -key "$CSR_DIR/server.key" \
+  -config "$CSR_DIR/server.cnf" \
+  -out "$CSR_DIR/server.csr" 2>/dev/null
+SERVER_CSR_PEM=$(cat "$CSR_DIR/server.csr")
+
+# ----- POST register (lane-specific URL + last-agent-id filename) -----
+if [ "$LANE" = "v1" ]; then
+  REGISTER_PATH="/v1/agents/register"
+  AGENT_BASE="/v1/agents"
+  LAST_AGENT_FILE="$DATA/last-agent-id-v1"
+  DISPLAY_NAME="v1-demo-agent"
+else
+  REGISTER_PATH="/v2/ans/agents"
+  AGENT_BASE="/v2/ans/agents"
+  LAST_AGENT_FILE="$DATA/last-agent-id"
+  DISPLAY_NAME="v2-demo-agent"
+fi
+
+header "POST $REGISTER_PATH"
+REG_REQ=$(jq -n \
+  --arg host "$AGENT_HOST" \
+  --arg version "$AGENT_VERSION" \
+  --arg idCsr "$IDENTITY_CSR_PEM" \
+  --arg srvCsr "$SERVER_CSR_PEM" \
+  --arg display "$DISPLAY_NAME" '
+  {
+    agentDisplayName: $display,
+    agentDescription: "register.sh demo target",
+    version:          $version,
+    agentHost:        $host,
+    endpoints: [{
+      agentUrl:   ("https://" + $host + "/mcp"),
+      protocol:   "MCP",
+      transports: ["SSE"]
+    }],
+    identityCsrPEM: $idCsr,
+    serverCsrPEM:   $srvCsr
+  }')
+REG_RESP=$(curl_json POST "$REGISTER_PATH" "$REG_REQ")
+AGENT_ID=$(printf '%s' "$REG_RESP" | jq -r '.agentId // empty')
+if [ -z "$AGENT_ID" ]; then
+  fail "no agentId in register response"
+fi
+echo "$AGENT_ID" >"$LAST_AGENT_FILE"
+ok "agentId=$AGENT_ID (saved to $LAST_AGENT_FILE)"
+
+if [ "$REGISTER_ONLY" = "1" ]; then
+  header "--register-only: stopping before activation"
+  printf "%s\n" "$AGENT_ID"
+  exit 0
+fi
+
+# ----- Drive to ACTIVE (verify-acme → verify-dns) -----
+#
+# V1 skips the intermediate DOMAIN_VALIDATION TL emit but still
+# advances the state machine; V2 emits DOMAIN_VALIDATION at this
+# step. The RA's response shape is identical on both lanes.
+header "POST $AGENT_BASE/$AGENT_ID/verify-acme  (→ PENDING_DNS)"
+curl_json POST "$AGENT_BASE/$AGENT_ID/verify-acme" >/dev/null
+
+header "POST $AGENT_BASE/$AGENT_ID/verify-dns  (→ ACTIVE)"
+note "noop DNS verifier accepts any operator DNS state; production plugs in a real verifier"
+curl_json POST "$AGENT_BASE/$AGENT_ID/verify-dns" >/dev/null
+
+# ----- Confirm ACTIVE -----
+header "GET $AGENT_BASE/$AGENT_ID  (expect agentStatus=ACTIVE)"
+DETAIL=$(curl_json GET "$AGENT_BASE/$AGENT_ID")
+status=$(printf '%s' "$DETAIL" | jq -r '.agentStatus // .status // empty')
+if [ "$status" != "ACTIVE" ]; then
+  fail "agent did not reach ACTIVE; got '$status'"
+fi
+ok "agent is ACTIVE on lane $LANE"
+
+# Echo agentId on the last line so shell callers can capture it:
+#   AGENT=$(scripts/demo/register.sh --v1)
+printf "%s\n" "$AGENT_ID"

@@ -1,0 +1,27 @@
+# Static build for the offline receipt verifier. Produces a scratch
+# image — the CLI has no external dependencies (network + local
+# file reads only), so no shell/libc is required at runtime.
+#
+# Build:  docker build -f Dockerfile.ans-verify -t ans-verify:local .
+# Run:    docker run --rm --network host \
+#           ans-verify:local -url http://localhost:18081 -agent <id>
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+ENV CGO_ENABLED=0
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+ARG VERSION=dev
+RUN go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/ans-verify ./cmd/ans-verify
+
+# Scratch image — the CLI is pure Go (CGO_ENABLED=0) so a
+# statically-linked binary + CA certs is all that's needed.
+FROM alpine:3.23
+RUN apk add --no-cache ca-certificates
+COPY --from=build /out/ans-verify /usr/local/bin/ans-verify
+ENTRYPOINT ["/usr/local/bin/ans-verify"]

@@ -1,0 +1,270 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "definitions": {
+    "Agent": {
+      "properties": {
+        "host": {
+          "description": "Host domain for the agent",
+          "format": "hostname",
+          "type": "string"
+        },
+        "name": {
+          "description": "Human readable agent name",
+          "type": "string"
+        },
+        "providerId": {
+          "description": "Provider/organization identifier",
+          "type": "string"
+        },
+        "version": {
+          "description": "Semantic version of the agent",
+          "pattern": "^\\d+\\.\\d+\\.\\d+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "host",
+        "version"
+      ],
+      "type": "object"
+    },
+    "Attestations": {
+      "properties": {
+        "dnsRecordsProvisioned": {
+          "$ref": "#/definitions/DnsRecordsProvisioned"
+        },
+        "domainValidation": {
+          "description": "ACME challenge type used for domain validation",
+          "enum": [
+            "ACME-DNS-01",
+            "ACME-HTTP-01",
+            "ACME-TLS-ALPN-01"
+          ],
+          "type": "string"
+        },
+        "identityCert": {
+          "$ref": "#/definitions/Certificate"
+        },
+        "metadataHashes": {
+          "additionalProperties": {
+            "pattern": "^SHA256:[a-f0-9]+$",
+            "type": "string"
+          },
+          "description": "Per-protocol SHA-256 hashes of the agent's metadata documents, provided by the AHP at registration time. Keyed by protocol name (e.g. \"A2A\", \"MCP\").",
+          "type": "object"
+        },
+        "serverCert": {
+          "$ref": "#/definitions/Certificate"
+        },
+        "validIdentityCerts": {
+          "description": "All currently valid identity certificates for this agent version. Present when multiple identity certs are active (e.g. during renewal overlap). When omitted, only identityCert is active.",
+          "items": {
+            "$ref": "#/definitions/CertificateExtended"
+          },
+          "type": "array"
+        },
+        "validServerCerts": {
+          "description": "All currently valid server certificates for this agent version. Present when multiple server certs are active. When omitted, only serverCert is active.",
+          "items": {
+            "$ref": "#/definitions/CertificateExtended"
+          },
+          "type": "array"
+        }
+      },
+      "required": [],
+      "type": "object"
+    },
+    "Certificate": {
+      "properties": {
+        "fingerprint": {
+          "description": "SHA256 fingerprint of the certificate",
+          "pattern": "^SHA256:[a-f0-9]+$",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of certificate",
+          "enum": [
+            "X509-DV-SERVER",
+            "X509-EV-CLIENT",
+            "X509-EV-SERVER",
+            "X509-OV-CLIENT",
+            "X509-OV-SERVER"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "type"
+      ],
+      "type": "object"
+    },
+    "CertificateExtended": {
+      "description": "Certificate with validity timestamp, used in validIdentityCerts and validServerCerts arrays",
+      "properties": {
+        "fingerprint": {
+          "description": "SHA256 fingerprint of the certificate",
+          "pattern": "^SHA256:[a-f0-9]+$",
+          "type": "string"
+        },
+        "notAfter": {
+          "description": "Certificate expiration timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "type": {
+          "description": "Type of certificate",
+          "enum": [
+            "X509-DV-SERVER",
+            "X509-EV-CLIENT",
+            "X509-EV-SERVER",
+            "X509-OV-CLIENT",
+            "X509-OV-SERVER"
+          ],
+          "type": "string"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "type"
+      ],
+      "type": "object"
+    },
+    "DnsRecordsProvisioned": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "Map of DNS record names to their values",
+      "type": "object"
+    },
+    "Event": {
+      "properties": {
+        "agent": {
+          "$ref": "#/definitions/Agent"
+        },
+        "ansId": {
+          "description": "Unique identifier for the ANS entry (UUIDv7)",
+          "format": "uuid",
+          "type": "string"
+        },
+        "ansName": {
+          "description": "Fully qualified ANS name in URI format",
+          "pattern": "^ans://v(\\d+)\\.(\\d+)\\.(\\d+)(?:\\.(.+))?$",
+          "type": "string"
+        },
+        "attestations": {
+          "$ref": "#/definitions/Attestations"
+        },
+        "eventType": {
+          "description": "Type of event being logged",
+          "enum": [
+            "AGENT_DEPRECATED",
+            "AGENT_REGISTERED",
+            "AGENT_RENEWED",
+            "AGENT_REVOKED"
+          ],
+          "type": "string"
+        },
+        "expiresAt": {
+          "description": "Certificate expiration timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "issuedAt": {
+          "description": "Certificate issuance timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "raId": {
+          "description": "Registration Authority identifier",
+          "type": "string"
+        },
+        "renewalStatus": {
+          "description": "Status of certificate renewal",
+          "enum": [
+            "FAILED",
+            "PENDING",
+            "SUCCESS"
+          ],
+          "type": "string"
+        },
+        "revocationReasonCode": {
+          "description": "RFC 5280 revocation reason code",
+          "enum": [
+            "AA_COMPROMISE",
+            "AFFILIATION_CHANGED",
+            "CA_COMPROMISE",
+            "CERTIFICATE_HOLD",
+            "CESSATION_OF_OPERATION",
+            "EXPIRED_CERT",
+            "KEY_COMPROMISE",
+            "PRIVILEGE_WITHDRAWN",
+            "REMOVE_FROM_CRL",
+            "SUPERSEDED",
+            "UNSPECIFIED"
+          ],
+          "type": "string"
+        },
+        "revokedAt": {
+          "description": "Certificate revocation timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        },
+        "timestamp": {
+          "description": "Event timestamp (ISO 8601)",
+          "format": "date-time",
+          "type": "string"
+        }
+      },
+      "required": [
+        "ansId",
+        "ansName",
+        "eventType",
+        "agent",
+        "attestations",
+        "issuedAt",
+        "raId",
+        "timestamp"
+      ],
+      "type": "object"
+    },
+    "Producer": {
+      "properties": {
+        "event": {
+          "$ref": "#/definitions/Event"
+        },
+        "keyId": {
+          "description": "Identifier for the signing key used",
+          "type": "string"
+        },
+        "signature": {
+          "description": "JWS detached signature of the event payload",
+          "type": "string"
+        }
+      },
+      "required": [
+        "event",
+        "keyId",
+        "signature"
+      ],
+      "type": "object"
+    }
+  },
+  "description": "A transparency log entry for ANS (Agent Name System) Registry events with cryptographic attestations",
+  "properties": {
+    "logId": {
+      "description": "Unique identifier for this log entry (UUIDv7)",
+      "format": "uuid",
+      "type": "string"
+    },
+    "producer": {
+      "$ref": "#/definitions/Producer"
+    }
+  },
+  "required": [
+    "logId",
+    "producer"
+  ],
+  "title": "ANS Transparency Log Entry V1",
+  "type": "object"
+}

@@ -1,0 +1,54 @@
+# Pre-commit hooks for the ans repository.
+#
+# Run once: `pre-commit install` — installs the git hook so the
+# checks fire on every `git commit`.
+# Run all hooks against the whole tree: `pre-commit run --all-files`.
+#
+# Hooks defer to the same Make targets CI enforces, so the local
+# pre-commit pass is byte-for-byte the same gate as CI's lint /
+# fmt / vet steps. Slow checks (`make test-cover`, `make test-race`,
+# license-check) are intentionally NOT in pre-commit — they belong
+# in CI where commit-time latency doesn't matter.
+repos:
+  # Generic hygiene checks. Fast (file-format level), language-agnostic.
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-merge-conflict
+      - id: check-yaml
+        # docker-compose.yaml uses YAML anchors that the strict parser
+        # would reject; --unsafe falls back to a permissive parse that
+        # still catches the common hand-edit syntax errors.
+        args: [--unsafe]
+      - id: check-added-large-files
+        args: [--maxkb=500]
+
+  # Go-specific gates. Each hook delegates to a Make target so CI and
+  # local commit-time enforcement run the same command — no drift.
+  # `pass_filenames: false` because the Make targets process the whole
+  # module rather than per-file (gofmt handles unrelated files cheaply,
+  # and golangci-lint needs the full package graph for many checks).
+  - repo: local
+    hooks:
+      - id: gofmt
+        name: gofmt (via make fmt)
+        entry: make fmt
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: go-vet
+        name: go vet (via make vet)
+        entry: make vet
+        language: system
+        types: [go]
+        pass_filenames: false
+
+      - id: golangci-lint
+        name: golangci-lint (via make lint)
+        entry: make lint
+        language: system
+        types: [go]
+        pass_filenames: false

@@ -1,0 +1,901 @@
+package handler_test
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
+
+	"github.com/godaddy/ans/internal/adapter/auth"
+	"github.com/godaddy/ans/internal/adapter/cert"
+	"github.com/godaddy/ans/internal/adapter/dns"
+	"github.com/godaddy/ans/internal/adapter/eventbus"
+	"github.com/godaddy/ans/internal/adapter/keymanager"
+	"github.com/godaddy/ans/internal/adapter/store/sqlite"
+	"github.com/godaddy/ans/internal/domain"
+	"github.com/godaddy/ans/internal/port"
+	"github.com/godaddy/ans/internal/ra/handler"
+	ramiddleware "github.com/godaddy/ans/internal/ra/middleware"
+	"github.com/godaddy/ans/internal/ra/service"
+)
+
+// End-to-end integration tests for Stage 2: list / detail / identity-
+// certs / verify-acme / verify-dns / revoke. Uses the real ports +
+// real SQLite (in-memory) so the assertions exercise the full
+// handler → service → store → back path.
+//
+// Ownership middleware is wired exactly as in cmd/ans-ra/main.go, so
+// the tests also prove the middleware correctly guards each endpoint.
+
+func TestList_EmptyForNewCaller(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: %d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Items         []any   `json:"items"`
+		ReturnedCount int     `json:"returnedCount"`
+		HasMore       bool    `json:"hasMore"`
+		NextCursor    *string `json:"nextCursor"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Items) != 0 {
+		t.Errorf("empty caller should see 0 items; got %d", len(resp.Items))
+	}
+	if resp.HasMore {
+		t.Error("hasMore should be false")
+	}
+}
+
+func TestList_ShowsOnlyCallerOwned(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+
+	// Alice registers one agent; Bob registers two.
+	aliceAgent := fx.registerAgent(t, "alice", "aliceagent.example.com", "1.0.0")
+	bobAgent1 := fx.registerAgent(t, "bob", "bob1.example.com", "1.0.0")
+	bobAgent2 := fx.registerAgent(t, "bob", "bob2.example.com", "2.0.0")
+
+	// Bob should see both of his agents and none of Alice's.
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status=ALL", nil, fx.asOwner("bob"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("bob list status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Items []struct {
+			AgentID string `json:"agentId"`
+		} `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Items) != 2 {
+		t.Fatalf("bob want 2, got %d (%+v)", len(resp.Items), resp.Items)
+	}
+	seen := map[string]bool{}
+	for _, it := range resp.Items {
+		seen[it.AgentID] = true
+	}
+	if !seen[bobAgent1] || !seen[bobAgent2] {
+		t.Errorf("expected both of bob's agents; got %v", seen)
+	}
+	if seen[aliceAgent] {
+		t.Error("bob should NOT see alice's agent")
+	}
+}
+
+func TestList_DefaultFilterIsActive(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Register (status = PENDING_VALIDATION). Default filter is ACTIVE
+	// → should return empty list.
+	fx.registerAgent(t, "alice", "a.example.com", "1.0.0")
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d", rec.Code)
+	}
+	var resp struct {
+		Items []any `json:"items"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp.Items) != 0 {
+		t.Errorf("default=ACTIVE should hide PENDING_VALIDATION agents; got %d items", len(resp.Items))
+	}
+}
+
+func TestList_BadLimitReturns422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents?limit=999", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d", rec.Code)
+	}
+}
+
+func TestDetail_OwnedReturns200(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents/"+agentID, nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		AgentID     string `json:"agentId"`
+		AgentStatus string `json:"agentStatus"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.AgentID != agentID {
+		t.Errorf("agentId: got %q want %q", resp.AgentID, agentID)
+	}
+	if resp.AgentStatus != "PENDING_VALIDATION" {
+		t.Errorf("status: got %q", resp.AgentStatus)
+	}
+}
+
+func TestDetail_NotOwnedReturns404(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents/"+agentID, nil, fx.asOwner("bob"))
+	// Spec: reads return 404 to hide existence.
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestGetIdentityCerts_ReturnsIssuedCertArray(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	// Cert issuance moved to verify-acme — advance the lifecycle so
+	// the identity CSR gets signed and stored.
+	if rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-acme: %d %s", rec.Code, rec.Body)
+	}
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents/"+agentID+"/certificates/identity", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp []struct {
+		CertificatePEM                string `json:"certificatePEM"`
+		CertificateSubject            string `json:"certificateSubject"`
+		CertificateIssuer             string `json:"certificateIssuer"`
+		CertificateSerialNumber       string `json:"certificateSerialNumber"`
+		CertificatePublicKeyAlgorithm string `json:"certificatePublicKeyAlgorithm"`
+		CertificateSignatureAlgorithm string `json:"certificateSignatureAlgorithm"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if len(resp) != 1 {
+		t.Fatalf("want 1 cert, got %d", len(resp))
+	}
+	if !strings.Contains(resp[0].CertificatePEM, "BEGIN CERTIFICATE") {
+		t.Error("cert PEM not in response body")
+	}
+	// Parsed-metadata fields must all be populated — the issued
+	// identity cert is a real X.509 we generate at registration time,
+	// so there's no reason for any of these to come back empty.
+	if resp[0].CertificateSubject == "" {
+		t.Error("subject not populated")
+	}
+	if resp[0].CertificateIssuer == "" {
+		t.Error("issuer not populated")
+	}
+	if resp[0].CertificateSerialNumber == "" {
+		t.Error("serial number not populated")
+	}
+	if resp[0].CertificatePublicKeyAlgorithm == "" {
+		t.Error("public-key algorithm not populated")
+	}
+	if resp[0].CertificateSignatureAlgorithm == "" {
+		t.Error("signature algorithm not populated")
+	}
+}
+
+func TestGetServerCerts_ReturnsIssuedArray(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Default register path uses serverCsrPEM → the server CA signs
+	// at verify-acme → we expect the issued leaf to surface on GET
+	// once the lifecycle has advanced.
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	if rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-acme: %d %s", rec.Code, rec.Body)
+	}
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents/"+agentID+"/certificates/server", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp []struct {
+		CertificatePEM string `json:"certificatePEM"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse: %v body=%s", err, rec.Body)
+	}
+	if len(resp) != 1 {
+		t.Fatalf("want exactly one server cert (issued via CSR path), got %d", len(resp))
+	}
+	if !strings.HasPrefix(resp[0].CertificatePEM, "-----BEGIN CERTIFICATE-----") {
+		t.Errorf("certificatePEM not PEM-encoded: %.40s", resp[0].CertificatePEM)
+	}
+}
+
+func TestGetServerCerts_NotOwnedReturns404(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents/"+agentID+"/certificates/server", nil, fx.asOwner("bob"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// activateAgent drives a fresh registration through verify-acme +
+// verify-dns so subsequent CSR-submission tests can run against an
+// ACTIVE agent. Uses the test router's own routes so the lifecycle
+// state machine is exercised end-to-end.
+func (f *handlerFixture) activateAgent(t *testing.T, ownerID, agentID string) {
+	t.Helper()
+	rec := f.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, f.asOwner(ownerID))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-acme: got %d body=%s", rec.Code, rec.Body)
+	}
+	rec = f.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-dns", nil, f.asOwner(ownerID))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-dns: got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestSubmitIdentityCSR_AcceptsRotation(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	// Rotation CSR — same ANS name so the validator's CN-match rule is satisfied.
+	csrPEM := newTestCSR(t, "ans://v1.0.0.agent.example.com")
+	body, _ := json.Marshal(map[string]any{"csrPEM": csrPEM})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/identity",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		CsrID   string `json:"csrId"`
+		Message string `json:"message"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.CsrID == "" {
+		t.Error("csrId not populated")
+	}
+	if resp.Message == "" {
+		t.Error("message not populated")
+	}
+}
+
+func TestSubmitIdentityCSR_RejectedOnNonActiveAgent(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Newly-registered agent is PENDING_VALIDATION — identity CSR
+	// submission should be rejected per reference's status gate.
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	csrPEM := newTestCSR(t, "ans://v1.0.0.agent.example.com")
+	body, _ := json.Marshal(map[string]any{"csrPEM": csrPEM})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/identity",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 (AGENT_NOT_ACTIVE), got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestSubmitServerCSR_AcceptsRegardlessOfStatus(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Pending agent — server CSRs don't gate on status.
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	// Server CSR — DNS SAN must match agent FQDN.
+	csrPEM := newTestServerCSR(t, "agent.example.com")
+	body, _ := json.Marshal(map[string]any{"csrPEM": csrPEM})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestSubmitCSR_MissingBody_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	// Empty JSON body → no csrPEM field → 422.
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server",
+		bytes.NewReader([]byte(`{}`)), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestGetCSRStatus_ReturnsPendingForFreshSubmission(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	csrPEM := newTestServerCSR(t, "agent.example.com")
+	body, _ := json.Marshal(map[string]any{"csrPEM": csrPEM})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("seed submit: got %d body=%s", rec.Code, rec.Body)
+	}
+	var submit struct {
+		CsrID string `json:"csrId"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &submit)
+
+	rec = fx.request(t, http.MethodGet,
+		"/v2/ans/agents/"+agentID+"/csrs/"+submit.CsrID+"/status",
+		nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status: got %d body=%s", rec.Code, rec.Body)
+	}
+	var status struct {
+		CsrID       string `json:"csrId"`
+		Type        string `json:"type"`
+		Status      string `json:"status"`
+		SubmittedAt string `json:"submittedAt"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &status)
+	if status.CsrID != submit.CsrID {
+		t.Errorf("csrId roundtrip failed: got %q want %q", status.CsrID, submit.CsrID)
+	}
+	if status.Type != "SERVER" {
+		t.Errorf("type: got %q want SERVER", status.Type)
+	}
+	if status.Status != "PENDING" {
+		t.Errorf("status: got %q want PENDING", status.Status)
+	}
+	if status.SubmittedAt == "" {
+		t.Error("submittedAt not populated")
+	}
+}
+
+func TestGetCSRStatus_UnknownCSR_Returns404(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	rec := fx.request(t, http.MethodGet,
+		"/v2/ans/agents/"+agentID+"/csrs/00000000-0000-0000-0000-000000000000/status",
+		nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("want 404, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestSubmitRenewal_RejectedWhenAgentNotActive(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Fresh registration is PENDING_VALIDATION — renewal must 409.
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409 (AGENT_NOT_ACTIVE), got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestSubmitRenewal_CSRPath_202(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("want 202, got %d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		RenewalType string `json:"renewalType"`
+		Status      string `json:"status"`
+		CsrID       string `json:"csrId"`
+		ExpiresAt   string `json:"expiresAt"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.RenewalType != "SERVER_CSR" {
+		t.Errorf("renewalType: got %q want SERVER_CSR", resp.RenewalType)
+	}
+	if resp.Status != "PENDING_VALIDATION" {
+		t.Errorf("status: got %q want PENDING_VALIDATION", resp.Status)
+	}
+	if resp.CsrID == "" {
+		t.Error("csrId missing")
+	}
+	if resp.ExpiresAt == "" {
+		t.Error("expiresAt missing")
+	}
+}
+
+func TestSubmitRenewal_BothInputs_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	// Both serverCsrPEM and serverCertificatePEM set — 422.
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM":         newTestServerCSR(t, "agent.example.com"),
+		"serverCertificatePEM": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
+	})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestSubmitRenewal_DuplicateReturns409(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	// First submission should succeed.
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("first submit: got %d", rec.Code)
+	}
+	// Second submission while the first is pending should 409.
+	body2, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	rec = fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body2), fx.asOwner("alice"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestGetRenewal_ReturnsPendingStatus(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	if rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("seed submit: %d", rec.Code)
+	}
+
+	rec := fx.request(t, http.MethodGet,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("get: %d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "PENDING_VALIDATION" {
+		t.Errorf("status: got %q", resp.Status)
+	}
+}
+
+func TestVerifyRenewal_CSR_Returns200Completed(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	// Seed a CSR renewal.
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	if rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("seed: %d", rec.Code)
+	}
+
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal/verify-acme",
+		nil, fx.asOwner("alice"))
+	// CSR path with a configured server CA issues synchronously at
+	// verify-acme → 200 COMPLETED. Async issuance would return 202
+	// ISSUING_CERTIFICATE; when the async path lands (background
+	// job for slow CAs) this test will need a mode switch.
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify-acme: got %d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "COMPLETED" {
+		t.Errorf("status: got %q want COMPLETED", resp.Status)
+	}
+}
+
+func TestCancelRenewal_DeletesPendingAnd404sAfter(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	body, _ := json.Marshal(map[string]any{
+		"serverCsrPEM": newTestServerCSR(t, "agent.example.com"),
+	})
+	if rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		bytes.NewReader(body), fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("seed: %d", rec.Code)
+	}
+
+	rec := fx.request(t, http.MethodDelete,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("cancel: got %d body=%s", rec.Code, rec.Body)
+	}
+	// Subsequent GET returns 404 — the row's gone.
+	rec = fx.request(t, http.MethodGet,
+		"/v2/ans/agents/"+agentID+"/certificates/server/renewal",
+		nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("get after cancel: got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestVerifyACME_TransitionsToPendingDNS(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-acme status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Phase  string `json:"phase"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "PENDING_DNS" {
+		t.Errorf("status: got %q want PENDING_DNS", resp.Status)
+	}
+	if resp.Phase != "DNS_PROVISIONING" {
+		t.Errorf("phase: got %q want DNS_PROVISIONING", resp.Phase)
+	}
+}
+
+func TestVerifyDNS_ActivatesWhenRecordsMatch(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	// Advance to PENDING_DNS.
+	_ = fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice"))
+
+	// DNSVerifier is noop → treats all records as matching.
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-dns", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-dns status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Status string `json:"status"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "ACTIVE" {
+		t.Fatalf("status: got %q want ACTIVE", resp.Status)
+	}
+
+	// Exactly one outbox row: a single terminal AGENT_REGISTERED
+	// event emitted at the PENDING_DNS → ACTIVE transition. The V1
+	// reference and production TL both use this single-terminal
+	// model — no AGENT_REGISTRATION / DOMAIN_VALIDATION intermediate
+	// events exist on either lane.
+	rows, err := fx.outbox.Claim(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("outbox rows: got %d, want 1 (single AGENT_REGISTERED terminal)", len(rows))
+	}
+	if rows[0].EventType != "AGENT_REGISTERED" {
+		t.Errorf("eventType: got %q, want AGENT_REGISTERED", rows[0].EventType)
+	}
+}
+
+func TestRevoke_TransitionsToRevokedAndEmitsEvent(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	// Walk state to ACTIVE first (revoke requires ACTIVE or DEPRECATED).
+	_ = fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice"))
+	_ = fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-dns", nil, fx.asOwner("alice"))
+
+	body := `{"reason":"KEY_COMPROMISE","comments":"test revoke"}`
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/revoke",
+		bytes.NewReader([]byte(body)), fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("revoke status=%d body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.Status != "REVOKED" {
+		t.Errorf("status: got %q want REVOKED", resp.Status)
+	}
+	if resp.Reason != "KEY_COMPROMISE" {
+		t.Errorf("reason: got %q", resp.Reason)
+	}
+
+	// After the register → verify-acme → verify-dns → revoke walk,
+	// the outbox should carry exactly two terminal events:
+	// AGENT_REGISTERED from the ACTIVE transition and AGENT_REVOKED
+	// from this revoke. Intermediate events don't exist.
+	rows, _ := fx.outbox.Claim(context.Background(), 100)
+	sawRegistered, sawRevoked := false, false
+	for _, row := range rows {
+		switch row.EventType {
+		case "AGENT_REGISTERED":
+			sawRegistered = true
+		case "AGENT_REVOKED":
+			sawRevoked = true
+		}
+	}
+	if !sawRegistered {
+		t.Error("outbox missing AGENT_REGISTERED event")
+	}
+	if !sawRevoked {
+		t.Error("outbox missing AGENT_REVOKED event")
+	}
+}
+
+func TestRevoke_BadReason_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	// Must be ACTIVE first so the "bad reason" path is hit, not the state-machine error.
+	_ = fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice"))
+	_ = fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-dns", nil, fx.asOwner("alice"))
+
+	body := `{"reason":"MADE_UP","comments":"nope"}`
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/revoke",
+		bytes.NewReader([]byte(body)), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422 for bad reason, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestRevoke_NotOwnedReturns403(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+
+	body := `{"reason":"KEY_COMPROMISE"}`
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/revoke",
+		bytes.NewReader([]byte(body)), fx.asOwner("bob"))
+	// Write routes: explicit 403 so operators can distinguish auth
+	// from existence.
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("want 403, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+// ----- fixture -----
+
+type handlerFixture struct {
+	router chi.Router
+	outbox *sqlite.OutboxStore
+	svc    *service.RegistrationService // exposed for direct-handler tests
+}
+
+func newHandlerFixture(t *testing.T) *handlerFixture {
+	t.Helper()
+	dir := t.TempDir()
+
+	db, err := sqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	agents := sqlite.NewAgentStore(db)
+	endpoints := sqlite.NewEndpointStore(db)
+	certsStore := sqlite.NewCertificateStore(db)
+	byoc := sqlite.NewByocCertificateStore(db)
+	renewals := sqlite.NewRenewalStore(db)
+	outbox := sqlite.NewOutboxStore(db)
+
+	identityCA, err := cert.NewSelfCA(dir+"/ca", "Test CA", 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Wire a server CA in the fixture so the default register helper
+	// exercises the serverCsrPEM → sign flow (matching the reference's
+	// default expectation of an RA-signed server cert). BYOC tests
+	// can bypass this via a dedicated helper.
+	serverCA, err := cert.NewServerSelfCA(dir+"/server-ca", "Test Server CA", 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := cert.NewX509Validator(cert.WithSkipChainVerify())
+	bus := eventbus.NewInMemoryBus(zerolog.Nop())
+
+	km, err := keymanager.NewFileKeyManager(dir + "/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := km.EnsureKey(context.Background(), "ra-signer", port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+
+	svc := service.NewRegistrationService(
+		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db,
+	).WithSigner(service.EventSigner{
+		KeyManager: km,
+		KeyID:      "ra-signer",
+		RaID:       "ra-test",
+	}).WithDNSVerifier(dns.NewNoopVerifier()).
+		WithServerCertificateAuthority(serverCA)
+
+	r := chi.NewRouter()
+	regH := handler.NewRegistrationHandler(svc)
+	lifeH := handler.NewLifecycleHandler(svc)
+	readOwn := ramiddleware.ReadOwnership(agents)
+	writeOwn := ramiddleware.WriteOwnership(agents)
+
+	r.Post("/v2/ans/agents", regH.Register)
+	r.Get("/v2/ans/agents", lifeH.List)
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}", lifeH.Detail)
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}/certificates/identity", lifeH.GetIdentityCerts)
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}/certificates/server", lifeH.GetServerCerts)
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}/csrs/{csrId}/status", lifeH.GetCSRStatus)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/verify-acme", lifeH.VerifyACME)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/verify-dns", lifeH.VerifyDNS)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/revoke", lifeH.Revoke)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/certificates/identity", lifeH.SubmitIdentityCSR)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/certificates/server", lifeH.SubmitServerCSR)
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.GetServerCertRenewal)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.SubmitServerCertRenewal)
+	r.With(writeOwn).Delete("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.CancelServerCertRenewal)
+	r.With(writeOwn).Post("/v2/ans/agents/{agentId}/certificates/server/renewal/verify-acme", lifeH.VerifyRenewalACME)
+
+	// V1 RA routes — mount on the same router so V1 handler tests can
+	// reuse the fixture. Shares services with V2; only the DTOs +
+	// URL prefixes differ.
+	v1regH := handler.NewV1RegistrationHandler(svc)
+	r.Post("/v1/agents/register", v1regH.Register)
+	r.With(readOwn).Get("/v1/agents/{agentId}", v1regH.Detail)
+
+	v1lifeH := handler.NewV1LifecycleHandler(svc)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/verify-acme", v1lifeH.VerifyACME)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/verify-dns", v1lifeH.VerifyDNS)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/revoke", v1lifeH.Revoke)
+
+	v1certH := handler.NewV1CertificatesHandler(svc)
+	r.With(readOwn).Get("/v1/agents/{agentId}/certificates/identity", v1certH.GetIdentityCerts)
+	r.With(readOwn).Get("/v1/agents/{agentId}/certificates/server", v1certH.GetServerCerts)
+	r.With(readOwn).Get("/v1/agents/{agentId}/csrs/{csrId}/status", v1certH.GetCSRStatus)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/identity", v1certH.SubmitIdentityCSR)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server", v1certH.SubmitServerCSR)
+
+	v1renH := handler.NewV1RenewalHandler(svc)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server/renewal", v1renH.SubmitServerCertRenewal)
+	r.With(readOwn).Get("/v1/agents/{agentId}/certificates/server/renewal", v1renH.GetServerCertRenewal)
+	r.With(writeOwn).Delete("/v1/agents/{agentId}/certificates/server/renewal", v1renH.CancelServerCertRenewal)
+	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server/renewal/verify-acme", v1renH.VerifyRenewalACME)
+
+	return &handlerFixture{router: r, outbox: outbox, svc: svc}
+}
+
+// asOwner wraps a request with a synthetic Identity matching the
+// given subject. Mimics the auth-provider middleware, which in tests
+// we don't run end-to-end.
+func (f *handlerFixture) asOwner(subject string) func(*http.Request) {
+	return func(r *http.Request) {
+		ctx := auth.WithIdentity(r.Context(), &port.Identity{Subject: subject})
+		*r = *r.WithContext(ctx)
+	}
+}
+
+func (f *handlerFixture) request(t *testing.T, method, path string, body *bytes.Reader, tweak func(*http.Request)) *httptest.ResponseRecorder {
+	t.Helper()
+	var req *http.Request
+	if body == nil {
+		req = httptest.NewRequest(method, path, nil)
+	} else {
+		req = httptest.NewRequest(method, path, body)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if tweak != nil {
+		tweak(req)
+	}
+	rec := httptest.NewRecorder()
+	f.router.ServeHTTP(rec, req)
+	return rec
+}
+
+// registerAgent issues a POST /v2/ans/agents for the given owner and
+// returns the new agentId. Uses the CSR path for the server cert
+// (matching the reference's default registration expectation): an
+// identity CSR with matching URI SAN + a server CSR with matching
+// DNS SAN. The fixture's server CA signs the server CSR.
+func (f *handlerFixture) registerAgent(t *testing.T, ownerID, host, version string) string {
+	t.Helper()
+	identityCSR := newTestCSR(t, "ans://v"+version+"."+host)
+	serverCSR := newTestServerCSR(t, host)
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "Test",
+		"version":          version,
+		"agentHost":        host,
+		"endpoints": []map[string]any{
+			{
+				"agentUrl":   "https://" + host + "/mcp",
+				"protocol":   "MCP",
+				"transports": []string{"SSE"},
+			},
+		},
+		"identityCsrPEM": identityCSR,
+		"serverCsrPEM":   serverCSR,
+	})
+	rec := f.request(t, http.MethodPost, "/v2/ans/agents", bytes.NewReader(body), f.asOwner(ownerID))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("register %s: status=%d body=%s", host, rec.Code, rec.Body)
+	}
+	var resp struct {
+		AgentID string `json:"agentId"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if resp.AgentID == "" {
+		t.Fatal("register returned empty agentId")
+	}
+	// Avoid stale domain state between tests by probing the store
+	// directly when diagnosing failures — but the return is enough.
+	_ = domain.StatusPendingValidation
+	return resp.AgentID
+}

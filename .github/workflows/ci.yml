@@ -1,0 +1,112 @@
+# CI workflow for ans
+# Runs the full quality gate (fmt, vet, lint, coverage with 90%
+# threshold) and race detection on pushes/PRs to main. Mirrors
+# `make check` plus the race detector.
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  # Build all four binaries, enforce formatting, vet, run tests with
+  # coverage (90% gate, enforced by `make test-cover` itself), and run
+  # the race detector. Coverage is computed across internal/* only —
+  # the cmd/* entry points are excluded by the Makefile's test-cover
+  # target.
+  build-and-test:
+    name: Build & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history is required for `git describe --tags --always
+          # --dirty` in the Makefile's VERSION computation.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          # Track the Go directive in go.mod — bumping go.mod alone
+          # is enough to update CI's Go version going forward.
+          go-version-file: go.mod
+
+      - name: Build all binaries
+        run: make build
+
+      - name: Check formatting
+        run: make fmt
+
+      - name: Run go vet
+        run: make vet
+
+      # Enforce the dependency-license allowlist. Strictly permissive
+      # licenses (MIT, Apache-2.0, BSD-2/3, ISC) plus MPL-2.0 — required
+      # transitively via Tessera's golang-lru dependency. This list
+      # matches LF/CNCF Category A scope and blocks any new dep
+      # introducing GPL/AGPL/LGPL/SSPL/BSL or an unclassifiable license
+      # at PR time. Public-domain-style licenses (Unlicense, CC0) are
+      # intentionally excluded — they're legally weaker (PD dedication
+      # is unenforceable in some jurisdictions) and no current dep
+      # uses them, so requiring an explicit allowlist amendment is
+      # the safer default.
+      - name: Check dependency licenses
+        run: |
+          go install github.com/google/go-licenses@latest
+          go-licenses check ./... \
+            --allowed_licenses=MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0
+
+      - name: Run tests with coverage (90% threshold)
+        run: make test-cover
+
+      - name: Run tests with race detector
+        run: make test-race
+
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: coverage-report
+          path: coverage.out
+          retention-days: 30
+
+  # PR-only lint pass using golangci-lint-action for surgical
+  # reviewer feedback. `only-new-issues: true` annotates only the
+  # diff, which is the UX the original template optimized for.
+  # The full-repo lint config is the same .golangci.yml that
+  # `make lint` uses locally.
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          # Full history is required for --new-from-merge-base to work.
+          fetch-depth: 0
+
+      - name: Setup Go
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          # Track the Go directive in go.mod — bumping go.mod alone
+          # is enough to update CI's Go version going forward.
+          go-version-file: go.mod
+
+      - name: Run golangci-lint
+        uses: golangci/golangci-lint-action@1e7e51e771db61008b38414a730f564565cf7c20 # v9.2.0
+        with:
+          # Must match GOLANGCI_LINT_VERSION in the Makefile — gosec,
+          # revive, and prealloc rule sets shifted between 2.10.x and
+          # 2.11.x and a version skew here surfaces as "passes locally,
+          # fails in CI" lint failures. Bump both at once.
+          version: v2.11.4
+          args: --verbose --concurrency=4 --allow-parallel-runners
+          only-new-issues: true

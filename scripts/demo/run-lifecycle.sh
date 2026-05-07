@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+# Walk a fresh agent through the full RA lifecycle, printing every
+# request + response pair in color.
+#
+#   1. POST   /v2/ans/agents                                    (register)
+#   2. GET    /v2/ans/agents/{id}                               (detail, PENDING_VALIDATION — challenges[] only, no dnsRecords yet)
+#   3. POST   /v2/ans/agents/{id}/verify-acme                   (→ PENDING_DNS — issues identity + server certs)
+#   4. GET    /v2/ans/agents/{id}                               (detail, PENDING_DNS — production dnsRecords with real TLSA fingerprint)
+#   5. POST   /v2/ans/agents/{id}/verify-dns                    (→ ACTIVE)
+#   6. GET    /v2/ans/agents/{id}                               (detail, now ACTIVE)
+#   7. GET    /v2/ans/agents?status=ALL                         (list mine)
+#   8. GET    /v2/ans/agents/{id}/certificates/identity         (issued cert)
+#   9. Wait for the outbox worker to push events to the TL
+#  10. GET    TL /v1/agents/{id}/audit                          (history)
+#  11. GET    TL /v1/agents/{id}                                (badge)
+#  12. GET    TL /root-keys                                     (verifier PEMs)
+#  13. GET    TL /v1/agents/{id}/receipt                        (SCITT COSE)
+#  14. go test ./internal/tl/receipt -run TestSmokeVerifyDemoReceipt  (offline verify)
+#  15. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
+#
+# Usage:
+#   scripts/demo/run-lifecycle.sh                            # random host, version 1.0.0
+#   scripts/demo/run-lifecycle.sh myagent.example.com        # specific host, 1.0.0
+#   scripts/demo/run-lifecycle.sh myagent.example.com 2.1.0  # specific host + version
+#   scripts/demo/run-lifecycle.sh ans://v1.0.0.foo.example.com
+#
+# Env (take precedence over positional args):
+#   AGENT_HOST      override the host component
+#   AGENT_VERSION   override the version component (default 1.0.0)
+#
+# Each invocation with no args generates a random host so the demo
+# can be re-run back-to-back without colliding with an ACTIVE agent
+# from a previous run. Passing an explicit host/name is useful for
+# targeted repros — registration will 409 if the (host, version)
+# pair already exists.
+#
+# The resulting agentId is written to data/demo/last-agent-id so
+# revoke.sh can pick it up without arguments.
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=common.sh
+source "$SCRIPT_DIR/common.sh"
+
+# ----- arg parsing -----
+#
+# Positional forms:
+#   $1 = <ans-name>   (starts with "ans://") → parse out host + version
+#   $1 = <host>, $2 = <version optional>
+#
+# Env vars win if set (per POSIX convention for config overrides).
+ARG1="${1:-}"
+ARG2="${2:-}"
+if [[ "$ARG1" == ans://* ]]; then
+  # Strip prefix: ans://v1.0.0.agent.example.com → v1.0.0.agent.example.com
+  rest="${ARG1#ans://}"
+  # Strip leading 'v' then split "1.0.0.agent.example.com" at the first
+  # occurrence of ".<letter>" (the version ends at the first non-digit
+  # label). Easiest robust match: three dot-separated numeric segments.
+  if [[ "$rest" =~ ^v([0-9]+\.[0-9]+\.[0-9]+)\.(.+)$ ]]; then
+    ARG_VERSION="${BASH_REMATCH[1]}"
+    ARG_HOST="${BASH_REMATCH[2]}"
+  else
+    fail "ANS name must be ans://vMAJOR.MINOR.PATCH.host; got $ARG1"
+  fi
+else
+  ARG_HOST="$ARG1"
+  ARG_VERSION="$ARG2"
+fi
+
+AGENT_VERSION="${AGENT_VERSION:-${ARG_VERSION:-1.0.0}}"
+if [ -n "${AGENT_HOST:-}" ]; then
+  :  # env var wins
+elif [ -n "$ARG_HOST" ]; then
+  AGENT_HOST="$ARG_HOST"
+else
+  # Random 8-hex suffix gives 2^32 possible hosts per run — plenty
+  # for back-to-back demo invocations. openssl is already a script
+  # prerequisite (for CSR gen) and avoids the `tr | head` pipeline
+  # whose SIGPIPE on `tr` gets propagated by `set -o pipefail`.
+  AGENT_HOST="demo-$(openssl rand -hex 4).example.com"
+fi
+ANS_NAME="ans://v${AGENT_VERSION}.${AGENT_HOST}"
+
+header "Demo target"
+printf "  ansName   %s\n" "$ANS_NAME" >&2
+printf "  host      %s\n" "$AGENT_HOST" >&2
+printf "  version   %s\n" "$AGENT_VERSION" >&2
+
+# Quick sanity check — the RA has to be up.
+if ! curl -sSf "$RA_URL/v2/admin/ready" >/dev/null 2>&1; then
+  fail "ans-ra isn't reachable at $RA_URL — run scripts/demo/start.sh first"
+fi
+
+# ----- 0. Build a matching CSR -----
+#
+# The RA's X509Validator refuses any CSR whose URI SAN does not match
+# the agent's ANS name, so we generate a fresh EC P-256 key + CSR
+# pair here. The private key is discarded after the demo run — for a
+# real agent it's what the agent uses to authenticate its mTLS
+# connections, so don't copy this pattern to production.
+header "0. Generate identity CSR"
+CSR_DIR="$DATA/csr"
+rm -rf "$CSR_DIR"
+mkdir -p "$CSR_DIR"
+cat >"$CSR_DIR/openssl.cnf" <<CNF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+[req_dn]
+CN = $ANS_NAME
+[v3_req]
+subjectAltName = URI:$ANS_NAME
+CNF
+
+openssl ecparam -name prime256v1 -genkey -noout -out "$CSR_DIR/key.pem" 2>/dev/null
+openssl req -new -key "$CSR_DIR/key.pem" \
+  -config "$CSR_DIR/openssl.cnf" \
+  -out "$CSR_DIR/csr.pem" 2>/dev/null
+CSR_PEM=$(cat "$CSR_DIR/csr.pem")
+ok "CSR for $ANS_NAME written to $CSR_DIR/csr.pem"
+
+# Server CSR (DNS SAN = agent FQDN) — exercises the serverCsrPEM
+# registration path so the RA's server CA signs the TLS cert.
+cat >"$CSR_DIR/server.cnf" <<CNF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+[req_dn]
+CN = $AGENT_HOST
+[v3_req]
+subjectAltName = DNS:$AGENT_HOST
+CNF
+openssl ecparam -name prime256v1 -genkey -noout -out "$CSR_DIR/server.key" 2>/dev/null
+openssl req -new -key "$CSR_DIR/server.key" \
+  -config "$CSR_DIR/server.cnf" \
+  -out "$CSR_DIR/server.csr" 2>/dev/null
+SERVER_CSR_PEM=$(cat "$CSR_DIR/server.csr")
+
+# ----- 1. Register -----
+header "1. POST /v2/ans/agents"
+REG_REQ=$(jq -n \
+  --arg host "$AGENT_HOST" \
+  --arg version "$AGENT_VERSION" \
+  --arg csr "$CSR_PEM" \
+  --arg srvCsr "$SERVER_CSR_PEM" '
+  {
+    agentDisplayName: "demo-agent",
+    agentDescription: "A demo agent",
+    version:          $version,
+    agentHost:        $host,
+    endpoints: [{
+      agentUrl:   ("https://" + $host + "/mcp"),
+      protocol:   "MCP",
+      transports: ["SSE"]
+    }],
+    identityCsrPEM: $csr,
+    serverCsrPEM:   $srvCsr
+  }')
+
+REG_RESP=$(curl_json POST /v2/ans/agents "$REG_REQ")
+AGENT_ID=$(printf '%s' "$REG_RESP" | jq -r '.agentId // empty')
+if [ -z "$AGENT_ID" ]; then
+  fail "no agentId in register response — see the RESP above"
+fi
+echo "$AGENT_ID" >"$DATA/last-agent-id"
+ok "agentId=$AGENT_ID"
+
+# ----- 2. Detail (pending) -----
+header "2. GET /v2/ans/agents/$AGENT_ID  (expect PENDING_VALIDATION)"
+curl_json GET "/v2/ans/agents/$AGENT_ID" >/dev/null
+
+# ----- 3. verify-acme -----
+#
+# Cert issuance happens here, NOT at register: the RA only signs the
+# identity + server CSRs once the operator has proven domain control
+# via the ACME DNS-01 challenge. This is also when production DNS
+# records (TRUST/BADGE/DISCOVERY/TLSA) become computable — TLSA's
+# value is `3 1 1 SHA-256(server-cert-SPKI)`, so it can't exist before
+# the server cert does.
+header "3. POST /v2/ans/agents/$AGENT_ID/verify-acme  (→ PENDING_DNS, issues identity + server certs)"
+curl_json POST "/v2/ans/agents/$AGENT_ID/verify-acme" >/dev/null
+assert_2xx "verify-acme"
+
+# ----- 4. Detail (pending DNS) -----
+#
+# Now that verify-acme has issued the server cert, the GET detail
+# response surfaces the full production record set the operator must
+# publish before verify-dns will succeed: DISCOVERY (TXT routing
+# pointer), BADGE (TXT public discovery hint), and TLSA (cert
+# binding, fingerprint pinned to the just-issued server leaf).
+# Calling out this step explicitly so a demo viewer can see exactly
+# which records to publish — production agents' SDKs do the same
+# read between verify-acme and verify-dns.
+header "4. GET /v2/ans/agents/$AGENT_ID  (PENDING_DNS — production dnsRecords now materialized)"
+curl_json GET "/v2/ans/agents/$AGENT_ID" >/dev/null
+
+# ----- 5. verify-dns -----
+header "5. POST /v2/ans/agents/$AGENT_ID/verify-dns  (→ ACTIVE)"
+# When ans-dns is bundled with this demo (see scripts/demo/start.sh
+# --with-dns), install the agent's DNS records into the local
+# authoritative server before calling verify-dns so the lookup
+# succeeds against real wire-format responses. Falls through to
+# noop behavior when ANS_DNS_ZONE is unset.
+if [ -n "${ANS_DNS_ZONE:-}" ] && [ -x "$BIN/ans-dns" ]; then
+  note "installing agent records into $ANS_DNS_ZONE via ans-dns"
+  "$BIN/ans-dns" install --zone "$ANS_DNS_ZONE" --api-key "$RA_API_KEY" "$RA_URL" "$AGENT_ID"
+else
+  note "noop DNS verifier accepts any operator DNS state; production plugs in a real verifier"
+fi
+curl_json POST "/v2/ans/agents/$AGENT_ID/verify-dns" >/dev/null
+assert_2xx "verify-dns"
+
+# ----- 6. Detail (active) -----
+header "6. GET /v2/ans/agents/$AGENT_ID  (now ACTIVE)"
+curl_json GET "/v2/ans/agents/$AGENT_ID" >/dev/null
+
+# ----- 7. List -----
+header "7. GET /v2/ans/agents?status=ALL  (list mine)"
+curl_json GET "/v2/ans/agents?status=ALL" >/dev/null
+
+# ----- 8. Identity certs -----
+header "8. GET /v2/ans/agents/$AGENT_ID/certificates/identity"
+curl_json GET "/v2/ans/agents/$AGENT_ID/certificates/identity" >/dev/null
+
+# ----- 9. Wait for outbox worker -----
+#
+# The single terminal AGENT_REGISTERED event fires at verify-dns
+# ACTIVE transition — matching the reference TL and production's
+# one-leaf-per-lifecycle model. The outbox worker polls on
+# cfg.tl-client.poll-interval (default 2s) and POSTs it to the TL.
+# Wait for the leaf to show up on the audit endpoint before
+# continuing, keeping the demo deterministic without "sleep enough".
+header "9. Wait for outbox worker to push the AGENT_REGISTERED event to the TL"
+poll_tl_audit "$AGENT_ID" 1 30
+ok "TL received the AGENT_REGISTERED leaf"
+
+# ----- 10. TL audit -----
+header "10. TL: GET /v1/agents/$AGENT_ID/audit"
+curl_tl GET "/v1/agents/$AGENT_ID/audit" >/dev/null
+
+# ----- 11. TL badge -----
+header "11. TL: GET /v1/agents/$AGENT_ID (badge)"
+curl_tl GET "/v1/agents/$AGENT_ID" >/dev/null
+
+# ----- 12. TL root keys -----
+#
+# Sumdb-note verification lines for every active TL verifier — one
+# line per key, format `<origin>+<keyhash-hex>+<base64-DER>`. A
+# verifier fetches this once at session start and caches it;
+# rotation adds a new line while the old one stays trusted.
+header "12. TL: GET /root-keys  (verifier keys, sumdb-note format)"
+ROOT_KEYS_FILE="$DATA/root-keys.txt"
+curl_tl_text GET "/root-keys" >"$ROOT_KEYS_FILE"
+assert_2xx "GET /root-keys"
+key_count=$(grep -cv '^[[:space:]]*$' "$ROOT_KEYS_FILE" || true)
+ok "root-keys saved to $ROOT_KEYS_FILE ($key_count verification line(s))"
+
+# ----- 13. TL receipt -----
+#
+# SCITT COSE_Sign1 receipt — binary CBOR, tag 18, ES256 signature
+# over the event's canonical bytes. The response is NOT JSON; we
+# save it to disk so a verifier (internal/tl/receipt/verify.go)
+# can round-trip it against root-keys.txt.
+header "13. TL: GET /v1/agents/$AGENT_ID/receipt  (SCITT COSE_Sign1)"
+RECEIPT_FILE="$DATA/receipt.cbor"
+receipt_status=$(curl_tl_binary GET "/v1/agents/$AGENT_ID/receipt" "$RECEIPT_FILE")
+if [ "$receipt_status" = "200" ]; then
+  receipt_bytes=$(wc -c <"$RECEIPT_FILE" | tr -d ' ')
+  # First byte should be 0xd2 (CBOR tag 18 = COSE_Sign1) — a quick
+  # sanity check that we got bytes, not accidentally JSON. `od`
+  # avoids requiring `xxd` which isn't always installed.
+  first_byte=$(od -An -tx1 -N1 "$RECEIPT_FILE" | tr -d ' \n')
+  ok "receipt saved to $RECEIPT_FILE (${receipt_bytes} bytes, first byte=0x${first_byte}, want 0xd2 for COSE_Sign1 tag 18)"
+  # Close the loop — run the ans-verify CLI. Fetches root-keys,
+  # decodes the CBOR, extracts the inclusion proof, walks the path
+  # to the stored root hash, and ECDSA-verifies the signature with
+  # KID-direct key lookup. Also cross-checks the receipt's leaf hash
+  # against the badge's merkleProof. If this passes, any third-party
+  # verifier talking only HTTP to the TL can cryptographically prove
+  # inclusion — matching the reference ans-verify binary byte-for-byte
+  # in flow and format.
+  header "14. Offline verify (bin/ans-verify)"
+  if "$ROOT/bin/ans-verify" -url "$TL_URL" -agent "$AGENT_ID" >&2; then
+    ok "ans-verify passed"
+  else
+    fail "ans-verify FAILED — receipt bytes or root-keys are wrong"
+  fi
+elif [ "$receipt_status" = "503" ]; then
+  warn "receipt 503 — checkpoint has not yet covered the leaf; retry in a few seconds"
+else
+  fail "unexpected receipt status $receipt_status; see $RECEIPT_FILE"
+fi
+
+# ----- 15. Admin producer-keys API -----
+#
+# Stage 4 moved the producer-key trust store from YAML-only to
+# SQLite with admin CRUD. The YAML producerKeys[] section still works
+# as a bootstrap path (keys are upserted into tl_producer_keys at
+# startup), but runtime rotation now flows through the admin API.
+# This step confirms:
+#   (a) the admin auth works (we're hitting /v2/admin/* with the
+#       static API key, which maps to IsAdmin=true);
+#   (b) the bootstrapped RA signer is actually in SQLite;
+#   (c) the list response is the shape admin tooling will consume.
+header "15. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
+curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
+
+# ----- summary -----
+header "Lifecycle complete (both sides)"
+printf "  agentId     %s\n" "$AGENT_ID" >&2
+printf "  ansName     %s\n" "$ANS_NAME" >&2
+printf "  saved to    %s\n" "$DATA/last-agent-id" >&2
+printf "  root-keys   %s\n" "$ROOT_KEYS_FILE" >&2
+printf "  receipt     %s\n" "$RECEIPT_FILE" >&2
+printf "\n" >&2
+printf "  revoke:     %s\n" "scripts/demo/revoke.sh" >&2

@@ -1,0 +1,930 @@
+openapi: 3.0.3
+info:
+  title: ANS Transparency Log API
+  version: "2.0.0"
+  description: |
+    OpenAPI contract for the ANS Transparency Log (`ans-tl`). Paths
+    match the reference TL's swagger byte-for-byte — `/v1/agents/*`,
+    `/v1/log/*`, `/v1/internal/*`, C2SP tlog-tiles at root
+    (`/checkpoint`, `/root-keys`, `/tile/*`), and
+    `/internal/v1/producer-keys/*` for admin CRUD.
+
+    Behavioral parity with the reference TL:
+
+      - Event envelope is the V2 shape — nested `{payload:{logId,
+        producer:{event, keyId, signature}}, schemaVersion:"V2",
+        signature, status}`. V2 evolves the reference V1 with
+        unified `identityCerts[]` / `serverCerts[]` arrays, typed
+        `dnsRecordsProvisioned[]` records, and `SHA256:`-prefixed
+        fingerprints. V0 + V1 schemas are served for historical
+        verifier backwards compatibility (never emitted).
+      - Receipts are SCITT COSE_Sign1 (RFC 8152 tag 18) with VDS 1
+        (RFC 9162_SHA256) and the VDP inclusion proof in the
+        unprotected header (label 396). See
+        `internal/tl/receipt/constants.go` for the concrete labels.
+      - `/root-keys` emits the sumdb-note verification format
+        byte-for-byte compatible with the reference.
+      - `/internal/v1/producer-keys` admin routes match the reference
+        swagger.yaml snake_case DTOs; the only ans-only extension is
+        `GET /internal/v1/producer-keys/{key_id}` (reference doesn't
+        expose single-record lookup).
+
+servers:
+  - url: http://localhost:18081
+    description: local dev (quickstart)
+
+# ────────────────────────────────────────────────────────────────
+# Tags group routes in generated docs by audience.
+# ────────────────────────────────────────────────────────────────
+tags:
+  - name: Transparency Log
+    description: Producer ingest + verifier reads.
+  - name: Tlog Tiles
+    description: Merkle tree + checkpoint static files (RFC 6962-inspired layout).
+  - name: Admin
+    description: Producer-key CRUD. Gated by the `RequireAdmin` middleware.
+  - name: Health
+    description: Liveness + readiness.
+
+# Global security requirement. Most routes require it; the
+# verifier GETs under /v1/agents/ + /v1/log/ + the root-level
+# tlog-tiles paths (/checkpoint, /root-keys, /tile/*) are
+# anonymous when cfg.auth.public-read is true. The actual
+# middleware behaviour is described in CLAUDE.md §Auth.
+security:
+  - bearerAuth: []
+
+paths:
+  # ──────────────────────────────────────────────────────────────
+  # Transparency Log — ingest
+  # ──────────────────────────────────────────────────────────────
+  /v1/internal/agents/event:
+    post:
+      tags: [Transparency Log]
+      summary: Append a signed event to the log
+      description: |
+        Accepts a JCS-canonicalized producer-event body signed with a
+        detached JWS (`X-Signature` header). Successful appends return
+        the Tessera-assigned leaf index and hash; duplicate submissions
+        (same SHA-256(inner event JCS)) return 200 with the original
+        leaf so outbox retries are idempotent.
+      operationId: appendEvent
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          description: |
+            Detached JWS compact serialization over the raw request
+            body. Header shape:
+            `{alg:ES256, kid:<producer-keyId>, typ:JWT, timestamp:<unix-seconds>, raid:<raId>}`.
+            The `raid` value must match the `raId` in the body.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: JCS-canonicalized inner producer event (≤ 256 KiB).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProducerEvent'
+      responses:
+        '200':
+          description: |
+            Event logged. On a duplicate submission (identical
+            inner-event JCS hash) the response carries
+            `duplicate: true` + the pre-existing leaf so retries are
+            idempotent. Matches the reference TL's status-code and
+            body shape.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppendResponse'
+        '413':
+          description: Request body exceeds 256 KiB.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Body fails validation. Codes include
+            `NO_PRODUCER_SIGNATURE`, `INVALID_SIGNATURE_HEADER`,
+            `NOT_FOUND_PRODUCER_KEY`, `INVALID_PRODUCER_KEY`,
+            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  # ──────────────────────────────────────────────────────────────
+  # Transparency Log — verifier reads (public under public-read)
+  # ──────────────────────────────────────────────────────────────
+  /v1/agents/{agentId}:
+    get:
+      tags: [Transparency Log]
+      summary: Current badge for an agent
+      description: |
+        Returns the reference-shaped TransparencyLog envelope for the
+        agent's most recent event — including the full inclusion
+        proof so clients can verify without a separate tile walk.
+      operationId: getBadge
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Badge retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransparencyLog'
+        '404':
+          description: No events for this agent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/agents/{agentId}/audit:
+    get:
+      tags: [Transparency Log]
+      summary: Paginated audit history for an agent
+      operationId: getAudit
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Audit records, newest-first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransparencyLogAudit'
+
+  /v1/agents/{agentId}/receipt:
+    get:
+      tags: [Transparency Log]
+      summary: SCITT COSE_Sign1 receipt for the agent's latest event
+      description: |
+        Returns the CBOR-encoded COSE_Sign1 receipt (RFC 8152 tag 18)
+        containing an RFC 9162 inclusion proof in the VDP header
+        (label 396). The `kid` in the protected header is a 4-byte
+        SHA-256 prefix of the signing SPKI-DER — cross-reference it
+        with `/root-keys` to identify the verifier key.
+        Response body is binary CBOR; do not attempt to parse as JSON.
+      operationId: getReceipt
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Receipt CBOR bytes.
+          content:
+            application/scitt-receipt+cose:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: No events for this agent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: |
+            The leaf has been appended but no signed checkpoint yet
+            covers it. Retry after the `Retry-After` delay.
+          headers:
+            Retry-After:
+              description: Seconds to wait before retrying.
+              schema:
+                type: integer
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/agents/{agentId}/status-token:
+    get:
+      tags: [Transparency Log]
+      summary: Signed status token for offline state verification
+      description: |
+        Returns a short-lived COSE_Sign1 status token (CBOR tag 18)
+        asserting the agent's current lifecycle state plus enough
+        identity data (cert fingerprints, metadata hashes) that
+        verifiers can check a connection without hitting the badge
+        endpoint. AHPs fetch this every ~30 minutes and staple it
+        alongside the receipt in the Agent Card — analogous to OCSP
+        stapling in TLS.
+
+        Content-Type: `application/ans-status-token+cbor`.
+        Do not attempt to parse as JSON.
+      operationId: getStatusToken
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Binary CBOR status token.
+          content:
+            application/ans-status-token+cbor:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: No events for this agent.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '410':
+          description: |
+            Agent is in a terminal state (EXPIRED or REVOKED). Status
+            tokens are not issued for terminal-state agents; stop
+            polling and fall back to the badge for final status.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '501':
+          description: |
+            Status tokens are not enabled on this deployment. Clients
+            should disable status-token polling for this TL.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  # ──────────────────────────────────────────────────────────────
+  # Log static artefacts + verifier keys (public under public-read)
+  # ──────────────────────────────────────────────────────────────
+  /root-keys:
+    get:
+      tags: [Tlog Tiles]
+      summary: Active TL verification keys
+      description: |
+        Returns the active verifier keys for the log in the
+        sumdb-note verification format — one key per line:
+
+            <origin>+<keyhash-hex>+<base64(0x02 || SPKI-DER)>\n
+
+        Where `keyhash-hex` is the first 4 bytes of SHA-256(SPKI-DER)
+        as a zero-padded 8-char hex string. This matches the `kid`
+        field in each receipt's COSE protected header, enabling
+        O(1) kid-to-key lookup during verification.
+      operationId: getRootKeys
+      responses:
+        '200':
+          description: Verification-key lines, newline-separated.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /checkpoint:
+    get:
+      tags: [Tlog Tiles]
+      summary: Latest signed checkpoint (sumdb note format)
+      description: |
+        Signed checkpoint note produced by Tessera using the
+        ed25519 signer in `note.pub`. Format matches
+        `golang.org/x/mod/sumdb/note` — clients verify with the
+        key advertised at `/root-keys` (or pulled from the
+        `note.pub` file the operator publishes). Matches C2SP
+        tlog-tiles spec exactly.
+      operationId: getCheckpoint
+      responses:
+        '200':
+          description: Checkpoint note bytes.
+          content:
+            text/plain:
+              schema:
+                type: string
+
+  /v1/log/checkpoint:
+    get:
+      tags: [Tlog Tiles]
+      summary: Latest checkpoint (JSON projection)
+      description: |
+        JSON-encoded view of the same checkpoint served at
+        `/checkpoint` as raw note text. Exposes size, height, root
+        hash (base64), origin, format, body text, and signatures —
+        one entry per signer. Reference swagger §310.
+      operationId: getCheckpointJSON
+      responses:
+        '200':
+          description: Parsed checkpoint metadata.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointResponse'
+
+  /v1/log/checkpoint/history:
+    get:
+      tags: [Tlog Tiles]
+      summary: Paginated checkpoint history
+      description: |
+        Returns checkpoints stored by the TL with optional
+        tree-size and time filters. Reference default is 10 per
+        page, DESC by tree_size; maximum 100 per page. Matches
+        reference swagger §342 byte-for-byte.
+      operationId: getCheckpointHistory
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 10, minimum: 1, maximum: 100 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
+        - name: fromSize
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: toSize
+          in: query
+          required: false
+          schema: { type: integer, format: int64, minimum: 1 }
+        - name: since
+          in: query
+          required: false
+          schema: { type: string, format: date-time }
+        - name: order
+          in: query
+          required: false
+          schema: { type: string, enum: [ASC, DESC], default: DESC }
+      responses:
+        '200':
+          description: Paginated list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CheckpointHistoryResponse'
+        '422':
+          description: Invalid query parameters.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/log/schema/{version}:
+    get:
+      tags: [Tlog Tiles]
+      summary: TL event JSON schema for a given version
+      description: |
+        Returns the JSON schema for the requested TL event version.
+        V0 and V1 bodies are the production schemas fetched from
+        `transparency.ans.godaddy.com/v1/log/schema/{V0,V1}`,
+        served here for historical-verifier backwards compatibility.
+        V2 is the shape *this* server emits on the wire (evolution
+        of V1 with unified cert arrays + typed DNS records). Matches
+        reference swagger §424.
+      operationId: getSchemaByVersion
+      parameters:
+        - name: version
+          in: path
+          required: true
+          schema:
+            type: string
+            enum: [V0, V1, V2]
+      responses:
+        '200':
+          description: Embedded JSON schema document.
+          content:
+            application/json:
+              schema:
+                type: object
+        '404':
+          description: Unknown schema version.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /tile/{level}/{index}:
+    get:
+      tags: [Tlog Tiles]
+      summary: Complete Merkle tile (256 hashes)
+      description: |
+        C2SP tlog-tiles complete tile — 256 node hashes concatenated
+        as raw bytes (no framing). Served directly from Tessera's
+        POSIX layout.
+      operationId: getCompleteTile
+      parameters:
+        - name: level
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Raw tile bytes (binary).
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: Tile not found.
+
+  /tile/{level}/{index}.p/{width}:
+    get:
+      tags: [Tlog Tiles]
+      summary: Partial Merkle tile (1-255 hashes)
+      description: |
+        A partial tile at the growing frontier of the tree. `width`
+        is 1-255 and counts the number of hashes actually present.
+      operationId: getPartialTile
+      parameters:
+        - name: level
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: width
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 255 }
+      responses:
+        '200':
+          description: Raw tile bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: Tile not found.
+
+  /tile/entries/{index}:
+    get:
+      tags: [Tlog Tiles]
+      summary: Complete entry tile (256 leaves)
+      operationId: getCompleteEntryTile
+      parameters:
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+      responses:
+        '200':
+          description: Raw entry-tile bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: Entry tile not found.
+
+  /tile/entries/{index}.p/{width}:
+    get:
+      tags: [Tlog Tiles]
+      summary: Partial entry tile (1-255 leaves)
+      operationId: getPartialEntryTile
+      parameters:
+        - name: index
+          in: path
+          required: true
+          schema: { type: integer, minimum: 0 }
+        - name: width
+          in: path
+          required: true
+          schema: { type: integer, minimum: 1, maximum: 255 }
+      responses:
+        '200':
+          description: Raw entry-tile bytes.
+          content:
+            application/octet-stream:
+              schema: { type: string, format: binary }
+        '404':
+          description: Entry tile not found.
+
+  # ──────────────────────────────────────────────────────────────
+  # Admin: producer-key CRUD (byte-for-byte reference swagger parity)
+  # ──────────────────────────────────────────────────────────────
+  /internal/v1/producer-keys:
+    post:
+      tags: [Admin]
+      summary: Register a new producer key
+      operationId: createProducerKey
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProducerKeyRequest'
+      responses:
+        '200':
+          description: Key registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProducerKeyResponse'
+        '401': { description: Unauthorized }
+        '403': { description: Admin privileges required }
+        '409':
+          description: Producer key with this key_id already exists.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Validation failed. Codes: `INVALID_DATE_RANGE`,
+            `INVALID_PUBLIC_KEY_PEM`, `BAD_JSON`, `BAD_BODY`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /internal/v1/producer-keys/ra/{ra_id}:
+    get:
+      tags: [Admin]
+      summary: List producer keys by RA
+      operationId: listProducerKeysByRaId
+      parameters:
+        - name: ra_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Keys for the RA (includes revoked rows for audit).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProducerKeysListResponse'
+        '401': { description: Unauthorized }
+        '403': { description: Admin privileges required }
+        '404':
+          description: No producer keys found for this RA ID.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /internal/v1/producer-keys/{key_id}:
+    get:
+      tags: [Admin]
+      summary: Fetch a single producer key by ID (ans-only extension)
+      description: |
+        Not in the reference swagger. Added as a convenience for admin
+        CLIs that already hold a key_id (e.g., after a successful
+        create) and want to read it back without listing-by-ra.
+      operationId: getProducerKey
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: Key record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProducerKeyResponse'
+        '401': { description: Unauthorized }
+        '403': { description: Admin privileges required }
+        '404':
+          description: No such key_id.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+    delete:
+      tags: [Admin]
+      summary: Revoke a producer key
+      operationId: deleteProducerKey
+      parameters:
+        - name: key_id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '204':
+          description: Key revoked.
+        '401': { description: Unauthorized }
+        '403': { description: Admin privileges required }
+        '404':
+          description: Key not found or already revoked.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  # ──────────────────────────────────────────────────────────────
+  # Health
+  # ──────────────────────────────────────────────────────────────
+  /v2/admin/health:
+    get:
+      tags: [Health]
+      summary: Liveness
+      operationId: health
+      responses:
+        '200':
+          description: Service is up.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+
+  /v2/admin/ready:
+    get:
+      tags: [Health]
+      summary: Readiness
+      operationId: ready
+      responses:
+        '200':
+          description: Service is ready to accept traffic.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ready
+
+# ────────────────────────────────────────────────────────────────
+# Reusable components
+# ────────────────────────────────────────────────────────────────
+components:
+  # Security schemes. Same shape as the RA spec — static API key
+  # and OIDC tokens both travel as `Authorization: Bearer <token>`,
+  # so one HTTP-bearer definition covers both. Swagger UI's
+  # "Authorize" button reads this. Quickstart default token is
+  # `tl-internal-key` (from config/tl-local.yaml).
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Static API key or OIDC bearer token. Admin routes
+        (`/internal/v1/producer-keys/*`) also require the caller to
+        be an admin — static keys are always admin in the
+        quickstart; OIDC tokens inherit admin-ness from the
+        configured admin-groups list. Verifier GETs are anonymous
+        when `cfg.auth.public-read: true`.
+
+  parameters:
+    AgentIdPath:
+      name: agentId
+      in: path
+      required: true
+      description: Immutable agent UUID.
+      schema:
+        type: string
+        format: uuid
+
+  schemas:
+    # ── Ingest ─────────────────────────────────────────────────
+    ProducerEvent:
+      type: object
+      description: |
+        The canonical inner-event shape an RA POSTs. Must be
+        JCS-canonicalized when signed; the server validates the
+        signature over the raw request body and re-canonicalizes.
+      required: [ansId, ansName, eventType, timestamp, raId, agent]
+      properties:
+        ansId:      { type: string, format: uuid }
+        ansName:    { type: string, example: "ans://v1.0.0.agent.example.com" }
+        eventType:
+          type: string
+          enum: [AGENT_REGISTRATION, DOMAIN_VALIDATION, AGENT_ACTIVE, AGENT_REVOCATION]
+        raId:       { type: string, example: "ans-ra-local" }
+        issuedAt:   { type: string, format: date-time }
+        timestamp:  { type: string, format: date-time }
+        agent:
+          type: object
+          required: [host, name, version]
+          properties:
+            host:    { type: string }
+            name:    { type: string }
+            version: { type: string }
+        attestations:
+          type: object
+          description: Event-type specific attestation payload.
+
+    AppendResponse:
+      type: object
+      description: |
+        `logId`, `message`, and `success` match the reference TL's
+        AgentEventResponse byte-for-byte. `leafIndex`, `leafHashHex`,
+        `duplicate`, and `treeSize` are ans-specific additions that
+        expose the Merkle-tree position to callers who want to fetch a
+        receipt without a second round-trip.
+      required: [leafIndex, leafHashHex, duplicate, treeSize]
+      properties:
+        logId:       { type: string, format: uuid, description: "UUIDv7 assigned on first append; echoed on duplicate retry." }
+        message:     { type: string, description: "Human-readable status message." }
+        success:     { type: boolean, description: "Always true for 200 responses." }
+        leafIndex:   { type: integer, format: int64 }
+        leafHashHex: { type: string, description: "RFC 6962 leaf hash (hex)" }
+        duplicate:   { type: boolean }
+        treeSize:    { type: integer, format: int64 }
+
+    # ── Badge + audit ─────────────────────────────────────────
+    TransparencyLog:
+      type: object
+      description: |
+        Reference-shaped envelope carrying one event + its inclusion
+        proof. The `payload` field matches the signed-envelope
+        payload shape (`logId` + `producer`).
+      required: [payload, schemaVersion, signature, status, merkleProof]
+      properties:
+        merkleProof:
+          $ref: '#/components/schemas/MerkleProof'
+        payload:
+          type: object
+          required: [logId, producer]
+          properties:
+            logId: { type: string, format: uuid }
+            producer:
+              type: object
+              required: [event, keyId, signature]
+              properties:
+                event:     { $ref: '#/components/schemas/ProducerEvent' }
+                keyId:     { type: string }
+                signature: { type: string, description: "Detached JWS" }
+        schemaVersion: { type: string, enum: [V2] }
+        signature:     { type: string, description: "TL attestation (detached JWS)" }
+        status:
+          type: string
+          enum: [ACTIVE, REVOKED, DEPRECATED]
+
+    TransparencyLogAudit:
+      type: object
+      required: [records]
+      properties:
+        records:
+          type: array
+          items:
+            $ref: '#/components/schemas/TransparencyLog'
+
+    MerkleProof:
+      type: object
+      required: [leafIndex, treeSize, leafHash, rootHash, path]
+      properties:
+        leafIndex:   { type: integer, format: int64 }
+        treeSize:    { type: integer, format: int64 }
+        leafHash:    { type: string, description: "hex" }
+        rootHash:    { type: string, description: "standard base64" }
+        path:
+          type: array
+          items:
+            type: string
+            description: "standard base64 of each sibling hash in order"
+        treeVersion: { type: integer }
+
+    # ── Admin: producer keys ───────────────────────────────────
+    ProducerKeyRequest:
+      type: object
+      required: [key_id, public_key_pem, algorithm, ra_id, valid_from, expires_at]
+      properties:
+        key_id:         { type: string }
+        public_key_pem: { type: string, description: "PEM-wrapped SPKI" }
+        algorithm:      { type: string, enum: [ES256] }
+        ra_id:          { type: string }
+        valid_from:     { type: string, format: date-time }
+        expires_at:     { type: string, format: date-time }
+        metadata:
+          $ref: '#/components/schemas/ProducerKeyMetadata'
+
+    ProducerKeyResponse:
+      type: object
+      required: [key_id, status, fingerprint, created_at]
+      properties:
+        key_id:         { type: string }
+        key_id_opaque:  { type: string, nullable: true }
+        ra_id_opaque:   { type: string, nullable: true }
+        status:         { type: string, enum: [active, revoked] }
+        fingerprint:    { type: string, example: "SHA256:<hex>" }
+        created_at:     { type: string, format: date-time }
+        # Fields repeated on the full record (returned by GET-by-id
+        # + present on list items — matches reference §1481).
+        public_key_pem: { type: string }
+        algorithm:      { type: string }
+        ra_id:          { type: string }
+        valid_from:     { type: string, format: date-time }
+        expires_at:     { type: string, format: date-time }
+        revoked_at:     { type: string, format: date-time, nullable: true }
+        metadata:
+          $ref: '#/components/schemas/ProducerKeyMetadata'
+
+    ProducerKeyMetadata:
+      type: object
+      description: Free-form JSON; reference uses environment/region/rotation_of.
+      additionalProperties: true
+      properties:
+        environment: { type: string, enum: [production, stage, development, testing] }
+        region:      { type: string }
+        rotation_of: { type: string, nullable: true }
+
+    ProducerKeysListResponse:
+      type: object
+      required: [keys, total_count]
+      properties:
+        keys:
+          type: array
+          items:
+            $ref: '#/components/schemas/ProducerKeyResponse'
+        total_count:
+          type: integer
+          format: int64
+
+    # ── Checkpoint JSON shapes ────────────────────────────────
+    CheckpointResponse:
+      type: object
+      required: [logSize, rootHash, originName, checkpointFormat, checkpointText, createdAt, signatures]
+      properties:
+        logSize:          { type: integer, format: int64 }
+        treeHeight:       { type: integer }
+        rootHash:         { type: string, description: "standard base64" }
+        originName:       { type: string }
+        checkpointFormat: { type: string, example: "c2sp-tlog/v1" }
+        checkpointText:
+          type: string
+          description: |
+            Note body (origin header + size + root hash + blank line
+            terminator) without signature lines; verifiers re-hash
+            this to check signatures.
+        publicKeyPem:
+          type: string
+          description: |
+            PEM-encoded SPKI of the primary (sumdb-note) signer. Lets
+            verifiers check the primary signature line without a
+            second fetch against `/root-keys`.
+        createdAt:
+          type: string
+          format: date-time
+          description: |
+            Wall-clock time at which the TL persisted the checkpoint
+            row. ans-specific field; reference clients ignore it.
+        signatures:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckpointSignature'
+
+    CheckpointSignature:
+      type: object
+      description: |
+        One signature line on a checkpoint. Matches the reference TL's
+        CheckpointSignature wire shape byte-for-byte:
+        `signatureType` is lowercase (`c2sp` | `jws`), `keyHash` is
+        the `0x`-prefixed 8-char hex of the 4-byte keyhash (matching
+        `/root-keys`), `kmsKeyId` carries the opaque key identifier
+        on JWS entries. `jwsHeader`, `jwsPayload`, `jwsSignature`,
+        `timestamp`, and `kmsKeyId` are only populated for `jws`
+        entries. `valid` is the read-time verification result.
+      required: [signerName, signatureType, algorithm, rawSignature]
+      properties:
+        algorithm:     { type: string, example: ES256 }
+        jwsHeader:     { description: "Decoded JWS protected header (jws entries only)" }
+        jwsPayload:    { description: "Decoded JWS payload (jws entries only)" }
+        jwsSignature:  { type: string, description: "Full compact JWS `header.payload.signature` (jws entries only)" }
+        keyHash:       { type: string, description: "`0x`-prefixed 8-char hex keyhash; matches the `/root-keys` entry" }
+        kmsKeyId:      { type: string, description: "Opaque key identifier on jws entries (same value the JWS `kid` header carries)" }
+        rawSignature:  { type: string, description: "base64-encoded raw signature bytes (`<keyhash:4> || <sig>`)" }
+        signatureType: { type: string, enum: [c2sp, jws] }
+        signerName:    { type: string }
+        timestamp:     { type: string, format: date-time, description: "Timestamp claim from the JWS (jws entries only)" }
+        valid:         { type: boolean, description: "Signature verified against the TL signing key at read time." }
+
+    CheckpointHistoryResponse:
+      type: object
+      required: [checkpoints, pagination]
+      properties:
+        checkpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/CheckpointResponse'
+        pagination:
+          type: object
+          required: [total]
+          properties:
+            total:      { type: integer, format: int64 }
+            nextOffset: { type: integer, nullable: true }
+
+    # ── Errors ────────────────────────────────────────────────
+    Problem:
+      type: object
+      description: RFC 7807 problem details.
+      properties:
+        type:   { type: string, example: "about:blank" }
+        title:  { type: string }
+        status: { type: integer }
+        code:   { type: string, pattern: "^[A-Z_][A-Z0-9_]*$" }
+        detail: { type: string }

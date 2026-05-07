@@ -1,0 +1,49 @@
+server:
+  host: "0.0.0.0"
+  port: 18081
+
+auth:
+  type: static
+  static:
+    api-key: "tl-internal-key"        # RA authenticates to TL with this key
+  public-read: true                    # Allow unauthenticated reads on /agents, /log/*
+
+keys:
+  type: file
+  file:
+    path: "./data/tl/keys"
+
+store:
+  type: sqlite
+  sqlite:
+    path: "./data/tl/tl.db"
+
+merkle:
+  origin: "ans-local-dev"
+  tile-storage:
+    type: filesystem
+    filesystem:
+      path: "./data/tl/tiles"
+  checkpoint-interval: 2s            # short interval keeps local-dev demos snappy
+
+# attestation: names the ECDSA P-256 key the TL uses to produce the
+# outer envelope signature. Auto-provisioned on first run in
+# `keys.file.path`. Different from the Ed25519 sumdb note key that
+# signs checkpoints — those are published via `/checkpoint` (raw) and
+# and governed by the verifier line Tessera emits.
+attestation:
+  keyId: "ans-tl-attestation"
+
+# producerKeys: trust store of RA public keys the TL will accept
+# signatures from. Populate this once per RA you permit to POST events.
+# The PEM must be the PKIX/PEM-encoded ECDSA P-256 public key matching
+# the RA's signer key.
+#
+# For the quickstart: start ans-ra once, then copy
+# ./data/ra/keys/ans-ra-signer.pub into the publicKeyPem field below
+# (preserve the BEGIN/END armor).
+producerKeys: []
+
+log:
+  level: info
+  format: text

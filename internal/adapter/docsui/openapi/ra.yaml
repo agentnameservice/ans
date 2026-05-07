@@ -1,0 +1,1584 @@
+openapi: 3.0.3
+info:
+  title: Agent Name Service (ANS) Management API
+  description: |
+    Management API for the Agent Name Service (ANS) — v2.
+
+    This API provides authenticated, ownership-scoped operations for managing
+    ANS agent registrations, certificates, and lifecycle. It replaces the
+    /v1/agents API with the following key changes:
+
+    **Route structure:** All routes moved from `/v1/agents` to `/v2/ans/agents`.
+    Registration uses `POST /v2/ans/agents` (standard REST collection POST,
+    no `/register` verb suffix). Action endpoints (`/revoke`, `/verify-acme`,
+    `/verify-dns`) retain verb suffixes for procedural clarity.
+
+    **Management-scoped listing:** `GET /v2/ans/agents` returns only agents owned by
+    the authenticated caller. Global search/discovery has moved to a dedicated
+    search service.
+
+    **Cursor-based pagination:** The list endpoint uses cursor-based pagination
+    instead of offset-based, eliminating the O(n) performance degradation at
+    high offsets.
+
+    **Ownership enforcement:** All agent-specific operations (`GET /{agentId}`,
+    `POST /{agentId}/revoke`, certificate endpoints) enforce that the
+    authenticated caller owns the requested agent.
+
+    **Resolution removed:** `POST /v1/agents/resolution` is not carried forward
+    to v2. The `_ans` DNS TXT record already contains agent endpoints, making
+    this endpoint redundant. Consumers needing discovery should use the
+    registered agents search service (`/v1/ans/registered-agents`).
+
+    ## Deprecation of v1
+
+    All `/v1/agents/*` routes are deprecated and will be removed per the
+    published sunset schedule. v1 responses include `Deprecation: true`,
+    `Sunset`, and `Link` headers pointing to v2 equivalents.
+  version: 2.0.0
+  contact:
+    name: ANS Working Group
+  license:
+    name: Apache 2.0
+    url: https://www.apache.org/licenses/LICENSE-2.0.html
+
+servers:
+  - url: http://localhost:18080/v2
+    description: Local dev — quickstart ra-local.yaml
+  - url: https://api.ans.example.org/v2
+    description: Main ANS API server (v2)
+  - url: https://test.ans.example.org/v2
+    description: Test server (v2)
+
+tags:
+  - name: Management
+    description: Agent listing and detail operations (ownership-scoped)
+  - name: Registration
+    description: Agent registration and validation operations
+  - name: Revocation
+    description: Agent certificate revocation operations
+  - name: Certificate Management
+    description: Certificate retrieval, CSR submission, and renewal operations
+
+# Global security requirement. Every path inherits this and can
+# override with `security: []` to declare itself anonymous. The
+# handler's actual auth behaviour is documented in CLAUDE.md §Auth:
+# static API key (Bearer <key>) for quickstart, OIDC bearer tokens
+# when `auth.type: oidc` is configured. Both providers accept the
+# same shape on the wire, which is why a single HTTP-bearer scheme
+# covers both in the OpenAPI document.
+security:
+  - bearerAuth: []
+
+paths:
+  # ──────────────────────────────────────────────────────────────────
+  # Management — ownership-scoped
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents:
+    get:
+      tags:
+        - Management
+      summary: List caller's agents
+      description: |
+        Returns agents owned by the authenticated caller. This is a management
+        endpoint, not a discovery/search endpoint.
+
+        **Key differences from v1 `GET /v1/agents`:**
+        - Results are scoped to the authenticated caller's agents only.
+        - Uses cursor-based pagination (no `offset`).
+        - Removed filters: `protocol`, `agentDisplayName`, `version`.
+          Use the dedicated search service for discovery use cases.
+        - Removed `totalCount` and `searchCriteria` from response.
+
+        **Pagination:** Use the `nextCursor` value from the response as the
+        `cursor` query parameter in the next request. When `hasMore` is false,
+        there are no more results.
+      operationId: listCallerAgents
+      parameters:
+        - name: status
+          in: query
+          description: |
+            Filter by agent lifecycle status. Can specify multiple values.
+            Defaults to ACTIVE. Use 'ALL' to return agents of any status.
+          required: false
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              $ref: '#/components/schemas/AgentLifecycleStatusFilter'
+        - name: agentHost
+          in: query
+          description: Filter by agent host domain (exact match)
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Maximum number of results to return (default 20, max 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+        - name: cursor
+          in: query
+          description: |
+            Opaque pagination cursor from a previous response's `nextCursor`.
+            Omit for the first page.
+          required: false
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Agent list retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentListResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid query parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags:
+        - Registration
+      summary: Register a new agent with the ANS
+      description: |
+        Registers a new agent with the Agent Name Service.
+
+        The Registration Authority (RA) validates the agent's identity and
+        submitted information, then interacts with the CA to issue certificates
+        or validates provided (BYOC) server certificates.
+
+        The request MUST include an identity CSR. The request can optionally
+        include a server CSR (for RA-issued server cert) or a BYOC server
+        certificate with its chain.
+      operationId: registerAgent
+      requestBody:
+        description: Agent registration request
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRegistrationRequest'
+      responses:
+        '202':
+          description: Registration accepted, pending validation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RegistrationPending'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Agent ID or ANSName already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid registration request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/agents/{agentId}:
+    get:
+      tags:
+        - Management
+      summary: Get agent details
+      description: |
+        Retrieves detailed information about a registered agent.
+
+        **Ownership enforced:** Returns 404 if the authenticated caller does
+        not own the requested agent.
+      operationId: getAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Agent details retrieved successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentDetails'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found or not owned by caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────────────────────────
+  # Registration Validation
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/verify-acme:
+    post:
+      tags:
+        - Registration
+      summary: Trigger ACME validation
+      description: |
+        Initiates domain control validation. The AHP calls this after placing
+        the ACME challenge token. The RA validates domain control, which is
+        required before issuing both server and identity certificates.
+      operationId: validateRegistration
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '202':
+          description: Validation successful, certificates pending
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentStatus'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found or not owned by caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/agents/{agentId}/verify-dns:
+    post:
+      tags:
+        - Registration
+      summary: Verify DNS records configured
+      description: |
+        Verifies that all required DNS records have been configured correctly.
+        This is the final step for external domain registration.
+      operationId: verifyDnsRecords
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '202':
+          description: DNS verified, registration active
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentStatus'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found or not owned by caller
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: DNS records not found or incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DnsVerificationError'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────────────────────────
+  # Revocation
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/revoke:
+    post:
+      tags:
+        - Revocation
+      summary: Revoke an active agent or cancel a pending registration
+      description: |
+        Revokes an active agent or cancels a pending registration.
+
+        **Ownership enforced:** Returns 403 if caller does not own the agent.
+
+        For ACTIVE agents: Revokes due to key compromise, decommissioning, or
+        other security reasons. Certificate added to CRL, registry entry flagged.
+
+        For PENDING registrations (PENDING_CERTS or PENDING_DNS): Cancels
+        the registration, revokes any already-issued certificates.
+
+        PENDING_VALIDATION registrations are not cancellable and will
+        auto-expire.
+      operationId: revokeAgent
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      requestBody:
+        description: Agent revocation request
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AgentRevocationRequest'
+      responses:
+        '200':
+          description: Agent revoked successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentRevocationResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed or caller does not own agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid revocation request
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────────────────────────
+  # Certificate Management — Server
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/certificates/server:
+    get:
+      tags:
+        - Certificate Management
+      summary: Get agent's server certificates
+      description: Retrieves all TLS server certificates for the specified agent.
+      operationId: getAgentServerCertificates
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Server certificate(s) retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CertificateResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent or certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags:
+        - Certificate Management
+      summary: Submit server certificate CSR
+      description: |
+        Submits a CSR for the agent's server certificate.
+        The response contains a `csrId` matching `CertificateResponse.csrId`.
+      operationId: submitServerCsr
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CsrSubmissionRequest'
+      responses:
+        '202':
+          description: CSR accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrSubmissionResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid CSR
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/agents/{agentId}/certificates/server/renewal:
+    post:
+      tags:
+        - Certificate Management
+      summary: Submit server certificate renewal
+      description: |
+        Initiates server certificate renewal. Supports CSR path (RA issues)
+        or BYOC path (client provides certificate). Only one pending renewal
+        allowed per agent.
+      operationId: submitServerCertRenewal
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ServerCertificateRenewalRequest'
+      responses:
+        '202':
+          description: Renewal accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewalSubmissionResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Pending renewal already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags:
+        - Certificate Management
+      summary: Get pending renewal status
+      description: Returns current renewal status if one exists.
+      operationId: getServerCertRenewalStatus
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Renewal found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewalStatusResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No renewal exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    delete:
+      tags:
+        - Certificate Management
+      summary: Cancel pending renewal
+      description: |
+        Cancels the pending server certificate renewal. Marks associated CSR
+        as REJECTED if applicable. Client can immediately submit a new renewal.
+      operationId: cancelServerCertRenewal
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '204':
+          description: Renewal cancelled
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No pending renewal
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Renewal already completed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/agents/{agentId}/certificates/server/renewal/verify-acme:
+    post:
+      tags:
+        - Certificate Management
+      summary: Verify ACME challenges for pending server cert renewal
+      description: |
+        Triggers ACME validation for external agents only.
+        DNS-01 or HTTP-01 challenge verification.
+      operationId: verifyRenewalAcme
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: BYOC renewal completed synchronously
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewalVerificationResponse'
+        '202':
+          description: CSR renewal validated, certificate issuance in progress
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RenewalVerificationResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: No pending renewal found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Validation failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────────────────────────
+  # Certificate Management — Identity
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/certificates/identity:
+    get:
+      tags:
+        - Certificate Management
+      summary: Get agent's identity certificates
+      description: Retrieves all identity certificates for the specified agent.
+      operationId: getAgentIdentityCertificates
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Identity certificate(s) retrieved
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/CertificateResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent or certificate not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    post:
+      tags:
+        - Certificate Management
+      summary: Submit identity certificate CSR
+      description: Submits a CSR for the agent's identity certificate.
+      operationId: submitIdentityCsr
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CsrSubmissionRequest'
+      responses:
+        '202':
+          description: CSR accepted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrSubmissionResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Agent not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid CSR
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────────────────────────
+  # CSR Status
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/csrs/{csrId}/status:
+    get:
+      tags:
+        - Certificate Management
+      summary: Get CSR status
+      description: Retrieves the current status of a Certificate Signing Request.
+      operationId: getCsrStatus
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+        - name: csrId
+          in: path
+          description: Unique identifier of the CSR
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: CSR status retrieved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CsrStatusResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Authorization failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: CSR not found or does not belong to this agent
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+
+components:
+  # ──────────────────────────────────────────────────────────────────
+  # Security schemes — both providers (static API key + OIDC) accept
+  # the same `Authorization: Bearer <token>` shape on the wire, so
+  # one HTTP-bearer definition covers both. Swagger UI renders an
+  # "Authorize" button from this definition; paste your API key
+  # (quickstart default: `ans-dev-key-change-me`) as the bearer value
+  # and "Try it out" will include it on subsequent requests.
+  # ──────────────────────────────────────────────────────────────────
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        Static API key or OIDC bearer token. The RA treats the static
+        key as admin; OIDC tokens inherit admin-ness from configured
+        admin-groups (see `auth.oidc.admin-groups` in the config
+        reference). Public-read routes (TL verifier GETs) and
+        `/v2/admin/{health,ready}` and `/docs` ignore this header.
+
+  # ──────────────────────────────────────────────────────────────────
+  # Reusable parameters
+  # ──────────────────────────────────────────────────────────────────
+  parameters:
+    AgentIdPath:
+      name: agentId
+      in: path
+      description: Unique identifier of the agent (UUID)
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+  # ──────────────────────────────────────────────────────────────────
+  # Schemas
+  # ──────────────────────────────────────────────────────────────────
+  schemas:
+    # ── New: Cursor-paginated list response ──────────────────────
+    AgentListResponse:
+      type: object
+      description: |
+        Ownership-scoped, cursor-paginated list of the caller's agents.
+        Replaces v1's `AgentSearchResponse`. Collection array is named
+        `items` per standard REST collection-response conventions.
+      properties:
+        items:
+          type: array
+          description: List of agents owned by the caller
+          items:
+            type: object
+            properties:
+              ansName:
+                type: string
+                example: ans://v1.0.0.myagent.example.com
+              agentId:
+                type: string
+                format: uuid
+              agentDisplayName:
+                type: string
+                maxLength: 64
+              agentDescription:
+                type: string
+              version:
+                type: string
+              agentHost:
+                type: string
+                maxLength: 253
+                example: myagent.example.com
+              status:
+                $ref: '#/components/schemas/AgentLifecycleStatus'
+              ttl:
+                type: integer
+                default: 300
+              registrationTimestamp:
+                type: string
+                format: date-time
+              endpoints:
+                type: array
+                items:
+                  $ref: '#/components/schemas/AgentEndpoint'
+              links:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Link'
+            required:
+              - ansName
+              - agentId
+              - agentDisplayName
+              - version
+              - agentHost
+              - status
+              - endpoints
+              - links
+        returnedCount:
+          type: integer
+          description: Number of agents in this response
+        limit:
+          type: integer
+          description: Limit that was applied
+        nextCursor:
+          type: string
+          nullable: true
+          description: |
+            Opaque cursor for the next page. Pass as the `cursor` query
+            parameter to retrieve the next page. Null when there are no
+            more results.
+        hasMore:
+          type: boolean
+          description: Whether more results exist beyond this page
+      required:
+        - items
+        - returnedCount
+        - limit
+        - hasMore
+
+    # ── Unchanged schemas carried forward from v1 ────────────────
+    Link:
+      type: object
+      properties:
+        rel:
+          type: string
+          example: agent-details
+        href:
+          type: string
+          format: uri
+      required:
+        - rel
+        - href
+
+    Protocol:
+      type: string
+      enum: [A2A, MCP, HTTP-API]
+
+    RevocationReason:
+      type: string
+      enum:
+        - KEY_COMPROMISE
+        - CESSATION_OF_OPERATION
+        - AFFILIATION_CHANGED
+        - SUPERSEDED
+        - CERTIFICATE_HOLD
+        - PRIVILEGE_WITHDRAWN
+        - AA_COMPROMISE
+
+    AgentRegistrationRequest:
+      type: object
+      properties:
+        agentDisplayName:
+          type: string
+          maxLength: 64
+          example: sentiment-analyzer
+        agentDescription:
+          type: string
+          maxLength: 150
+        version:
+          type: string
+          pattern: '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'
+          example: 1.2.0
+        agentHost:
+          type: string
+          maxLength: 253
+          example: myagent.example.com
+        endpoints:
+          type: array
+          minItems: 1
+          items:
+            $ref: '#/components/schemas/AgentEndpoint'
+        serverCsrPEM:
+          type: string
+        serverCertificatePEM:
+          type: string
+        serverCertificateChainPEM:
+          type: string
+        identityCsrPEM:
+          type: string
+      required:
+        - agentDisplayName
+        - version
+        - agentHost
+        - endpoints
+        - identityCsrPEM
+
+    AgentRevocationRequest:
+      type: object
+      properties:
+        reason:
+          $ref: '#/components/schemas/RevocationReason'
+        comments:
+          type: string
+          maxLength: 200
+      required:
+        - reason
+
+    AgentRevocationResponse:
+      type: object
+      properties:
+        agentId:
+          type: string
+          format: uuid
+        ansName:
+          type: string
+        status:
+          $ref: '#/components/schemas/AgentLifecycleStatus'
+        revokedAt:
+          type: string
+          format: date-time
+        reason:
+          $ref: '#/components/schemas/RevocationReason'
+        dnsRecordsToRemove:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsRecord'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/Link'
+      required:
+        - agentId
+        - ansName
+        - status
+        - revokedAt
+        - reason
+        - links
+
+    AgentDetails:
+      type: object
+      properties:
+        agentId:
+          type: string
+          format: uuid
+        agentDisplayName:
+          type: string
+          maxLength: 64
+        agentDescription:
+          type: string
+        version:
+          type: string
+        agentHost:
+          type: string
+          maxLength: 253
+        endpoints:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentEndpoint'
+        ansName:
+          type: string
+          example: ans://v1.0.0.myagent.example.com
+        agentStatus:
+          $ref: '#/components/schemas/AgentLifecycleStatus'
+        registrationTimestamp:
+          type: string
+          format: date-time
+        lastRenewalTimestamp:
+          type: string
+          format: date-time
+        registrationPending:
+          $ref: '#/components/schemas/RegistrationPending'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/Link'
+      required:
+        - agentId
+        - ansName
+        - agentDisplayName
+        - version
+        - endpoints
+        - agentHost
+        - agentStatus
+        - links
+
+    AgentStatus:
+      type: object
+      properties:
+        status:
+          $ref: '#/components/schemas/AgentLifecycleStatus'
+        phase:
+          type: string
+          enum: [INITIALIZATION, DOMAIN_VALIDATION, CERTIFICATE_ISSUANCE, DNS_PROVISIONING, COMPLETED]
+        completedSteps:
+          type: array
+          items:
+            type: string
+        pendingSteps:
+          type: array
+          items:
+            type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        expiresAt:
+          type: string
+          format: date-time
+
+    AgentLifecycleStatus:
+      type: string
+      enum: [PENDING_VALIDATION, PENDING_DNS, ACTIVE, FAILED, EXPIRED, DEPRECATED, REVOKED]
+
+    AgentLifecycleStatusFilter:
+      type: string
+      enum: [PENDING_DNS, ACTIVE, DEPRECATED, REVOKED, ALL]
+
+    RegistrationPending:
+      type: object
+      properties:
+        agentId:
+          type: string
+          format: uuid
+          description: |
+            Unique identifier assigned to this agent registration. Required for
+            all subsequent API calls (verify-acme, verify-dns, certificates,
+            revoke). New in v2 — previously callers had to parse this from
+            HATEOAS link hrefs. Recommended for backport to v1.
+        status:
+          type: string
+          enum: [PENDING_VALIDATION, PENDING_DNS]
+        ansName:
+          type: string
+          example: ans://v1.0.0.external-domain.com
+        nextSteps:
+          type: array
+          items:
+            $ref: '#/components/schemas/NextStep'
+        challenges:
+          type: array
+          items:
+            $ref: '#/components/schemas/ChallengeInfo'
+        dnsRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsRecord'
+        expiresAt:
+          type: string
+          format: date-time
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/Link'
+      required:
+        - agentId
+        - status
+        - ansName
+        - nextSteps
+
+    NextStep:
+      type: object
+      properties:
+        action:
+          type: string
+          enum: [CONFIGURE_DNS, CONFIGURE_HTTP, VERIFY_DNS, VALIDATE_DOMAIN, WAIT]
+        description:
+          type: string
+        endpoint:
+          type: string
+          format: uri
+        estimatedTimeMinutes:
+          type: integer
+
+    ChallengeInfo:
+      type: object
+      properties:
+        type:
+          type: string
+          enum: [DNS_01, HTTP_01]
+        token:
+          type: string
+        keyAuthorization:
+          type: string
+        dnsRecord:
+          type: object
+          properties:
+            name:
+              type: string
+            type:
+              type: string
+            value:
+              type: string
+        httpPath:
+          type: string
+        expiresAt:
+          type: string
+          format: date-time
+
+    DnsRecord:
+      type: object
+      properties:
+        name:
+          type: string
+        type:
+          type: string
+          enum: [HTTPS, TLSA, TXT]
+        value:
+          type: string
+        priority:
+          type: integer
+        ttl:
+          type: integer
+          default: 3600
+        purpose:
+          type: string
+          enum: [DISCOVERY, TRUST, CERTIFICATE_BINDING, BADGE]
+        required:
+          type: boolean
+          default: true
+      required:
+        - name
+        - type
+        - value
+
+    AgentEndpoint:
+      type: object
+      properties:
+        agentUrl:
+          type: string
+          format: uri
+          example: https://myagent.example.com/mcp
+        metaDataUrl:
+          type: string
+          format: uri
+        metaDataHash:
+          type: string
+          pattern: '^SHA256:[a-f0-9]{64}$'
+        documentationUrl:
+          type: string
+          format: uri
+        protocol:
+          $ref: '#/components/schemas/Protocol'
+        functions:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentFunction'
+        transports:
+          type: array
+          items:
+            type: string
+            enum: [STREAMABLE-HTTP, SSE, JSON-RPC, GRPC, REST, HTTP]
+      required:
+        - protocol
+        - agentUrl
+
+    AgentFunction:
+      type: object
+      properties:
+        id:
+          type: string
+          maxLength: 64
+        name:
+          type: string
+          maxLength: 64
+        tags:
+          type: array
+          maxItems: 5
+          items:
+            type: string
+            maxLength: 20
+      required:
+        - id
+        - name
+
+    CertificateResponse:
+      type: object
+      properties:
+        csrId:
+          type: string
+          format: uuid
+        certificateSubject:
+          type: string
+          nullable: true
+        certificateIssuer:
+          type: string
+          nullable: true
+        certificateSerialNumber:
+          type: string
+          nullable: true
+        certificateValidFrom:
+          type: string
+          format: date-time
+        certificateValidTo:
+          type: string
+          format: date-time
+        certificatePEM:
+          type: string
+        chainPEM:
+          type: string
+          nullable: true
+        certificatePublicKeyAlgorithm:
+          type: string
+          nullable: true
+        certificateSignatureAlgorithm:
+          type: string
+          nullable: true
+      required:
+        - csrId
+        - certificatePEM
+        - certificateValidFrom
+        - certificateValidTo
+
+    CsrSubmissionRequest:
+      type: object
+      properties:
+        csrPEM:
+          type: string
+      required:
+        - csrPEM
+
+    CsrSubmissionResponse:
+      type: object
+      properties:
+        csrId:
+          type: string
+          format: uuid
+        message:
+          type: string
+      required:
+        - csrId
+
+    CsrStatusResponse:
+      type: object
+      properties:
+        csrId:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [SERVER, IDENTITY]
+        status:
+          type: string
+          enum: [PENDING, SIGNED, REJECTED]
+        submittedAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+        failureReason:
+          type: string
+          nullable: true
+      required:
+        - csrId
+        - type
+        - status
+        - submittedAt
+        - updatedAt
+
+    ServerCertificateRenewalRequest:
+      type: object
+      properties:
+        serverCsrPEM:
+          type: string
+        serverCertificatePEM:
+          type: string
+        serverCertificateChainPEM:
+          type: string
+      oneOf:
+        - required: [serverCsrPEM]
+        - required: [serverCertificatePEM]
+
+    RenewalSubmissionResponse:
+      type: object
+      properties:
+        renewalType:
+          type: string
+          enum: [SERVER_CSR, SERVER_BYOC]
+        status:
+          type: string
+          enum: [PENDING_VALIDATION, ISSUING_CERTIFICATE]
+        csrId:
+          type: string
+          format: uuid
+          nullable: true
+        challenges:
+          type: object
+          nullable: true
+          properties:
+            dns01:
+              $ref: '#/components/schemas/ChallengeInfo'
+            http01:
+              $ref: '#/components/schemas/ChallengeInfo'
+        expiresAt:
+          type: string
+          format: date-time
+        nextStep:
+          $ref: '#/components/schemas/NextStep'
+        links:
+          type: array
+          items:
+            $ref: '#/components/schemas/Link'
+      required:
+        - renewalType
+        - status
+        - expiresAt
+        - nextStep
+
+    RenewalStatusResponse:
+      type: object
+      properties:
+        renewalType:
+          type: string
+          enum: [SERVER_CSR, SERVER_BYOC]
+        status:
+          type: string
+          enum: [PENDING_VALIDATION, ISSUING_CERTIFICATE, COMPLETED, FAILED, EXPIRED]
+        csrId:
+          type: string
+          format: uuid
+          nullable: true
+        challenges:
+          type: object
+          nullable: true
+          properties:
+            dns01:
+              $ref: '#/components/schemas/ChallengeInfo'
+            http01:
+              $ref: '#/components/schemas/ChallengeInfo'
+        tlsaDnsRecord:
+          $ref: '#/components/schemas/DnsRecord'
+          nullable: true
+        failureReason:
+          type: string
+          nullable: true
+        expiresAt:
+          type: string
+          format: date-time
+        nextStep:
+          $ref: '#/components/schemas/NextStep'
+      required:
+        - renewalType
+        - status
+        - expiresAt
+        - nextStep
+
+    RenewalVerificationResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [VERIFIED, ISSUING_CERTIFICATE, COMPLETED]
+        csrId:
+          type: string
+          format: uuid
+          nullable: true
+        tlsaDnsRecord:
+          $ref: '#/components/schemas/DnsRecord'
+          nullable: true
+        nextStep:
+          $ref: '#/components/schemas/NextStep'
+      required:
+        - status
+        - nextStep
+
+    ErrorResponse:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ERROR]
+        code:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+      required:
+        - status
+        - code
+        - message
+
+    DnsVerificationError:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ERROR]
+        missingRecords:
+          type: array
+          items:
+            $ref: '#/components/schemas/DnsRecord'
+        incorrectRecords:
+          type: array
+          items:
+            type: object
+            properties:
+              record:
+                $ref: '#/components/schemas/DnsRecord'
+              found:
+                type: string
+              expected:
+                type: string

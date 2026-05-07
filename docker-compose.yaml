@@ -1,0 +1,84 @@
+# Local-stack orchestration for ans-ra + ans-tl. Matches the
+# scripts/demo/start.sh flow: start the RA first so its signer
+# public key materializes, then start the TL.
+#
+# Usage:
+#   docker compose up --build              # build images + start both
+#   make docker-compose-bootstrap          # seed TL trust of RA signer
+#   docker compose logs -f ans-ra          # follow RA logs
+#   docker compose down                    # stop
+#   docker compose down -v                 # stop + wipe volumes
+#
+# The TL ships with `producerKeys: []` and trusts no producers until
+# bootstrapped. Run `make docker-compose-bootstrap` once after the
+# stack is healthy to POST the RA's signer pubkey to the TL admin
+# API. Operators who prefer a fully-automated path should use
+# scripts/demo/start.sh instead — it handles the bootstrap inline
+# and is the recommended local-demo flow per config/tl-docker.yaml.
+#
+# Configs live under ./config; override them with your own YAML
+# before bringing the stack up if you want non-default behavior.
+
+services:
+  ans-ra:
+    build:
+      context: .
+      dockerfile: Dockerfile.ans-ra
+      args:
+        VERSION: "${ANS_VERSION:-dev}"
+    image: ans-ra:local
+    container_name: ans-ra
+    ports:
+      - "18080:18080"
+    volumes:
+      - ./config:/etc/ans-ra:ro
+      - ra-data:/var/lib/ans-ra
+      - ra-keys:/var/lib/ans-ra/keys
+    healthcheck:
+      # The RA publishes /v2/admin/ready as an anonymous path; a
+      # simple HTTP 200 means the DB is open, migrations applied,
+      # signer key materialized.
+      test: ["CMD", "wget", "-qO-", "http://localhost:18080/v2/admin/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    command: ["--config", "/etc/ans-ra/ra-docker.yaml"]
+
+  ans-tl:
+    build:
+      context: .
+      dockerfile: Dockerfile.ans-tl
+      args:
+        VERSION: "${ANS_VERSION:-dev}"
+    image: ans-tl:local
+    container_name: ans-tl
+    ports:
+      - "18081:18081"
+    volumes:
+      - ./config:/etc/ans-tl:ro
+      - tl-data:/var/lib/ans-tl
+      # Note: an earlier revision mounted the RA's `ra-keys` volume
+      # at /etc/ans-tl/ra-keys for YAML-based producer-key bootstrap.
+      # That mount is removed because nesting a volume inside a
+      # read-only bind (`./config:/etc/ans-tl:ro`) fails at container
+      # creation with EROFS — runc cannot mkdir the inner mountpoint
+      # in a read-only filesystem. The TL now bootstraps producer
+      # trust via its admin API; see `make docker-compose-bootstrap`.
+    depends_on:
+      ans-ra:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:18081/v2/admin/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    command: ["--config", "/etc/ans-tl/tl-docker.yaml"]
+
+# Named volumes so data persists across `docker compose restart`.
+# `docker compose down -v` wipes them — useful for a clean slate.
+volumes:
+  ra-data:
+  ra-keys:
+  tl-data:

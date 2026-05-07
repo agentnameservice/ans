@@ -1,0 +1,27 @@
+# Everything Docker shouldn't ship into the build context.
+
+# Build output
+bin/
+dist/
+
+# Local state from demo scripts
+data/
+
+# Coverage artefacts
+coverage.*
+
+# Reference repositories (git-ignored, used only for Claude's review)
+hack/
+
+# Git + IDE cruft
+.git/
+.gitignore
+.vscode/
+.idea/
+*.swp
+
+# Claude-specific workspace paths
+.claude/
+
+# OS cruft
+.DS_Store

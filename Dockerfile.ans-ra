@@ -1,0 +1,54 @@
+# Multi-stage build for ans-ra. Produces a scratch-based minimal
+# image — no shell, no package manager, just the statically-linked
+# binary and CA certs. Operators mount config + data at runtime.
+#
+# Build:  docker build -f Dockerfile.ans-ra -t ans-ra:local .
+# Run:    docker run --rm -p 18080:18080 \
+#           -v "$PWD/config:/etc/ans-ra:ro" \
+#           -v "$PWD/data:/var/lib/ans-ra" \
+#           ans-ra:local --config /etc/ans-ra/ra.yaml
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+# SQLite requires CGO enabled — the go-sqlite3 driver links against
+# libsqlite3 at build time. alpine provides musl + sqlite headers.
+RUN apk add --no-cache gcc musl-dev sqlite-dev
+ENV CGO_ENABLED=1
+
+# Cache module downloads separately so source changes don't invalidate
+# the go-mod layer.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+# -ldflags strips the DWARF info and the symbol table — tiny binary,
+# mostly for image-size hygiene. The build-info strings stay via
+# -X main.{version,commit,date} so `ans-ra --version` works in the
+# container.
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG DATE=unknown
+RUN go build \
+    -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${DATE}" \
+    -o /out/ans-ra ./cmd/ans-ra
+
+# Final stage — distroless-equivalent. The `ca-certificates` pull lets
+# HTTPS egress (e.g., talking to the TL) work when operators expose
+# the RA externally. No shell means no `sh` / `bash` to exploit; the
+# binary is PID 1 and handles signals itself.
+FROM alpine:3.23
+RUN apk add --no-cache ca-certificates sqlite-libs tzdata \
+ && addgroup -S ans && adduser -S -G ans ans \
+ # Pre-create /var/lib/ans-ra/keys (not just the parent) so that
+ # docker-compose's named-volume mount at the nested path inherits
+ # ans:ans ownership. Without this, Docker creates the mountpoint
+ # root-owned at runtime and the RA's first signer-key write fails
+ # with EACCES.
+ && mkdir -p /var/lib/ans-ra/keys /etc/ans-ra \
+ && chown -R ans:ans /var/lib/ans-ra
+USER ans
+WORKDIR /var/lib/ans-ra
+COPY --from=build /out/ans-ra /usr/local/bin/ans-ra
+EXPOSE 18080
+ENTRYPOINT ["/usr/local/bin/ans-ra"]
+CMD ["--config", "/etc/ans-ra/ra.yaml"]

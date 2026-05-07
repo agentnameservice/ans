@@ -1,0 +1,8 @@
+# Semgrep ignore list.
+#
+# Paths listed here are excluded from scans. Use sparingly — every
+# entry is a rule the scanner won't enforce against that path, so
+# each entry needs a written rationale that a reviewer can audit.
+#
+# Inline false positives on specific lines should use
+# `// nosemgrep: <rule-id>` comments instead of a path entry here.

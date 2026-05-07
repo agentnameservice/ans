@@ -1,0 +1,55 @@
+# Docker-compose config for ans-tl. The TL needs the RA's signer
+# public key in its producerKeys trust list before it will accept
+# events. docker-compose mounts the RA's key directory read-only at
+# /etc/ans-tl/ra-keys so we can inline the PEM via the `!include`
+# pattern — but koanf doesn't natively support includes, so we
+# copy the PEM into place via an init hook. For quickstart, operators
+# can either:
+#
+#  (a) `docker compose exec ans-ra cat /var/lib/ans-ra/keys/ans-ra-signer.pub`
+#      and paste into producerKeys[0].publicKeyPem below, rebuild,
+#      restart the TL, OR
+#  (b) after first `docker compose up`, use the admin API:
+#        curl -X POST http://localhost:18081/internal/v1/producer-keys \
+#             -H "Authorization: Bearer tl-internal-key" ...
+#
+# For a fully-automated local demo prefer scripts/demo/start.sh which
+# handles the bootstrap inline.
+server:
+  host: "0.0.0.0"
+  port: 18081
+
+auth:
+  type: static
+  static:
+    api-key: "tl-internal-key"
+  public-read: true
+
+keys:
+  type: file
+  file:
+    path: "/var/lib/ans-tl/keys"
+
+store:
+  type: sqlite
+  sqlite:
+    path: "/var/lib/ans-tl/tl.db"
+
+merkle:
+  origin: "ans-local-dev"
+  tile-storage:
+    type: filesystem
+    filesystem:
+      path: "/var/lib/ans-tl/tiles"
+  checkpoint-interval: 10s
+
+attestation:
+  keyId: "ans-tl-attestation"
+
+# Empty by default — operators register keys via the admin API
+# (see the comment block above for the two bootstrap paths).
+producerKeys: []
+
+log:
+  level: info
+  format: json

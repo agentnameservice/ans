@@ -1,0 +1,50 @@
+# Docker-compose config for ans-ra. Differs from ra-local.yaml only in
+# the filesystem paths and the TL client base URL — container paths
+# point at the mounted volumes defined in docker-compose.yaml, and
+# the TL base URL uses the compose service name so DNS resolution
+# works inside the default bridge network.
+server:
+  host: "0.0.0.0"
+  port: 18080
+
+auth:
+  type: static
+  static:
+    api-key: "ans-dev-key-change-me"
+
+ca:
+  type: self
+  self:
+    org: "ANS Local Dev CA"
+    validity-days: 365
+    data-dir: "/var/lib/ans-ra/ca"
+
+dns:
+  type: noop
+
+keys:
+  type: file
+  file:
+    # Mounted as a named volume (`ra-keys` in docker-compose.yaml) so
+    # the signer key persists across container restarts. The TL's
+    # trust of this key is bootstrapped at runtime via the admin API
+    # (see `make docker-compose-bootstrap`), not via a shared mount.
+    path: "/var/lib/ans-ra/keys"
+
+store:
+  type: sqlite
+  sqlite:
+    path: "/var/lib/ans-ra/ans.db"
+
+tl-client:
+  base-url: "http://ans-tl:18081"
+  api-key: "tl-internal-key"
+  timeout: 10s
+
+signer:
+  keyId: "ans-ra-signer"
+  raId: "ans-ra-local"
+
+log:
+  level: info
+  format: json  # JSON for container log drivers / log aggregators

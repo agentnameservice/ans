@@ -1,0 +1,51 @@
+# Binaries
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test binary, built with `go test -c`
+*.test
+
+# Output of the go coverage tool
+*.out
+coverage.html
+
+# Build artifacts
+/dist/
+
+# Data directories (auto-generated at runtime)
+/data/
+
+# Local-only maintainer working tree (scratch clones, notes).
+# See CLAUDE.local.md — this directory must never be committed.
+/hack/
+
+# Machine-local Claude guidance — maintainer-only workflow notes.
+CLAUDE.local.md
+
+# Internal planning / tracking docs (living design, audits). Kept
+# locally for maintainers; not part of the public submission.
+/plan/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Dependency directories
+vendor/
+AGENTS.md
