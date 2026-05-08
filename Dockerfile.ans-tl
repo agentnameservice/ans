@@ -8,8 +8,8 @@
 #           ans-tl:local --config /etc/ans-tl/tl.yaml
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-RUN apk add --no-cache gcc musl-dev sqlite-dev
-ENV CGO_ENABLED=1
+# Pure-Go build (modernc.org/sqlite) — no C toolchain, fully static binary.
+ENV CGO_ENABLED=0
 
 COPY go.mod go.sum ./
 RUN go mod download
@@ -24,7 +24,7 @@ RUN go build \
     -o /out/ans-tl ./cmd/ans-tl
 
 FROM alpine:3.23
-RUN apk add --no-cache ca-certificates sqlite-libs tzdata \
+RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -S ans && adduser -S -G ans ans \
  && mkdir -p /var/lib/ans-tl /etc/ans-tl \
  && chown -R ans:ans /var/lib/ans-tl

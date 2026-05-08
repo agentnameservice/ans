@@ -3,10 +3,11 @@
 // RevocationStore, ByocCertificateStore) plus an outbox table used by
 // the RA→TL HTTP client for durable event delivery.
 //
-// The adapter uses github.com/mattn/go-sqlite3 (CGO) and embeds its
-// schema migrations. On Open() the database is created if missing and
-// migrations are applied; the embedded migration files live in
-// migrations/*.sql relative to this package.
+// The adapter uses modernc.org/sqlite — a pure-Go transpilation of
+// upstream SQLite — so the binaries cross-compile without CGO. Schema
+// migrations are embedded; on Open() the database is created if
+// missing and migrations are applied. The embedded migration files
+// live in migrations/*.sql relative to this package.
 package sqlite
 
 import (
@@ -21,7 +22,7 @@ import (
 	"strings"
 
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3" // driver
+	_ "modernc.org/sqlite" // driver
 
 	"github.com/godaddy/ans/internal/domain"
 )
@@ -50,12 +51,12 @@ func Open(ctx context.Context, path string) (*DB, error) {
 	}
 	// Enable foreign-key enforcement and busy timeout so concurrent
 	// writers don't immediately fail with SQLITE_BUSY.
-	dsn := path + "?_foreign_keys=on&_busy_timeout=5000&_journal_mode=WAL"
+	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	// In-memory DBs do not support WAL.
 	if path == ":memory:" {
-		dsn = path + "?_foreign_keys=on&_busy_timeout=5000"
+		dsn = path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	}
-	sqlxDB, err := sqlx.ConnectContext(ctx, "sqlite3", dsn)
+	sqlxDB, err := sqlx.ConnectContext(ctx, "sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: connect: %w", err)
 	}
@@ -178,7 +179,7 @@ func mapSQLErr(err error) error {
 }
 
 func isUniqueViolation(err error) bool {
-	// go-sqlite3 error codes are not stable across versions; substring
-	// match is the documented portable approach.
+	// SQLite emits the same human-readable message regardless of
+	// driver, so substring match works across mattn and modernc.
 	return strings.Contains(err.Error(), "UNIQUE constraint failed")
 }

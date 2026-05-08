@@ -11,7 +11,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/mattn/go-sqlite3"
+	"modernc.org/sqlite"
+	sqlitelib "modernc.org/sqlite/lib"
 
 	"github.com/godaddy/ans/internal/tl/producerkey"
 )
@@ -111,8 +112,8 @@ func (s *ProducerKeyStore) Register(ctx context.Context, e producerkey.Entry) (*
 		e.ValidFrom.UnixMilli(), e.ExpiresAt.UnixMilli(),
 		metadata, nowMs, nowMs)
 	if err != nil {
-		var sqliteErr sqlite3.Error
-		if errors.As(err, &sqliteErr) && sqliteErr.ExtendedCode == sqlite3.ErrConstraintPrimaryKey {
+		var sqliteErr *sqlite.Error
+		if errors.As(err, &sqliteErr) && sqliteErr.Code() == sqlitelib.SQLITE_CONSTRAINT_PRIMARYKEY {
 			return nil, producerkey.ErrDuplicateKey
 		}
 		return nil, fmt.Errorf("producerkey: insert: %w", err)

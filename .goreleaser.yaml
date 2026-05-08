@@ -1,23 +1,13 @@
 # GoReleaser config for the four ans binaries:
-#   ans-ra      — Registration Authority server   (CGO; linux only)
-#   ans-tl      — Transparency Log server         (CGO; linux only)
-#   ans-verify  — offline verifier                (pure Go; cross-platform)
-#   ans-dns     — development DNS server          (pure Go; cross-platform)
+#   ans-ra      — Registration Authority server
+#   ans-tl      — Transparency Log server
+#   ans-verify  — offline verifier
+#   ans-dns     — development DNS server
 #
-# The two server binaries link github.com/mattn/go-sqlite3 transitively,
-# which requires CGO. Cross-compiling cgo to linux/arm64 from a linux/amd64
-# runner needs gcc-aarch64-linux-gnu, installed by .github/workflows/release.yml
-# before goreleaser runs. Darwin/Windows server builds are intentionally
-# omitted: the servers are deployed via the Dockerfile.* images or as
-# linux-native binaries; cross-CGO to darwin/windows would multiply the
-# cross-compiler requirements without serving real demand.
-#
-# ans-verify and ans-dns don't link SQLite (`go list -deps` confirms),
-# so they ship cross-platform with CGO_ENABLED=0.
-#
-# One archive per (goos, goarch). Goreleaser groups whichever build
-# IDs match that target — so linux archives contain all four binaries,
-# darwin/windows archives contain only the two pure-Go tools.
+# All four are pure Go (modernc.org/sqlite is a Go transpilation of
+# upstream SQLite, so the SQLite-backed RA and TL no longer need CGO),
+# which means the same goos/goarch matrix applies uniformly: linux,
+# darwin, and windows on amd64 and arm64.
 #
 # Library consumers continue to use `go get` / module versions — only
 # the binaries are packaged here.
@@ -36,21 +26,12 @@ before:
 # ans-dns don't declare them today and the linker silently ignores
 # unmatched -X targets, which keeps the build matrix uniform.
 builds:
-  # ─── Server binaries: CGO required (mattn/go-sqlite3), linux only ─────
   - id: ans-ra
     main: ./cmd/ans-ra
     binary: ans-ra
     env:
-      - CGO_ENABLED=1
-      # CC is set per-arch so cross-compiling linux/arm64 from a
-      # linux/amd64 runner uses the gcc-aarch64-linux-gnu toolchain
-      # installed by the workflow. amd64 falls through to the default
-      # /usr/bin/cc (gcc).
-      - >-
-        {{- if eq .Arch "arm64" -}}
-          CC=aarch64-linux-gnu-gcc
-        {{- end -}}
-    goos: [linux]
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
@@ -65,12 +46,8 @@ builds:
     main: ./cmd/ans-tl
     binary: ans-tl
     env:
-      - CGO_ENABLED=1
-      - >-
-        {{- if eq .Arch "arm64" -}}
-          CC=aarch64-linux-gnu-gcc
-        {{- end -}}
-    goos: [linux]
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
@@ -81,7 +58,6 @@ builds:
       - -X main.commit={{.ShortCommit}}
       - -X main.date={{.Date}}
 
-  # ─── Tools: pure Go, cross-platform ────────────────────────────────────
   - id: ans-verify
     main: ./cmd/ans-verify
     binary: ans-verify
@@ -114,9 +90,7 @@ builds:
       - -X main.commit={{.ShortCommit}}
       - -X main.date={{.Date}}
 
-# One archive per (goos, goarch). Goreleaser only includes builds
-# whose target matches, so linux archives get all four binaries,
-# darwin/windows get only ans-verify + ans-dns.
+# One archive per (goos, goarch), each containing all four binaries.
 archives:
   - id: ans
     ids:

@@ -9,10 +9,9 @@
 #           ans-ra:local --config /etc/ans-ra/ra.yaml
 FROM golang:1.26-alpine AS build
 WORKDIR /src
-# SQLite requires CGO enabled — the go-sqlite3 driver links against
-# libsqlite3 at build time. alpine provides musl + sqlite headers.
-RUN apk add --no-cache gcc musl-dev sqlite-dev
-ENV CGO_ENABLED=1
+# Pure-Go build — modernc.org/sqlite means no C toolchain or libsqlite3
+# at build time, no libc at runtime. The resulting binary is fully static.
+ENV CGO_ENABLED=0
 
 # Cache module downloads separately so source changes don't invalidate
 # the go-mod layer.
@@ -37,7 +36,7 @@ RUN go build \
 # the RA externally. No shell means no `sh` / `bash` to exploit; the
 # binary is PID 1 and handles signals itself.
 FROM alpine:3.23
-RUN apk add --no-cache ca-certificates sqlite-libs tzdata \
+RUN apk add --no-cache ca-certificates tzdata \
  && addgroup -S ans && adduser -S -G ans ans \
  # Pre-create /var/lib/ans-ra/keys (not just the parent) so that
  # docker-compose's named-volume mount at the nested path inherits
