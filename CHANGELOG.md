@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.3](https://github.com/godaddy/ans/compare/v0.1.2...v0.1.3) (2026-05-08)
+
+
+### Bug Fixes
+
+* **release:** trigger v0.1.3 release for windows-drop fix ([#8](https://github.com/godaddy/ans/issues/8)) ([bbb6193](https://github.com/godaddy/ans/commit/bbb619388e8d1671f3cfdd9a0eae96b2ef85636e))
+
 ## [0.1.2](https://github.com/godaddy/ans/compare/v0.1.1...v0.1.2) (2026-05-08)
 
 
