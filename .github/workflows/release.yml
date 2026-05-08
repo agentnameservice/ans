@@ -58,15 +58,6 @@ jobs:
           # bumping go.mod alone updates both CI and release Go versions.
           go-version-file: go.mod
 
-      # ans-ra and ans-tl link mattn/go-sqlite3 transitively, which needs
-      # CGO. Cross-compiling cgo from this linux/amd64 runner to linux/arm64
-      # requires the aarch64 GNU toolchain. Goreleaser's per-build CC env
-      # var (in .goreleaser.yaml) points at this binary for the arm64 target.
-      - name: Install aarch64 cross-compiler (for CGO linux/arm64)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y gcc-aarch64-linux-gnu
-
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@1a80836c5c9d9e5755a25cb59ec6f45a3b5f41a8 # v7.2.1
         with:

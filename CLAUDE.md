@@ -53,6 +53,15 @@ Everything that lands on `main` must meet production-grade standards:
   breaking change for verifiers and clients.
 - **`make check` must pass** (`fmt`, `vet`, `golangci-lint`,
   `test-cover`). CI blocks on any failure.
+- **No AI `Co-Authored-By:` trailers.** Do not append
+  `Co-Authored-By: Claude …`, `Co-Authored-By: Copilot …`, or any
+  similar trailer naming an AI assistant on commits in this repo.
+  This project follows the Developer Certificate of Origin: every
+  author listed on a commit is asserting the DCO, which only a real
+  person can do, and noreply@*.com addresses cannot sign off. The
+  human running the tooling is the sole author. Use `Signed-off-by:`
+  trailers (added automatically by `git commit -s`) to satisfy DCO;
+  every commit on `main` must be both DCO-signed-off and GPG-signed.
 
 ## V1 vs V2 RA APIs
 

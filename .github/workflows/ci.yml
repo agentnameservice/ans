@@ -58,11 +58,23 @@ jobs:
       # is unenforceable in some jurisdictions) and no current dep
       # uses them, so requiring an explicit allowlist amendment is
       # the safer default.
+      #
+      # --ignore modernc.org/mathutil: the LICENSE file at the module
+      # root IS BSD-3-Clause (three clauses: source redistribution,
+      # binary redistribution, no endorsement) but the third clause's
+      # wording — "the names of the authors nor the names of the
+      # contributors" — deviates from the SPDX BSD-3-Clause template's
+      # "the name of the copyright holder nor the names of its
+      # contributors", which prevents google/licenseclassifier from
+      # auto-matching it. Functionally equivalent; manually verified.
+      # Other modernc.org modules (libc, memory, sqlite) classify
+      # cleanly. Re-verify the LICENSE on any mathutil version bump.
       - name: Check dependency licenses
         run: |
           go install github.com/google/go-licenses@latest
           go-licenses check ./... \
-            --allowed_licenses=MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0
+            --allowed_licenses=MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0 \
+            --ignore=modernc.org/mathutil
 
       - name: Run tests with coverage (90% threshold)
         run: make test-cover

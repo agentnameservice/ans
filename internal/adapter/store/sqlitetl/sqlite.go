@@ -20,7 +20,7 @@ import (
 	"time"
 
 	"github.com/jmoiron/sqlx"
-	_ "github.com/mattn/go-sqlite3" // driver
+	_ "modernc.org/sqlite" // driver
 
 	"github.com/godaddy/ans/internal/domain"
 )
@@ -49,11 +49,11 @@ func Open(ctx context.Context, path string) (*DB, error) {
 			}
 		}
 	}
-	dsn := path + "?_foreign_keys=on&_busy_timeout=5000&_journal_mode=WAL"
+	dsn := path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
 	if path == ":memory:" {
-		dsn = path + "?_foreign_keys=on&_busy_timeout=5000"
+		dsn = path + "?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)"
 	}
-	sqlxDB, err := sqlx.ConnectContext(ctx, "sqlite3", dsn)
+	sqlxDB, err := sqlx.ConnectContext(ctx, "sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite_tl: connect: %w", err)
 	}
