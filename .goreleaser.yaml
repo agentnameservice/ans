@@ -5,9 +5,19 @@
 #   ans-dns     — development DNS server
 #
 # All four are pure Go (modernc.org/sqlite is a Go transpilation of
-# upstream SQLite, so the SQLite-backed RA and TL no longer need CGO),
-# which means the same goos/goarch matrix applies uniformly: linux,
-# darwin, and windows on amd64 and arm64.
+# upstream SQLite, so the SQLite-backed RA and TL don't need CGO).
+# The release matrix is linux + darwin × amd64 + arm64.
+#
+# Why no windows: ans-tl depends on github.com/transparency-dev/tessera's
+# storage/posix backend, which calls FcntlFlock / O_DIRECTORY / Flock_t
+# / F_WRLCK / F_SETLKW. These are POSIX file-locking primitives and are
+# undefined in Go's syscall_windows.go (Windows uses LockFileEx and a
+# different file-system semantics). darwin works because macOS is
+# POSIX-compliant; windows is not. Rather than ship a heterogeneous
+# archive set (no ans-tl on windows; the other three are buildable),
+# we drop windows entirely. Windows users who need to run any of the
+# binaries can do so via the Dockerfile.* images under WSL2 or Docker
+# Desktop, where the underlying filesystem is POSIX.
 #
 # Library consumers continue to use `go get` / module versions — only
 # the binaries are packaged here.
@@ -31,7 +41,7 @@ builds:
     binary: ans-ra
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
@@ -47,7 +57,7 @@ builds:
     binary: ans-tl
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
@@ -63,7 +73,7 @@ builds:
     binary: ans-verify
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
@@ -79,7 +89,7 @@ builds:
     binary: ans-dns
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
     mod_timestamp: "{{ .CommitTimestamp }}"
     flags:
@@ -101,10 +111,6 @@ archives:
     name_template: "ans_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     formats:
       - tar.gz
-    format_overrides:
-      - goos: windows
-        formats:
-          - zip
     files:
       - LICENSE
       - README.md
