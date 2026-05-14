@@ -18,7 +18,7 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.11.1
 	github.com/transparency-dev/tessera v1.0.2
-	golang.org/x/mod v0.35.0
+	golang.org/x/mod v0.36.0
 	modernc.org/sqlite v1.50.0
 )
 
