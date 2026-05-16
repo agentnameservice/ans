@@ -39,6 +39,14 @@ type registrationRequest struct {
 	ServerCsrPEM              string        `json:"serverCsrPEM,omitempty"`
 	ServerCertificatePEM      string        `json:"serverCertificatePEM,omitempty"`
 	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
+
+	// AgentCardContent is the optional ANS Trust Card body the
+	// operator submits per ANS_SPEC.md §A.1. Modeled as
+	// json.RawMessage so the bytes reach the service layer without
+	// re-marshaling — JCS canonicalization is byte-precise, and any
+	// round-trip through map[string]any would risk reordering or
+	// number normalization that would shift the resulting digest.
+	AgentCardContent json.RawMessage `json:"agentCardContent,omitempty"`
 }
 
 type endpointDTO struct {
@@ -153,6 +161,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		ServerCsrPEM:              req.ServerCsrPEM,
 		ServerCertificatePEM:      req.ServerCertificatePEM,
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
+		AgentCardContent:          []byte(req.AgentCardContent),
 	})
 	if err != nil {
 		WriteError(w, err)

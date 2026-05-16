@@ -732,6 +732,8 @@ type handlerFixture struct {
 	router chi.Router
 	outbox *sqlite.OutboxStore
 	svc    *service.RegistrationService // exposed for direct-handler tests
+	agents *sqlite.AgentStore           // exposed for tests that assert on stored-aggregate state
+	ctx    context.Context
 }
 
 func newHandlerFixture(t *testing.T) *handlerFixture {
@@ -830,7 +832,13 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	r.With(writeOwn).Delete("/v1/agents/{agentId}/certificates/server/renewal", v1renH.CancelServerCertRenewal)
 	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server/renewal/verify-acme", v1renH.VerifyRenewalACME)
 
-	return &handlerFixture{router: r, outbox: outbox, svc: svc}
+	return &handlerFixture{
+		router: r,
+		outbox: outbox,
+		svc:    svc,
+		agents: agents,
+		ctx:    context.Background(),
+	}
 }
 
 // asOwner wraps a request with a synthetic Identity matching the
