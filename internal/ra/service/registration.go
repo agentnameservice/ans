@@ -324,18 +324,8 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	}
 	reg.ServerCSR = pendingServerCSR
 
-	// Hash the optional ANS Trust Card body if the operator submitted
-	// one (ANS_SPEC.md §A.1). The hash is the durable record; the
-	// content itself is discarded immediately after canonicalization.
-	if len(req.AgentCardContent) > 0 {
-		hashHex, err := hashAgentCardContent(req.AgentCardContent)
-		if err != nil {
-			return nil, domain.NewValidationError(
-				"INVALID_AGENT_CARD_CONTENT",
-				fmt.Sprintf("agentCardContent could not be canonicalized: %v", err),
-			)
-		}
-		reg.CapabilitiesHash = hashHex
+	if err := applyAgentCardContentHash(reg, req.AgentCardContent); err != nil {
+		return nil, err
 	}
 
 	// Generate the ACME DNS-01 challenge token + expiry. The only

@@ -28,6 +28,30 @@ func hashAgentCardContent(content []byte) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// applyAgentCardContentHash hashes the optional agentCardContent
+// the operator submitted on the V2 registration request and stores
+// the digest on the aggregate per ANS_SPEC.md §A.1. Empty content
+// is a no-op (the spec-conformant "no Trust Card body submitted"
+// path leaves CapabilitiesHash empty so the activation flow omits
+// the metadataHashes.capabilitiesHash key).
+//
+// Malformed JSON surfaces as INVALID_AGENT_CARD_CONTENT rather than
+// silently dropping the digest.
+func applyAgentCardContentHash(reg *domain.AgentRegistration, content []byte) error {
+	if len(content) == 0 {
+		return nil
+	}
+	hashHex, err := hashAgentCardContent(content)
+	if err != nil {
+		return domain.NewValidationError(
+			"INVALID_AGENT_CARD_CONTENT",
+			fmt.Sprintf("agentCardContent could not be canonicalized: %v", err),
+		)
+	}
+	reg.CapabilitiesHash = hashHex
+	return nil
+}
+
 // fingerprintOf returns the SHA-256 fingerprint of the DER certificate
 // inside the given PEM string, formatted as `SHA256:<lowercase-hex>`.
 // The `SHA256:` prefix matches the algorithm-prefixed form the
