@@ -174,8 +174,38 @@ type Attestations struct {
 	DNSRecordsProvisioned []DNSRecord       `json:"dnsRecordsProvisioned,omitempty"`
 	IdentityCerts         []CertificateInfo `json:"identityCerts,omitempty"`
 	ServerCerts           []CertificateInfo `json:"serverCerts,omitempty"`
-	MetadataHashes        map[string]string `json:"metadataHashes,omitempty"`
+	// MetadataHashes carries SHA-256 hex-lowercase digests of
+	// artifacts the operator submitted at registration time. The
+	// well-known map keys are reserved by ANS_SPEC.md and reused
+	// across this package via the constants below
+	// (MetadataHashKeyCapabilitiesHash, …).
+	//
+	// `omitempty` on the map makes the canonical envelope identical
+	// for events whose operator submitted no metadata and events
+	// whose map happens to be empty. Both serialize without the
+	// `metadataHashes` key, keeping leaf-hash stability across the
+	// presence/absence boundary.
+	MetadataHashes map[string]string `json:"metadataHashes,omitempty"`
 }
+
+// Reserved keys for Attestations.MetadataHashes. Values stored in
+// the map under these keys are hex-lowercase SHA-256 digests
+// (64 lowercase hex chars).
+const (
+	// MetadataHashKeyCapabilitiesHash is the SHA-256(JCS(agentCardContent))
+	// computed at activation per ANS_SPEC.md §A.1. Operators submit the
+	// ANS Trust Card body (§A.2 — the document hosted at
+	// /.well-known/ans/trust-card.json) on the V2 registration request
+	// as `agentCardContent`; the RA hashes it and seals the digest under
+	// this key. The AIM later verifies the live hosted Trust Card content
+	// against this value.
+	//
+	// Distinct from any per-endpoint metadataHash on AgentEndpoint, which
+	// hashes the protocol-native metadata (e.g., the A2A AgentCard at
+	// /.well-known/agent-card.json) rather than the agent-level
+	// ANS Trust Card.
+	MetadataHashKeyCapabilitiesHash = "capabilitiesHash"
+)
 
 // DNSRecord is one DNS record attesting the agent's *production*
 // DNS state at event time — the records an independent verifier

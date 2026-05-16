@@ -462,6 +462,121 @@ func TestType_IsValid(t *testing.T) {
 	}
 }
 
+// TestAttestations_MetadataHashesCapabilitiesHash exercises the
+// well-known `capabilitiesHash` key on the metadataHashes map. The
+// canonical wire shape and leaf-hash stability across "field absent"
+// vs "field present" are both load-bearing for AIM verification.
+func TestAttestations_MetadataHashesCapabilitiesHash(t *testing.T) {
+	t.Parallel()
+
+	hashHex := "9f3a2b1c4d5e6f7890abcdef0123456789abcdef0123456789abcdef01234567"
+
+	tests := []struct {
+		name    string
+		setHash bool
+		// substrings the canonical bytes MUST contain.
+		mustContain []string
+		// substrings the canonical bytes MUST NOT contain.
+		mustOmit []string
+	}{
+		{
+			name:    "absent_omits_metadataHashes_key",
+			setHash: false,
+			mustOmit: []string{
+				"metadataHashes",
+				"capabilitiesHash",
+			},
+		},
+		{
+			name:    "present_writes_capabilitiesHash_under_metadataHashes",
+			setHash: true,
+			mustContain: []string{
+				`"metadataHashes":{`,
+				`"capabilitiesHash":"` + hashHex + `"`,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := event.Attestations{
+				DomainValidation: "ACME-DNS-01",
+			}
+			if tc.setHash {
+				a.MetadataHashes = map[string]string{
+					event.MetadataHashKeyCapabilitiesHash: hashHex,
+				}
+			}
+			out, err := json.Marshal(a)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			s := string(out)
+			for _, want := range tc.mustContain {
+				if !strings.Contains(s, want) {
+					t.Errorf("missing %q in %s", want, s)
+				}
+			}
+			for _, bad := range tc.mustOmit {
+				if strings.Contains(s, bad) {
+					t.Errorf("unexpected %q in %s", bad, s)
+				}
+			}
+		})
+	}
+}
+
+// TestAttestations_LeafStabilityAcrossCapabilitiesHashAbsence pins the
+// invariant that an envelope whose Attestations.MetadataHashes map is
+// nil produces the same canonical bytes (and therefore the same leaf
+// hash) as an envelope whose map is explicitly empty. The AIM relies
+// on this stability when comparing badge responses across reads.
+func TestAttestations_LeafStabilityAcrossCapabilitiesHashAbsence(t *testing.T) {
+	t.Parallel()
+
+	mkAttestations := func(empty map[string]string) event.Attestations {
+		return event.Attestations{
+			DomainValidation: "ACME-DNS-01",
+			MetadataHashes:   empty,
+		}
+	}
+	withNil, err := json.Marshal(mkAttestations(nil))
+	if err != nil {
+		t.Fatalf("marshal nil: %v", err)
+	}
+	withEmpty, err := json.Marshal(mkAttestations(map[string]string{}))
+	if err != nil {
+		t.Fatalf("marshal empty: %v", err)
+	}
+	if !bytes.Equal(withNil, withEmpty) {
+		t.Errorf("nil vs empty diverge:\nnil:   %s\nempty: %s",
+			string(withNil), string(withEmpty))
+	}
+
+	// And the SHA-256 of the canonical bytes must match: this drives
+	// leaf-hash stability through the envelope's SigningInput.
+	if sha256.Sum256(withNil) != sha256.Sum256(withEmpty) {
+		t.Errorf("hashes diverge across nil/empty (defeats leaf stability)")
+	}
+}
+
+// TestAttestations_CapabilitiesHashHexFormat documents the wire format
+// the AIM expects: 64 lowercase hex chars produced by
+// hex.EncodeToString(sha256(jcs(content))). Regressions on this format
+// are observable as AIM verification failures even when the underlying
+// hash is correct.
+func TestAttestations_CapabilitiesHashHexFormat(t *testing.T) {
+	t.Parallel()
+	digest := sha256.Sum256([]byte(`{"ansName":"ans://v1.0.0.example.com"}`))
+	got := hex.EncodeToString(digest[:])
+	if len(got) != 64 {
+		t.Fatalf("hex digest must be 64 chars, got %d", len(got))
+	}
+	if got != strings.ToLower(got) {
+		t.Errorf("hex digest must be lowercase, got %q", got)
+	}
+}
+
 // ----- helpers -----
 
 var update = boolPtr(os.Getenv("UPDATE_GOLDEN") != "")
