@@ -1,0 +1,88 @@
+{
+  "$schema": "../schemas/anchor-vectors.schema.json",
+  "comment": "Real public LEIs from the GLEIF Global LEI Index (https://search.gleif.org). Each LEI passes the ISO 17442 §5.1 mod-97 check by construction; these vectors validate the AnchorResolver's Canonicalize against actual entity identifiers in production use, not just synthetic ones. Add new vectors by querying the public GLEIF API at https://api.gleif.org/api/v1/lei-records?filter[lei]=<LEI> and confirming the entity status.",
+  "vectors": [
+    {
+      "label": "GLEIF documentation example (often cited; smoke test)",
+      "lei": "529900T8BM49AURSDO55",
+      "louPrefix": "5299",
+      "expectedCanonicalize": "ok",
+      "notes": "Used throughout the ANS reference implementation as a base smoke test. Documented widely in GLEIF ISO 17442 reference material."
+    },
+    {
+      "label": "Apple Inc. (US)",
+      "lei": "HWUPKR0MPOU8FGXBT394",
+      "louPrefix": "HWUP",
+      "expectedCanonicalize": "ok",
+      "notes": "Tests an alphabetic-prefix LOU, exercising the letter→digit-pair expansion path in the mod-97 check."
+    },
+    {
+      "label": "Microsoft Corporation (US)",
+      "lei": "INR2EJN1ERAN0W5ZP974",
+      "louPrefix": "INR2",
+      "expectedCanonicalize": "ok",
+      "notes": "Mixed alphanumeric LOU prefix. Confirms that the resolver lowercases input before validation does not corrupt the canonical form (the resolver uppercases, but operator submission may be lowercase)."
+    },
+    {
+      "label": "European Central Bank (DE)",
+      "lei": "549300DTUYXVMJXZNY75",
+      "louPrefix": "5493",
+      "expectedCanonicalize": "ok",
+      "notes": "Numeric-prefix LOU with mostly alphabetic body. Exercises a different mod-97 path than the doc example."
+    }
+  ],
+  "lowercaseInputs": [
+    {
+      "label": "Lowercase input is canonicalized to uppercase",
+      "input": "529900t8bm49aursdo55",
+      "expectedCanonical": "529900T8BM49AURSDO55"
+    },
+    {
+      "label": "Whitespace trimmed",
+      "input": "  HWUPKR0MPOU8FGXBT394  ",
+      "expectedCanonical": "HWUPKR0MPOU8FGXBT394"
+    }
+  ],
+  "rejectVectors": [
+    {
+      "label": "Empty input",
+      "input": "",
+      "expectedCode": "LEI_BAD_FORMAT"
+    },
+    {
+      "label": "19 characters (too short)",
+      "input": "529900T8BM49AURSDO5",
+      "expectedCode": "LEI_BAD_FORMAT"
+    },
+    {
+      "label": "21 characters (too long)",
+      "input": "529900T8BM49AURSDO551",
+      "expectedCode": "LEI_BAD_FORMAT"
+    },
+    {
+      "label": "Embedded hyphen",
+      "input": "5299-00T8BM49AURSDO55",
+      "expectedCode": "LEI_BAD_FORMAT"
+    },
+    {
+      "label": "Embedded space",
+      "input": "529900 T8BM49AURSDO55",
+      "expectedCode": "LEI_BAD_FORMAT"
+    },
+    {
+      "label": "Special character",
+      "input": "529900T8BM49AURSDO5!",
+      "expectedCode": "LEI_BAD_FORMAT"
+    },
+    {
+      "label": "Doc example with last digit perturbed (mod-97 fails)",
+      "input": "529900T8BM49AURSDO56",
+      "expectedCode": "LEI_BAD_CHECK_DIGITS"
+    },
+    {
+      "label": "Apple LEI with last digit perturbed (mod-97 fails)",
+      "input": "HWUPKR0MPOU8FGXBT395",
+      "expectedCode": "LEI_BAD_CHECK_DIGITS"
+    }
+  ]
+}
