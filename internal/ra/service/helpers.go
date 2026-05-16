@@ -11,6 +11,33 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
+// applyDNSRecordStyle resolves the DNS-record-style for the new
+// registration and stores it on the aggregate.
+//
+// V1 lane is pinned to "legacy" regardless of the request: V1 callers
+// predate the Consolidated Approach and their tooling expects the
+// original `_ans` TXT shape. V1 has no dnsRecordStyle field on the
+// wire, so this branch is the only path V1 registrations take.
+// V2 callers honor req.DNSRecordStyle: empty normalizes to
+// DefaultDNSRecordStyle (consolidated); invalid values surface as
+// INVALID_DNS_RECORD_STYLE.
+func applyDNSRecordStyle(reg *domain.AgentRegistration, req RegisterRequest) error {
+	switch {
+	case req.SchemaVersion == "V1":
+		reg.DNSRecordStyle = domain.DNSRecordStyleLegacy
+	case req.DNSRecordStyle == "":
+		reg.DNSRecordStyle = domain.DefaultDNSRecordStyle
+	case !req.DNSRecordStyle.IsValid():
+		return domain.NewValidationError(
+			"INVALID_DNS_RECORD_STYLE",
+			fmt.Sprintf("dnsRecordStyle %q is not one of consolidated, legacy, both", string(req.DNSRecordStyle)),
+		)
+	default:
+		reg.DNSRecordStyle = req.DNSRecordStyle
+	}
+	return nil
+}
+
 // fingerprintOf returns the SHA-256 fingerprint of the DER certificate
 // inside the given PEM string, formatted as `SHA256:<lowercase-hex>`.
 // The `SHA256:` prefix matches the algorithm-prefixed form the

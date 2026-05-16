@@ -39,6 +39,14 @@ type registrationRequest struct {
 	ServerCsrPEM              string        `json:"serverCsrPEM,omitempty"`
 	ServerCertificatePEM      string        `json:"serverCertificatePEM,omitempty"`
 	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
+
+	// DNSRecordStyle selects which DNS record family the RA emits
+	// for this registration. One of "consolidated" (default,
+	// recommended), "legacy" (original `_ans` TXT shape), "both"
+	// (transition union). Empty/missing → consolidated. Invalid
+	// value rejected with 422 INVALID_DNS_RECORD_STYLE. See
+	// ANS_SPEC.md §4.4.2 for record-shape semantics.
+	DNSRecordStyle string `json:"dnsRecordStyle,omitempty"`
 }
 
 type endpointDTO struct {
@@ -153,6 +161,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		ServerCsrPEM:              req.ServerCsrPEM,
 		ServerCertificatePEM:      req.ServerCertificatePEM,
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
+		DNSRecordStyle:            domain.DNSRecordStyle(req.DNSRecordStyle),
 	})
 	if err != nil {
 		WriteError(w, err)

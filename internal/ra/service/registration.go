@@ -72,6 +72,14 @@ type RegisterRequest struct {
 	ServerCertificatePEM      string
 	ServerCertificateChainPEM string
 	SchemaVersion             string
+
+	// DNSRecordStyle selects which DNS record family the RA emits
+	// in dnsRecordsProvisioned and tells the operator to publish.
+	// "consolidated" (default), "legacy", or "both". Empty value is
+	// normalized to domain.DefaultDNSRecordStyle. Invalid value
+	// surfaces as INVALID_DNS_RECORD_STYLE before the aggregate is
+	// created.
+	DNSRecordStyle domain.DNSRecordStyle
 }
 
 // RegisterResponse is returned to the HTTP handler after a successful
@@ -309,6 +317,10 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		return nil, err
 	}
 	reg.ServerCSR = pendingServerCSR
+
+	if err := applyDNSRecordStyle(reg, req); err != nil {
+		return nil, err
+	}
 
 	// Generate the ACME DNS-01 challenge token + expiry. The only
 	// DNS action the operator should take before verify-acme.

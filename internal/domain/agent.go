@@ -103,6 +103,21 @@ type AgentRegistration struct {
 	// deviation.
 	ACMEChallenge ACMEChallenge `json:"acmeChallenge,omitzero"`
 
+	// CapabilitiesHash is the hex-lowercase SHA-256 digest of the
+	// operator's submitted Trust Card body. SVCB record emission
+	// surfaces it as the `card-sha256=` SvcParam (base64url-encoded)
+	// when non-empty; empty leaves the SvcParam absent and verifiers
+	// fall back to TOFU. PR13 carries the read-side surface; the
+	// populator path is intentionally not wired in this PR.
+	CapabilitiesHash string `json:"capabilitiesHash,omitempty"`
+
+	// DNSRecordStyle selects which DNS record family the RA emits
+	// for this registration: "consolidated" (Consolidated Approach
+	// SVCB rows, default), "legacy" (the original `_ans` TXT shape),
+	// or "both" (the transition union). Empty at the domain layer
+	// is treated as DefaultDNSRecordStyle by ComputeRequiredDNSRecords.
+	DNSRecordStyle DNSRecordStyle `json:"dnsRecordStyle,omitempty"`
+
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.
 	PendingEvents []Event `json:"-"`
