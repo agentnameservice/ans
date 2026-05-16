@@ -1065,6 +1065,36 @@ components:
           type: string
         identityCsrPEM:
           type: string
+        agentCardContent:
+          type: object
+          additionalProperties: true
+          description: |
+            Optional JSON object containing the ANS Trust Card body
+            (ANS_SPEC.md §A.2 — the document hosted at
+            /.well-known/ans/trust-card.json). When present, the RA
+            computes SHA-256 over the JCS-canonical bytes
+            (RFC 8785) of the object and seals the hex-lowercase
+            digest into the AGENT_REGISTERED Transparency Log
+            event under attestations.metadataHashes.capabilitiesHash.
+
+            The RA does not validate the object's schema; it hashes
+            and forgets. Operators that want their hosted Trust Card
+            to be tamper-evident submit the same JSON body they will
+            host at their canonical Trust Card URL.
+
+            Distinct from the per-endpoint metaDataHash on AgentEndpoint:
+            that field carries a hash of the protocol-native metadata
+            (e.g., the A2A AgentCard at /.well-known/agent-card.json).
+            agentCardContent is the agent-level ANS Trust Card body
+            and produces the agent-level capabilitiesHash.
+          example:
+            ansName: "ans://v1.5.0.support.example.com"
+            agentDisplayName: "Acme Support Agent"
+            version: "1.5.0"
+            endpoints:
+              - protocol: "A2A"
+                agentUrl: "https://support.example.com"
+                metadataUrl: "https://support.example.com/.well-known/agent-card.json"
       required:
         - agentDisplayName
         - version

@@ -716,7 +716,32 @@ components:
             version: { type: string }
         attestations:
           type: object
-          description: Event-type specific attestation payload.
+          description: |
+            Event-type specific attestation payload.
+
+            For AGENT_REGISTERED events, the optional
+            `metadataHashes` map carries SHA-256 hex-lowercase
+            digests of artifacts the operator submitted at
+            registration. The well-known map key
+            `capabilitiesHash` is the SHA-256(JCS(agentCardContent))
+            sealed at activation per ANS_SPEC.md §A.1; the AIM
+            uses it to verify the live ANS Trust Card content
+            against what was registered. When `agentCardContent`
+            was omitted on registration, the `capabilitiesHash`
+            key is absent.
+          properties:
+            metadataHashes:
+              type: object
+              description: |
+                Map of well-known hash names to SHA-256 hex-lowercase
+                digests. Reserved keys: `capabilitiesHash`
+                (SHA-256(JCS(agentCardContent)) per ANS_SPEC.md §A.1).
+                Additional keys reserved for future expansion.
+              additionalProperties:
+                type: string
+                pattern: '^[0-9a-f]{64}$'
+              example:
+                capabilitiesHash: "9f3a2b1c4d5e6f7890abcdef0123456789abcdef0123456789abcdef01234567"
 
     AppendResponse:
       type: object
