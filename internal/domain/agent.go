@@ -135,6 +135,20 @@ type AgentRegistration struct {
 	// is treated as DefaultDNSRecordStyle by ComputeRequiredDNSRecords.
 	DNSRecordStyle DNSRecordStyle `json:"dnsRecordStyle,omitempty"`
 
+	// AnchorClaim records the verified IdentityClaim that produced
+	// this registration, when the caller supplied one through ANS-0's
+	// AnchorResolver port. Nil for legacy FQDN-only deployments where
+	// the registration's identity is implicit in AgentHost (and AnsName
+	// when versioned). When non-nil, AnchorClaim.AnchorType authoritatively
+	// identifies the anchor profile — non-FQDN profiles (DID, LEI) force
+	// base-only registration invariants because the X.509 URI SAN binding
+	// the versioned ANS-2 path relies on does not apply.
+	//
+	// Slice 5a stores AnchorClaim in-memory only; persistence lands in
+	// Slice 5b through migration 009 (anchor_type + anchor_resolved_id
+	// columns on agent_registrations).
+	AnchorClaim *IdentityClaim `json:"anchorClaim,omitempty"`
+
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.
 	PendingEvents []Event `json:"-"`
@@ -157,6 +171,13 @@ type AgentRegistration struct {
 // Mixed forms are rejected: a version requires an Identity CSR (and
 // vice versa) — the Identity Certificate's URI SAN encodes the
 // ANSName, so the two artifacts are coupled.
+//
+// Non-FQDN anchors (DID, LEI) force the base-only path: today the
+// versioned URI SAN binding is FQDN-shaped and a future amendment
+// will admit DID-shaped URIs into the SAN. Until then, an
+// AnchorClaim with anchorType in {did, lei} accompanied by a non-zero
+// ansName or non-nil identityCSR is rejected with
+// NON_FQDN_REQUIRES_BASE_ONLY.
 func NewRegistration(
 	agentID string,
 	ownerID string,
@@ -167,6 +188,7 @@ func NewRegistration(
 	endpoints []AgentEndpoint,
 	serverCert *ByocServerCertificate,
 	identityCSR *AgentCSR,
+	anchorClaim *IdentityClaim,
 	now time.Time,
 ) (*AgentRegistration, error) {
 	if agentID == "" {
@@ -187,6 +209,20 @@ func NewRegistration(
 		return nil, NewValidationError(
 			"VERSIONED_REQUIRES_IDENTITY_CSR",
 			"version submitted without an identity CSR: versioned registrations require both",
+		)
+	}
+
+	// Non-FQDN anchors force base-only until ANS-2 admits a DID-shaped URI
+	// SAN. A versioned (or CSR-bearing) DID/LEI registration is rejected
+	// at the boundary so the aggregate's invariants stay coherent.
+	if anchorClaim != nil &&
+		anchorClaim.AnchorType != "" &&
+		anchorClaim.AnchorType != AnchorTypeFQDN &&
+		!baseOnly {
+		return nil, NewValidationError(
+			"NON_FQDN_REQUIRES_BASE_ONLY",
+			fmt.Sprintf("anchor type %q must be registered as base-only (no version, no identity CSR) until ANS-2 admits non-FQDN URI SANs",
+				anchorClaim.AnchorType),
 		)
 	}
 
@@ -242,11 +278,12 @@ func NewRegistration(
 	}
 
 	reg := &AgentRegistration{
-		AgentID:   agentID,
-		OwnerID:   ownerID,
-		AnsName:   ansName,
-		AgentHost: fqdn,
-		Status:    StatusPendingValidation,
+		AgentID:     agentID,
+		OwnerID:     ownerID,
+		AnsName:     ansName,
+		AgentHost:   fqdn,
+		AnchorClaim: anchorClaim,
+		Status:      StatusPendingValidation,
 		Details: RegistrationDetails{
 			RegistrationTimestamp: now,
 			DisplayName:           displayName,

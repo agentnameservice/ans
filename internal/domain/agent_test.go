@@ -29,7 +29,7 @@ func newValidRegistration(t *testing.T) *AgentRegistration {
 
 	reg, err := NewRegistration(
 		"agent-uuid", "owner-1", ansName, "", "My Agent", "desc",
-		endpoints, cert, &csr, time.Now(),
+		endpoints, cert, &csr, nil, time.Now(),
 	)
 	require.NoError(t, err)
 	return reg
@@ -75,7 +75,7 @@ func TestNewRegistration_Validations(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewRegistration(tc.agentID, tc.ownerID, tc.ansName, "", tc.displayName, tc.description, tc.endpoints, tc.cert, tc.csr, time.Now())
+			_, err := NewRegistration(tc.agentID, tc.ownerID, tc.ansName, "", tc.displayName, tc.description, tc.endpoints, tc.cert, tc.csr, nil, time.Now())
 			require.Error(t, err)
 			var de *Error
 			require.ErrorAs(t, err, &de)
@@ -90,7 +90,7 @@ func TestNewRegistration_CertFQDNMismatch(t *testing.T) {
 	ep := []AgentEndpoint{{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"}}
 	cert := &ByocServerCertificate{SubjectCommonName: "other.example.com"}
 
-	_, err := NewRegistration("a", "o", ansName, "", "", "", ep, cert, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "", "", "", ep, cert, &csr, nil, time.Now())
 	assert.ErrorIs(t, err, ErrCertificate)
 }
 
@@ -223,7 +223,7 @@ func TestNewRegistration_InvalidEndpoint(t *testing.T) {
 	badEndpoints := []AgentEndpoint{
 		{Protocol: ProtocolMCP, AgentURL: "https://other.example.com/mcp"},
 	}
-	_, err := NewRegistration("a", "o", ansName, "", "", "", badEndpoints, nil, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "", "", "", badEndpoints, nil, &csr, nil, time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrValidation)
 }
@@ -311,4 +311,102 @@ func TestRegistrationDetails_EffectiveTimestamp(t *testing.T) {
 	assert.Equal(t, renewed, d2.EffectiveTimestamp())
 	// Original unchanged.
 	assert.Equal(t, reg, d.EffectiveTimestamp())
+}
+
+func TestNewRegistration_AnchorClaim_FQDNStoredOnAggregate(t *testing.T) {
+	// FQDN claim alongside a versioned registration: claim attaches
+	// to the aggregate; existing versioned-FQDN behavior is preserved.
+	ansName, err := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	require.NoError(t, err)
+	csr := NewIdentityCSR("csr-1", "-----BEGIN CSR-----", time.Now())
+	endpoints := []AgentEndpoint{
+		{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+	}
+	claim := &IdentityClaim{
+		AnchorType:   AnchorTypeFQDN,
+		ResolvedID:   "agent.example.com",
+		PublicKeyJWK: []byte(`{"kty":"OKP"}`),
+		IssuedAt:     time.Now().UTC(),
+	}
+	reg, err := NewRegistration(
+		"agent-uuid", "owner-1", ansName, "", "Agent", "",
+		endpoints, nil, &csr, claim, time.Now(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, reg.AnchorClaim)
+	assert.Equal(t, AnchorTypeFQDN, reg.AnchorClaim.AnchorType)
+	assert.Equal(t, "agent.example.com", reg.AnchorClaim.ResolvedID)
+}
+
+func TestNewRegistration_AnchorClaim_DIDForcedBaseOnly(t *testing.T) {
+	// A DID anchor claim accompanied by a versioned ansName is
+	// rejected: until ANS-2 admits non-FQDN URI SANs, DID
+	// registrations must take the base-only path.
+	ansName, err := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	require.NoError(t, err)
+	csr := NewIdentityCSR("csr-1", "-----BEGIN CSR-----", time.Now())
+	endpoints := []AgentEndpoint{
+		{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+	}
+	claim := &IdentityClaim{
+		AnchorType:   AnchorTypeDID,
+		ResolvedID:   "did:web:agent.example.com",
+		PublicKeyJWK: []byte(`{"kty":"OKP"}`),
+		IssuedAt:     time.Now().UTC(),
+	}
+	_, err = NewRegistration(
+		"agent-uuid", "owner-1", ansName, "agent.example.com", "Agent", "",
+		endpoints, nil, &csr, claim, time.Now(),
+	)
+	require.Error(t, err)
+	assert.True(t, strings.Contains(err.Error(), "NON_FQDN_REQUIRES_BASE_ONLY") ||
+		strings.Contains(err.Error(), "must be registered as base-only"),
+		"expected NON_FQDN_REQUIRES_BASE_ONLY, got %v", err)
+}
+
+func TestNewRegistration_AnchorClaim_DIDBaseOnlyAccepted(t *testing.T) {
+	// DID + base-only is the only path admitted today: zero AnsName,
+	// nil CSR, AgentHost supplied (the service FQDN where the agent
+	// is reachable, distinct from the DID identity).
+	endpoints := []AgentEndpoint{
+		{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+	}
+	claim := &IdentityClaim{
+		AnchorType:   AnchorTypeDID,
+		ResolvedID:   "did:web:agent.example.com",
+		PublicKeyJWK: []byte(`{"kty":"OKP"}`),
+		IssuedAt:     time.Now().UTC(),
+	}
+	reg, err := NewRegistration(
+		"agent-uuid", "owner-1", AnsName{}, "agent.example.com", "Agent", "",
+		endpoints, nil, nil, claim, time.Now(),
+	)
+	require.NoError(t, err)
+	require.True(t, reg.IsBaseOnly())
+	require.NotNil(t, reg.AnchorClaim)
+	assert.Equal(t, AnchorTypeDID, reg.AnchorClaim.AnchorType)
+	assert.Equal(t, "did:web:agent.example.com", reg.AnchorClaim.ResolvedID)
+	// AgentHost (service FQDN) and AnchorClaim.ResolvedID are intentionally
+	// distinct for non-FQDN anchors.
+	assert.Equal(t, "agent.example.com", reg.AgentHost)
+}
+
+func TestNewRegistration_AnchorClaim_LEIBaseOnlyAccepted(t *testing.T) {
+	endpoints := []AgentEndpoint{
+		{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+	}
+	claim := &IdentityClaim{
+		AnchorType:   AnchorTypeLEI,
+		ResolvedID:   "529900T8BM49AURSDO55",
+		PublicKeyJWK: []byte(`{"kty":"OKP"}`),
+		IssuedAt:     time.Now().UTC(),
+	}
+	reg, err := NewRegistration(
+		"agent-uuid", "owner-1", AnsName{}, "agent.example.com", "Agent", "",
+		endpoints, nil, nil, claim, time.Now(),
+	)
+	require.NoError(t, err)
+	require.NotNil(t, reg.AnchorClaim)
+	assert.Equal(t, AnchorTypeLEI, reg.AnchorClaim.AnchorType)
+	assert.Equal(t, "529900T8BM49AURSDO55", reg.AnchorClaim.ResolvedID)
 }

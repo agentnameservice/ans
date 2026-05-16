@@ -102,6 +102,18 @@ type RegisterRequest struct {
 	// surfaces as INVALID_DNS_RECORD_STYLE before the aggregate is
 	// created.
 	DNSRecordStyle domain.DNSRecordStyle
+
+	// AnchorClaim is the verified IdentityClaim produced by an ANS-0
+	// AnchorResolver when the caller registered through the anchor-
+	// aware path. Nil for legacy FQDN-only callers; the service
+	// passes it through to domain.NewRegistration verbatim. Non-FQDN
+	// claims force base-only invariants until ANS-2 admits non-FQDN
+	// URI SANs (NewRegistration enforces this; NON_FQDN_REQUIRES_BASE_ONLY
+	// fires when an anchored versioned registration is submitted).
+	//
+	// Slice 5a stores AnchorClaim only in-memory; persistence lands
+	// in Slice 5b through migration 009.
+	AnchorClaim *domain.IdentityClaim
 }
 
 // RegisterResponse is returned to the HTTP handler after a successful
@@ -341,7 +353,7 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 
 	reg, err := domain.NewRegistration(
 		agentID, req.OwnerID, req.AnsName, req.AgentHost, req.DisplayName, req.Description,
-		req.Endpoints, byocCert, csrPtr, now,
+		req.Endpoints, byocCert, csrPtr, req.AnchorClaim, now,
 	)
 	if err != nil {
 		return nil, err
