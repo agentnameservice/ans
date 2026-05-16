@@ -526,3 +526,107 @@ func parseTestURI(t *testing.T, s string) []*url.URL {
 	}
 	return []*url.URL{u}
 }
+
+// TestVerifyACME_BaseOnly_NoIdentityCSRRequired pins Plan F #63:
+// a base-only registration (no version, no Identity CSR) must
+// progress through verify-acme without the MISSING_IDENTITY_CSR
+// error that pre-#63 code raised. The lifecycle still advances to
+// PENDING_DNS, just without the cert artifacts that the versioned
+// path produces. The server CSR path is unchanged regardless.
+//
+// Plan G's non-FQDN anchors (DID, LEI) all rely on this path
+// because NON_FQDN_REQUIRES_BASE_ONLY forces them base-only at
+// registration time. Without #63 every DID and LEI registration
+// would sit in PENDING_VALIDATION forever.
+func TestVerifyACME_BaseOnly_NoIdentityCSRRequired(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	// Build a base-only request: no version, no IdentityCSRPEM.
+	// AgentHost carries the FQDN identity in place of the ANSName.
+	baseReq := service.RegisterRequest{
+		OwnerID:     "owner-1",
+		AnsName:     domain.AnsName{}, // zero — base-only signal
+		AgentHost:   "base-only-test.example.com",
+		DisplayName: "BaseOnlyAgent",
+		Description: "verify-acme should succeed without IdentityCSR",
+		Endpoints: []domain.AgentEndpoint{{
+			Protocol:   domain.Protocol("MCP"),
+			AgentURL:   "https://base-only-test.example.com/mcp",
+			Transports: []domain.Transport{domain.Transport("SSE")},
+		}},
+		ServerCsrPEM: testServerCSR(t, "base-only-test.example.com"),
+		// IdentityCSRPEM intentionally empty.
+	}
+
+	resp, err := fx.svc.RegisterAgent(context.Background(), baseReq)
+	if err != nil {
+		t.Fatalf("base-only register: %v", err)
+	}
+	if resp.Registration.AgentID == "" {
+		t.Fatal("RegisterAgent returned empty AgentID")
+	}
+	if !resp.Registration.IsBaseOnly() {
+		t.Errorf("expected base-only, got AnsName=%q", resp.Registration.AnsName)
+	}
+
+	// verify-acme: pre-#63 this returned MISSING_IDENTITY_CSR.
+	if _, err := fx.svc.VerifyACME(context.Background(),
+		resp.Registration.AgentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("base-only verify-acme should succeed without identity CSR, got: %v", err)
+	}
+
+	// Confirm the aggregate advanced to PENDING_DNS.
+	loaded, err := fx.agents.FindByAgentID(context.Background(), resp.Registration.AgentID)
+	if err != nil {
+		t.Fatalf("FindByAgentID: %v", err)
+	}
+	if loaded.Status != domain.StatusPendingDNS {
+		t.Errorf("Status = %q, want PENDING_DNS", loaded.Status)
+	}
+	// Confirm no identity cert was issued (the cert table is empty
+	// for this agent because base-only skips the issuance branch).
+	identityCerts, err := fx.certs.FindIdentityCertificatesByAgent(context.Background(), resp.Registration.AgentID)
+	if err != nil {
+		t.Fatalf("FindIdentityCertificatesByAgent: %v", err)
+	}
+	if len(identityCerts) != 0 {
+		t.Errorf("base-only should have no identity certs, got %d", len(identityCerts))
+	}
+}
+
+// TestVerifyACME_Versioned_StillSignsIdentityCSR confirms that the
+// existing versioned path is unchanged: an Identity CSR submitted
+// at registration is signed at verify-acme, the cert is persisted,
+// and the aggregate advances to PENDING_DNS. Pins behavior so a
+// future refactor of the base-only branch cannot accidentally
+// regress the versioned flow.
+func TestVerifyACME_Versioned_StillSignsIdentityCSR(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	resp, err := fx.svc.RegisterAgent(context.Background(), fx.req)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	if _, err := fx.svc.VerifyACME(context.Background(),
+		resp.Registration.AgentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+
+	loaded, err := fx.agents.FindByAgentID(context.Background(), resp.Registration.AgentID)
+	if err != nil {
+		t.Fatalf("FindByAgentID: %v", err)
+	}
+	if loaded.Status != domain.StatusPendingDNS {
+		t.Errorf("Status = %q, want PENDING_DNS", loaded.Status)
+	}
+	identityCerts, err := fx.certs.FindIdentityCertificatesByAgent(context.Background(), resp.Registration.AgentID)
+	if err != nil {
+		t.Fatalf("FindIdentityCertificatesByAgent: %v", err)
+	}
+	if len(identityCerts) != 1 {
+		t.Errorf("versioned registration should have 1 identity cert after verify-acme, got %d", len(identityCerts))
+	}
+}
