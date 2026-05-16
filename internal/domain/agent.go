@@ -116,6 +116,13 @@ type AgentRegistration struct {
 	// matches the AIM's verification expectation directly.
 	CapabilitiesHash string `json:"capabilitiesHash,omitempty"`
 
+	// DNSRecordStyle selects which DNS record family the RA emits
+	// for this registration: "consolidated" (Consolidated Approach
+	// SVCB rows, default), "legacy" (the original `_ans` TXT shape),
+	// or "both" (the transition union). Empty at the domain layer
+	// is treated as DefaultDNSRecordStyle by ComputeRequiredDNSRecords.
+	DNSRecordStyle DNSRecordStyle `json:"dnsRecordStyle,omitempty"`
+
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.
 	PendingEvents []Event `json:"-"`

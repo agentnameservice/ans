@@ -28,6 +28,33 @@ func hashAgentCardContent(content []byte) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+// applyDNSRecordStyle resolves the DNS-record-style for the new
+// registration and stores it on the aggregate.
+//
+// V1 lane is pinned to "legacy" regardless of the request: V1 callers
+// predate the Consolidated Approach and their tooling expects the
+// original `_ans` TXT shape. V1 has no dnsRecordStyle field on the
+// wire, so this branch is the only path V1 registrations take.
+// V2 callers honor req.DNSRecordStyle: empty normalizes to
+// DefaultDNSRecordStyle (consolidated); invalid values surface as
+// INVALID_DNS_RECORD_STYLE.
+func applyDNSRecordStyle(reg *domain.AgentRegistration, req RegisterRequest) error {
+	switch {
+	case req.SchemaVersion == "V1":
+		reg.DNSRecordStyle = domain.DNSRecordStyleLegacy
+	case req.DNSRecordStyle == "":
+		reg.DNSRecordStyle = domain.DefaultDNSRecordStyle
+	case !req.DNSRecordStyle.IsValid():
+		return domain.NewValidationError(
+			"INVALID_DNS_RECORD_STYLE",
+			fmt.Sprintf("dnsRecordStyle %q is not one of consolidated, legacy, both", string(req.DNSRecordStyle)),
+		)
+	default:
+		reg.DNSRecordStyle = req.DNSRecordStyle
+	}
+	return nil
+}
+
 // applyAgentCardContentHash hashes the optional agentCardContent
 // the operator submitted on the V2 registration request and stores
 // the digest on the aggregate per ANS_SPEC.md §A.1. Empty content

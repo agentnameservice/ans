@@ -47,6 +47,14 @@ type registrationRequest struct {
 	// round-trip through map[string]any would risk reordering or
 	// number normalization that would shift the resulting digest.
 	AgentCardContent json.RawMessage `json:"agentCardContent,omitempty"`
+
+	// DNSRecordStyle selects which DNS record family the RA emits
+	// for this registration. One of "consolidated" (default,
+	// recommended), "legacy" (original `_ans` TXT shape), "both"
+	// (transition union). Empty/missing → consolidated. Invalid
+	// value rejected with 422 INVALID_DNS_RECORD_STYLE. See
+	// ANS_SPEC.md §4.4.2 for record-shape semantics.
+	DNSRecordStyle string `json:"dnsRecordStyle,omitempty"`
 }
 
 type endpointDTO struct {
@@ -162,6 +170,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		ServerCertificatePEM:      req.ServerCertificatePEM,
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
 		AgentCardContent:          []byte(req.AgentCardContent),
+		DNSRecordStyle:            domain.DNSRecordStyle(req.DNSRecordStyle),
 	})
 	if err != nil {
 		WriteError(w, err)

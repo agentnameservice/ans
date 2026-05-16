@@ -1095,6 +1095,28 @@ components:
               - protocol: "A2A"
                 agentUrl: "https://support.example.com"
                 metadataUrl: "https://support.example.com/.well-known/agent-card.json"
+        dnsRecordStyle:
+          type: string
+          enum: [consolidated, legacy, both]
+          description: |
+            Selects which DNS record family the RA emits for this
+            registration. Surfaces on the 202 register response's
+            dnsRecords[], on GET /v2/ans/agents/{agentId}, and on the
+            AGENT_REGISTERED TL event's
+            attestations.dnsRecordsProvisioned[].
+
+              consolidated (default, recommended): Consolidated
+                Approach SVCB rows at the bare FQDN per ANS_SPEC.md
+                §4.4.2, plus shared `_ans-`-prefixed records and TLSA.
+              legacy: original `_ans` TXT shape, supported
+                indefinitely for operators on existing zone-edit
+                tooling that targets `_ans.{fqdn}`.
+              both: union; the §4.4.2 transition shape.
+
+            Empty/missing → consolidated. Default points new
+            integrations at the lean shape per §4.4.2 SHOULD.
+          default: "consolidated"
+          example: "consolidated"
       required:
         - agentDisplayName
         - version

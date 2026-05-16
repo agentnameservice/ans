@@ -12,6 +12,10 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 	ansName, _ := NewAnsName(mustSemVer(1, 2, 3), "agent.example.com")
 	reg := &AgentRegistration{
 		AnsName: ansName,
+		// Force "both" style so this fixture exercises the union path:
+		// _ans TXT + Consolidated Approach SVCB. Tests below cover the
+		// single-style emission paths.
+		DNSRecordStyle: DNSRecordStyleBoth,
 		Endpoints: []AgentEndpoint{
 			{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
 			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},

@@ -86,6 +86,14 @@ type RegisterRequest struct {
 	// which hashes the protocol-native metadata (e.g., A2A AgentCard).
 	// Empty when omitted on the registration request.
 	AgentCardContent []byte
+
+	// DNSRecordStyle selects which DNS record family the RA emits
+	// in dnsRecordsProvisioned and tells the operator to publish.
+	// "consolidated" (default), "legacy", or "both". Empty value is
+	// normalized to domain.DefaultDNSRecordStyle. Invalid value
+	// surfaces as INVALID_DNS_RECORD_STYLE before the aggregate is
+	// created.
+	DNSRecordStyle domain.DNSRecordStyle
 }
 
 // RegisterResponse is returned to the HTTP handler after a successful
@@ -325,6 +333,10 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	reg.ServerCSR = pendingServerCSR
 
 	if err := applyAgentCardContentHash(reg, req.AgentCardContent); err != nil {
+		return nil, err
+	}
+
+	if err := applyDNSRecordStyle(reg, req); err != nil {
 		return nil, err
 	}
 
