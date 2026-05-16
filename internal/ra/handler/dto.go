@@ -40,12 +40,21 @@ func mapListResponse(res *service.ListResult) listResponse {
 		if eps, ok := res.Endpoints[reg.AgentID]; ok && eps != nil {
 			epSlice = eps.Endpoints
 		}
+		// AgentHost reads from reg.FQDN() so base-only registrations
+		// (zero AnsName) emit their stored AgentHost rather than an
+		// empty AnsName.FQDN(). Version stays empty for base-only —
+		// AnsName.Version() on a zero value would surface "0.0.0",
+		// which a client would mistake for a real version string.
+		version := ""
+		if !reg.IsBaseOnly() {
+			version = reg.AnsName.Version().String()
+		}
 		items = append(items, listItem{
 			AgentID:               reg.AgentID,
 			AgentDisplayName:      reg.Details.DisplayName,
 			AgentDescription:      reg.Details.Description,
-			Version:               reg.AnsName.Version().String(),
-			AgentHost:             reg.AnsName.FQDN(),
+			Version:               version,
+			AgentHost:             reg.FQDN(),
 			AnsName:               reg.AnsName.String(),
 			Status:                string(reg.Status),
 			TTL:                   300,
@@ -94,12 +103,21 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request) agentDetails {
 	// set (endpoints live in their own table and are returned as a
 	// sibling slice by the service layer).
 	reg.Endpoints = res.Endpoints
+	// AgentHost reads from reg.FQDN() so base-only registrations
+	// (zero AnsName) emit their stored AgentHost rather than an empty
+	// AnsName.FQDN(). Version stays empty for base-only — emitting
+	// "0.0.0" would let a client mistake the absence of a version for
+	// a real one.
+	version := ""
+	if !reg.IsBaseOnly() {
+		version = reg.AnsName.Version().String()
+	}
 	d := agentDetails{
 		AgentID:               reg.AgentID,
 		AgentDisplayName:      reg.Details.DisplayName,
 		AgentDescription:      reg.Details.Description,
-		Version:               reg.AnsName.Version().String(),
-		AgentHost:             reg.AnsName.FQDN(),
+		Version:               version,
+		AgentHost:             reg.FQDN(),
 		AnsName:               reg.AnsName.String(),
 		AgentStatus:           string(reg.Status),
 		Endpoints:             mapEndpointsToDTO(res.Endpoints),

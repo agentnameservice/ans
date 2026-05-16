@@ -226,15 +226,18 @@ func (s *AgentStore) ExistsByAnsName(ctx context.Context, ansName domain.AnsName
 }
 
 // ExistsActiveBaseOnlyByAgentHost returns true if a non-revoked,
-// non-failed base-only registration (ans_name empty) already claims
-// the given FQDN. The §3.2.0 path lets the same FQDN host multiple
+// non-failed base-only registration already claims the given FQDN.
+// Migration 008 stores ans_name as NULL for base-only rows, but the
+// pre-008 path could leave an empty string in place; the predicate
+// matches both shapes so the check stays correct across an in-place
+// upgrade. The §3.2.0 path lets the same FQDN host multiple
 // registration rows over time (a base-only registration revoked, then
 // re-registered) but only one can be live at any moment.
 func (s *AgentStore) ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string) (bool, error) {
 	var n int
 	const q = `SELECT COUNT(1) FROM agent_registrations
                 WHERE agent_host = ?
-                  AND ans_name = ''
+                  AND (ans_name IS NULL OR ans_name = '')
                   AND status NOT IN ('REVOKED', 'FAILED', 'EXPIRED')`
 	if err := s.db.extx(ctx).GetContext(ctx, &n, q, host); err != nil {
 		return false, err

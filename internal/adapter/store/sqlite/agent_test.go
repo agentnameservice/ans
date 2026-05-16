@@ -424,3 +424,100 @@ func TestNullableMsAndInt64(t *testing.T) {
 		t.Error("non-zero should map to non-nil")
 	}
 }
+
+// newBaseOnlyFixture builds a §3.2.0 base-only registration: zero
+// AnsName, AgentHost set explicitly. Status starts PENDING_VALIDATION
+// so ExistsActiveBaseOnlyByAgentHost returns it as "claimed."
+func newBaseOnlyFixture(t *testing.T, agentID, host string) *domain.AgentRegistration {
+	t.Helper()
+	return &domain.AgentRegistration{
+		AgentID:   agentID,
+		OwnerID:   "owner-1",
+		AgentHost: host,
+		Status:    domain.StatusPendingValidation,
+		Details: domain.RegistrationDetails{
+			RegistrationTimestamp: time.Now().UTC().Truncate(time.Millisecond),
+			DisplayName:           "Base-only " + agentID,
+		},
+	}
+}
+
+func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAgentStore(db)
+	ctx := context.Background()
+
+	// Empty store → false.
+	exists, err := store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com")
+	if err != nil {
+		t.Fatalf("empty: %v", err)
+	}
+	if exists {
+		t.Error("empty store should return false")
+	}
+
+	// Persist a base-only registration in PENDING_VALIDATION.
+	pending := newBaseOnlyFixture(t, "agent-base-1", "skill-a.example.com")
+	if err := store.Save(ctx, pending); err != nil {
+		t.Fatalf("save pending: %v", err)
+	}
+
+	exists, err = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com")
+	if err != nil {
+		t.Fatalf("after pending: %v", err)
+	}
+	if !exists {
+		t.Error("PENDING_VALIDATION base-only should count as claimed")
+	}
+
+	// Different FQDN → still false.
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-b.example.com")
+	if exists {
+		t.Error("unrelated FQDN should not match")
+	}
+
+	// Versioned registration on the same FQDN should NOT trigger the
+	// base-only conflict — the two paths track distinct namespaces.
+	versioned := newAgentFixture(t, "agent-versioned", "skill-c.example.com")
+	if err := store.Save(ctx, versioned); err != nil {
+		t.Fatalf("save versioned: %v", err)
+	}
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-c.example.com")
+	if exists {
+		t.Error("versioned row must not count as a base-only claim")
+	}
+
+	// Revoke the base-only row → conflict releases.
+	pending.Status = domain.StatusRevoked
+	if err := store.Save(ctx, pending); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com")
+	if exists {
+		t.Error("revoked base-only row should release the FQDN")
+	}
+}
+
+// TestAgentStore_ExistsByAnsName_ZeroIsFalse pins the contract
+// guarding base-only registrations: looking up the zero-value AnsName
+// must short-circuit to false rather than match every empty ans_name
+// row in the table (the pre-Plan-F shape would have collided every
+// base-only registration).
+func TestAgentStore_ExistsByAnsName_ZeroIsFalse(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAgentStore(db)
+	ctx := context.Background()
+
+	pending := newBaseOnlyFixture(t, "agent-base-1", "skill-a.example.com")
+	if err := store.Save(ctx, pending); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	exists, err := store.ExistsByAnsName(ctx, domain.AnsName{})
+	if err != nil {
+		t.Fatalf("ExistsByAnsName(zero): %v", err)
+	}
+	if exists {
+		t.Error("ExistsByAnsName must return false for the zero value")
+	}
+}

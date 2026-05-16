@@ -1,6 +1,7 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/pem"
@@ -14,6 +15,38 @@ import (
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
 )
+
+// checkRegistrationUniqueness gates RegisterAgent on the appropriate
+// uniqueness scope. Versioned registrations conflict by ANSName;
+// base-only registrations (§3.2.0) conflict by agent FQDN since they
+// have no ANSName. Splitting the two paths into a helper keeps the
+// nested-if depth out of RegisterAgent.
+func (s *RegistrationService) checkRegistrationUniqueness(ctx context.Context, req RegisterRequest, fqdn string) error {
+	if req.AnsName.IsZero() {
+		baseExists, err := s.agents.ExistsActiveBaseOnlyByAgentHost(ctx, fqdn)
+		if err != nil {
+			return err
+		}
+		if baseExists {
+			return domain.NewConflictError(
+				"BASE_ONLY_FQDN_TAKEN",
+				fmt.Sprintf("a base-only registration for %q is already active or pending", fqdn),
+			)
+		}
+		return nil
+	}
+	exists, err := s.agents.ExistsByAnsName(ctx, req.AnsName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return domain.NewConflictError(
+			"ANS_NAME_TAKEN",
+			fmt.Sprintf("ANS name %q is already registered", req.AnsName),
+		)
+	}
+	return nil
+}
 
 // buildOptionalIdentityCSR returns a fresh *AgentCSR when the
 // caller supplied a non-empty PEM, or nil when they didn't. Base-only

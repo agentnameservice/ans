@@ -98,7 +98,7 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 		// Server CSRs must carry the agent FQDN as a DNS SAN — TLS
 		// server-auth convention, distinct from the identity CSR's
 		// URI SAN shape.
-		if err := s.validator.ValidateServerCSR(ctx, in.ServerCsrPEM, reg.AnsName.FQDN()); err != nil {
+		if err := s.validator.ValidateServerCSR(ctx, in.ServerCsrPEM, reg.FQDN()); err != nil {
 			return nil, domain.NewValidationError("INVALID_SERVER_CSR",
 				"Server CSR validation failed: "+err.Error())
 		}
@@ -126,7 +126,7 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 
 	case byocSet:
 		v, err := s.validator.ValidateServerCertificate(ctx,
-			in.ServerCertificatePEM, in.ServerCertificateChainPEM, reg.AnsName.FQDN())
+			in.ServerCertificatePEM, in.ServerCertificateChainPEM, reg.FQDN())
 		if err != nil {
 			return nil, domain.NewCertificateError(
 				"INVALID_BYOC_CERT",
@@ -290,13 +290,13 @@ func (s *RegistrationService) completeCSRRenewal(ctx context.Context, agentID st
 	if err != nil {
 		return err
 	}
-	issued, err := s.serverCA.IssueServerCertificate(ctx, csr.CSRContent, reg.AnsName.FQDN())
+	issued, err := s.serverCA.IssueServerCertificate(ctx, csr.CSRContent, reg.FQDN())
 	if err != nil {
 		return domain.NewInternalError("SERVER_CERT_ISSUE_FAILED",
 			"failed to issue server cert for renewal", err)
 	}
 	v, err := s.validator.ValidateServerCertificate(ctx,
-		issued.CertPEM, issued.ChainPEM, reg.AnsName.FQDN())
+		issued.CertPEM, issued.ChainPEM, reg.FQDN())
 	if err != nil {
 		return domain.NewInternalError("SERVER_CERT_SELFVERIFY_FAILED",
 			"issued renewal cert failed self-validation", err)

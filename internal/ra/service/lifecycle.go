@@ -186,7 +186,7 @@ func (s *RegistrationService) SubmitServerCSR(ctx context.Context, agentID, csrP
 	if err != nil {
 		return "", err
 	}
-	if err := s.validator.ValidateServerCSR(ctx, csrPEM, reg.AnsName.FQDN()); err != nil {
+	if err := s.validator.ValidateServerCSR(ctx, csrPEM, reg.FQDN()); err != nil {
 		return "", domain.NewValidationError("INVALID_SERVER_CSR", err.Error())
 	}
 	csrID := uuid.NewString()

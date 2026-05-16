@@ -257,33 +257,8 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		fqdn = req.AnsName.FQDN()
 	}
 
-	// Uniqueness check before heavy work. Versioned: by ANSName.
-	// Base-only (zero AnsName): the AnsName lookup short-circuits to
-	// false (the store treats empty as "not a key"), and we follow up
-	// with an FQDN scope so two base-only registrations cannot
-	// simultaneously claim the same agent host.
-	if req.AnsName.IsZero() {
-		baseExists, err := s.agents.ExistsActiveBaseOnlyByAgentHost(ctx, fqdn)
-		if err != nil {
-			return nil, err
-		}
-		if baseExists {
-			return nil, domain.NewConflictError(
-				"BASE_ONLY_FQDN_TAKEN",
-				fmt.Sprintf("a base-only registration for %q is already active or pending", fqdn),
-			)
-		}
-	} else {
-		exists, err := s.agents.ExistsByAnsName(ctx, req.AnsName)
-		if err != nil {
-			return nil, err
-		}
-		if exists {
-			return nil, domain.NewConflictError(
-				"ANS_NAME_TAKEN",
-				fmt.Sprintf("ANS name %q is already registered", req.AnsName),
-			)
-		}
+	if err := s.checkRegistrationUniqueness(ctx, req, fqdn); err != nil {
+		return nil, err
 	}
 
 	// Server certificate: exactly one of CSR / BYOC.
