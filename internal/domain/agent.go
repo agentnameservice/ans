@@ -103,6 +103,19 @@ type AgentRegistration struct {
 	// deviation.
 	ACMEChallenge ACMEChallenge `json:"acmeChallenge,omitzero"`
 
+	// CapabilitiesHash is the SHA-256(JCS(agentCardContent)) digest
+	// (hex-lowercase) the RA computed when the operator submitted
+	// agentCardContent on the V2 registration request, per
+	// ANS_SPEC.md §A.1. Empty when the operator did not submit
+	// content. The activation flow seals this value into the
+	// AGENT_REGISTERED event's attestations.metadataHashes under the
+	// well-known key event.MetadataHashKeyCapabilitiesHash.
+	//
+	// Stored as a hex string rather than the raw 32-byte digest so
+	// the storage column is human-readable and the wire format
+	// matches the AIM's verification expectation directly.
+	CapabilitiesHash string `json:"capabilitiesHash,omitempty"`
+
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.
 	PendingEvents []Event `json:"-"`

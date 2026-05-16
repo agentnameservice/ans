@@ -72,6 +72,20 @@ type RegisterRequest struct {
 	ServerCertificatePEM      string
 	ServerCertificateChainPEM string
 	SchemaVersion             string
+
+	// AgentCardContent is the optional ANS Trust Card body the
+	// operator submits at registration per ANS_SPEC.md §A.1. The
+	// caller passes the raw JSON bytes as supplied; the service
+	// JCS-canonicalizes (RFC 8785), SHA-256 hashes, and stores the
+	// hex-lowercase digest on the AgentRegistration aggregate before
+	// discarding the bytes. The activation flow seals the digest into
+	// the AGENT_REGISTERED event under
+	// attestations.metadataHashes.capabilitiesHash.
+	//
+	// Distinct from the per-endpoint MetadataHash on AgentEndpoint,
+	// which hashes the protocol-native metadata (e.g., A2A AgentCard).
+	// Empty when omitted on the registration request.
+	AgentCardContent []byte
 }
 
 // RegisterResponse is returned to the HTTP handler after a successful
@@ -309,6 +323,20 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		return nil, err
 	}
 	reg.ServerCSR = pendingServerCSR
+
+	// Hash the optional ANS Trust Card body if the operator submitted
+	// one (ANS_SPEC.md §A.1). The hash is the durable record; the
+	// content itself is discarded immediately after canonicalization.
+	if len(req.AgentCardContent) > 0 {
+		hashHex, err := hashAgentCardContent(req.AgentCardContent)
+		if err != nil {
+			return nil, domain.NewValidationError(
+				"INVALID_AGENT_CARD_CONTENT",
+				fmt.Sprintf("agentCardContent could not be canonicalized: %v", err),
+			)
+		}
+		reg.CapabilitiesHash = hashHex
+	}
 
 	// Generate the ACME DNS-01 challenge token + expiry. The only
 	// DNS action the operator should take before verify-acme.

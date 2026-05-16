@@ -8,8 +8,25 @@ import (
 	"fmt"
 	"time"
 
+	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
 )
+
+// hashAgentCardContent canonicalizes the raw JSON bytes per
+// RFC 8785 (JCS) and returns the SHA-256 hex-lowercase digest.
+// The output format matches the wire format the AIM expects for
+// attestations.metadataHashes.capabilitiesHash.
+//
+// JCS canonicalization fails on malformed JSON; the caller surfaces
+// that as an INVALID_AGENT_CARD_CONTENT validation error.
+func hashAgentCardContent(content []byte) (string, error) {
+	canonical, err := anscrypto.Canonicalize(content)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(canonical)
+	return hex.EncodeToString(sum[:]), nil
+}
 
 // fingerprintOf returns the SHA-256 fingerprint of the DER certificate
 // inside the given PEM string, formatted as `SHA256:<lowercase-hex>`.

@@ -24,6 +24,117 @@ import (
 	"github.com/godaddy/ans/internal/ra/service"
 )
 
+// TestRegistration_AgentCardContent_HashStored exercises the §A.1
+// "hash and forget" flow: when the operator submits agentCardContent
+// on the V2 registration request, the service computes
+// SHA-256(JCS(content)), stores the hex-lowercase digest on the
+// AgentRegistration aggregate, and the activation flow seals the
+// digest into the AGENT_REGISTERED event under
+// attestations.metadataHashes.capabilitiesHash.
+//
+// This test validates the Register-time half: the aggregate carries
+// the right hash. The activation half (event seal) is covered by the
+// lifecycle test below.
+func TestRegistration_AgentCardContent_HashStored(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	// Two semantically equal JSON bodies that JCS-canonicalize to
+	// identical bytes. Both must produce the same hash.
+	contentA := []byte(`{"ansName":"ans://v1.0.0.agent.example.com","version":"1.0.0"}`)
+	contentB := []byte(`{ "version" : "1.0.0",  "ansName" :   "ans://v1.0.0.agent.example.com" }`)
+
+	req := fx.req
+	req.AgentCardContent = contentA
+	if _, err := fx.svc.RegisterAgent(context.Background(), req); err != nil {
+		t.Fatalf("RegisterAgent: %v", err)
+	}
+
+	got, err := fx.agents.FindByAnsName(context.Background(), req.AnsName)
+	if err != nil {
+		t.Fatalf("FindByAnsName: %v", err)
+	}
+	if got.CapabilitiesHash == "" {
+		t.Fatal("CapabilitiesHash empty after registration with content")
+	}
+	if len(got.CapabilitiesHash) != 64 {
+		t.Errorf("CapabilitiesHash length: got %d want 64", len(got.CapabilitiesHash))
+	}
+
+	// JCS-equivalent bodies hash to the same digest. Re-register a
+	// second agent under a different name with semantically identical
+	// content and confirm the digests match.
+	semver, _ := domain.ParseSemVer("1.0.0")
+	ans2, _ := domain.NewAnsName(semver, "twin.example.com")
+	req2 := fx.req
+	req2.AnsName = ans2
+	req2.IdentityCSRPEM = testCSR(t, ans2.String())
+	req2.ServerCsrPEM = testServerCSR(t, ans2.FQDN())
+	req2.Endpoints = []domain.AgentEndpoint{{
+		Protocol:   domain.Protocol("MCP"),
+		AgentURL:   "https://twin.example.com/mcp",
+		Transports: []domain.Transport{domain.Transport("SSE")},
+	}}
+	req2.AgentCardContent = contentB
+	if _, err := fx.svc.RegisterAgent(context.Background(), req2); err != nil {
+		t.Fatalf("RegisterAgent twin: %v", err)
+	}
+	twin, err := fx.agents.FindByAnsName(context.Background(), ans2)
+	if err != nil {
+		t.Fatalf("FindByAnsName twin: %v", err)
+	}
+	if twin.CapabilitiesHash != got.CapabilitiesHash {
+		t.Errorf("JCS-equivalent bodies hashed differently:\n  A: %s\n  B: %s",
+			got.CapabilitiesHash, twin.CapabilitiesHash)
+	}
+}
+
+// TestRegistration_AgentCardContent_OmittedNoHash confirms the
+// spec-conformant "no agentCardContent submitted" path: the
+// CapabilitiesHash on the aggregate stays empty, and a downstream
+// activation will omit the metadataHashes.capabilitiesHash key entirely.
+func TestRegistration_AgentCardContent_OmittedNoHash(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	if _, err := fx.svc.RegisterAgent(context.Background(), fx.req); err != nil {
+		t.Fatalf("RegisterAgent: %v", err)
+	}
+	got, err := fx.agents.FindByAnsName(context.Background(), fx.req.AnsName)
+	if err != nil {
+		t.Fatalf("FindByAnsName: %v", err)
+	}
+	if got.CapabilitiesHash != "" {
+		t.Errorf("CapabilitiesHash: want empty, got %q", got.CapabilitiesHash)
+	}
+}
+
+// TestRegistration_AgentCardContent_InvalidJSON asserts the validation
+// error class operators see when they submit malformed JSON. JCS
+// canonicalization fails up front; the registration is rejected with
+// a 422-style error, not silently stored without the hash.
+func TestRegistration_AgentCardContent_InvalidJSON(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	req := fx.req
+	req.AgentCardContent = []byte(`not actually json {{{`)
+	_, err := fx.svc.RegisterAgent(context.Background(), req)
+	if err == nil {
+		t.Fatal("RegisterAgent: want error, got nil")
+	}
+	var verr *domain.Error
+	if !errors.As(err, &verr) {
+		t.Fatalf("error type: want *domain.Error, got %T (%v)", err, err)
+	}
+	if !errors.Is(err, domain.ErrValidation) {
+		t.Errorf("expected validation error, got %v (cause: %v)", err, verr.Cause)
+	}
+	if verr.Code != "INVALID_AGENT_CARD_CONTENT" {
+		t.Errorf("code: got %q want INVALID_AGENT_CARD_CONTENT", verr.Code)
+	}
+}
+
 // TestRegistration_NoOutboxEmit pins the V1-aligned terminal-only
 // event model: POST /v2/ans/agents (like POST /v1/agents/register)
 // does NOT enqueue anything to the outbox. The single AGENT_REGISTERED

@@ -708,12 +708,24 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 	// spec — the min(notAfter) across attested certs.
 	inner.ExpiresAt = agentCertExpiry(identityCerts, byocCert, now)
 
+	mhashes := metadataHashesFromEndpoints(reg.Endpoints)
+	if reg.CapabilitiesHash != "" {
+		// The agent-level Trust Card hash sealed at activation per
+		// ANS_SPEC.md §A.1. The map key is reserved by the TL event
+		// package; agents that registered without agentCardContent
+		// have CapabilitiesHash empty, in which case the key is
+		// absent and the AIM falls back to TOFU on first fetch.
+		if mhashes == nil {
+			mhashes = map[string]string{}
+		}
+		mhashes[event.MetadataHashKeyCapabilitiesHash] = reg.CapabilitiesHash
+	}
 	inner.Attestations = &event.Attestations{
 		DomainValidation:      "ACME-DNS-01",
 		DNSRecordsProvisioned: provisioned,
 		IdentityCerts:         idCertInfos,
 		ServerCerts:           serverCertInfos,
-		MetadataHashes:        metadataHashesFromEndpoints(reg.Endpoints),
+		MetadataHashes:        mhashes,
 	}
 	return inner, nil
 }

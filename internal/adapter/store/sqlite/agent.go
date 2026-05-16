@@ -39,6 +39,7 @@ type agentRow struct {
 	SupersedesRegistrationID sql.NullInt64  `db:"supersedes_registration_id"`
 	ACMEDNS01Token           sql.NullString `db:"acme_dns01_token"`
 	ACMEChallengeExpiresAtMs sql.NullInt64  `db:"acme_challenge_expires_at_ms"`
+	CapabilitiesHash         sql.NullString `db:"capabilities_hash"`
 	CreatedAtMs              int64          `db:"created_at_ms"`
 	UpdatedAtMs              int64          `db:"updated_at_ms"`
 }
@@ -73,6 +74,9 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 	if r.ACMEChallengeExpiresAtMs.Valid {
 		reg.ACMEChallenge.ExpiresAt = msToTime(r.ACMEChallengeExpiresAtMs.Int64)
 	}
+	if r.CapabilitiesHash.Valid {
+		reg.CapabilitiesHash = r.CapabilitiesHash.String
+	}
 	return reg, nil
 }
 
@@ -93,8 +97,9 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 registration_timestamp_ms, last_renewal_timestamp_ms,
                 supersedes_registration_id,
                 acme_dns01_token, acme_challenge_expires_at_ms,
+                capabilities_hash,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
 			agent.AgentID,
 			agent.OwnerID,
@@ -109,6 +114,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 			nullableInt64(agent.SupersedesRegistrationID),
 			nullableString(agent.ACMEChallenge.DNS01Token),
 			nullableMs(agent.ACMEChallenge.ExpiresAt),
+			nullableString(agent.CapabilitiesHash),
 			now, now,
 		)
 		if err != nil {
@@ -131,6 +137,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
             supersedes_registration_id = ?,
             acme_dns01_token = ?,
             acme_challenge_expires_at_ms = ?,
+            capabilities_hash = ?,
             updated_at_ms = ?
         WHERE id = ?`
 	_, err := s.db.extx(ctx).ExecContext(ctx, q,
@@ -141,6 +148,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 		nullableInt64(agent.SupersedesRegistrationID),
 		nullableString(agent.ACMEChallenge.DNS01Token),
 		nullableMs(agent.ACMEChallenge.ExpiresAt),
+		nullableString(agent.CapabilitiesHash),
 		now,
 		agent.ID,
 	)
