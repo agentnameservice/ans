@@ -145,6 +145,33 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 				TTL:      3600,
 			})
 		}
+
+		// HTTPS RR (RFC 9460 type 65) at the agent FQDN — service
+		// binding for HTTP/2 (and Encrypted Client Hello when the
+		// AHP provides an ECH config out-of-band). Per §A.8.1 the
+		// RA generates the content; the AHP decides whether to
+		// publish based on whether their apex is aliased via CNAME
+		// (CNAME at the agent FQDN blocks HTTPS RR at the same name
+		// per RFC 1034 §3.6.2).
+		//
+		// Skipped for the consolidated form: the SVCB rows already
+		// carry alpn / port / ECH SvcParams, so an HTTPS RR
+		// alongside duplicates content (§A.8.2). Legacy keeps it
+		// because the `_ans` TXT family does not carry connection
+		// hints — clients without ANS-protocol awareness rely on
+		// HTTPS RR for ALPN signalling.
+		//
+		// Required=false: operators on CNAME-fronted apex zones
+		// cannot publish this record at the same name; the spec
+		// does not block them on its absence.
+		records = append(records, ExpectedDNSRecord{
+			Name:     fqdn,
+			Type:     DNSRecordHTTPS,
+			Value:    `1 . alpn=h2`,
+			Purpose:  PurposeDiscovery,
+			Required: false,
+			TTL:      3600,
+		})
 	}
 
 	// Consolidated Approach SVCB record at the bare FQDN — one per

@@ -25,9 +25,9 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 	records := ComputeRequiredDNSRecords(reg)
 	require.NotEmpty(t, records)
 
-	// 2 endpoints → 2 _ans TXT + 2 Consolidated Approach SVCB +
+	// 2 endpoints → 2 _ans TXT + 1 HTTPS + 2 Consolidated Approach SVCB +
 	// 1 badge TXT (no TLSA: no cert).
-	var ansTxtCount, svcbCount, badgeCount, tlsaCount int
+	var ansTxtCount, httpsCount, svcbCount, badgeCount, tlsaCount int
 	for _, r := range records {
 		switch r.Purpose {
 		case PurposeDiscovery:
@@ -53,6 +53,13 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 				// No agentCardContent submitted in this fixture, so
 				// card-sha256 should be absent.
 				assert.NotContains(t, r.Value, "card-sha256")
+			case DNSRecordHTTPS:
+				httpsCount++
+				assert.Equal(t, "agent.example.com", r.Name,
+					"HTTPS RR at the bare FQDN per §A.8.1")
+				assert.False(t, r.Required,
+					"HTTPS RR is opt-in: blocked by CNAME at @ when AHP fronts the apex")
+				assert.Contains(t, r.Value, "alpn=h2")
 			default:
 				t.Errorf("unexpected discovery record type %q", r.Type)
 			}
@@ -69,9 +76,60 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 	}
 
 	assert.Equal(t, 2, ansTxtCount)
+	assert.Equal(t, 1, httpsCount, "one HTTPS RR at the bare FQDN per §A.8.1")
 	assert.Equal(t, 2, svcbCount, "one SVCB row per protocol at the bare FQDN")
 	assert.Equal(t, 1, badgeCount)
 	assert.Equal(t, 0, tlsaCount, "no cert → no TLSA record")
+}
+
+// TestComputeRequiredDNSRecords_LegacyOnlyEmitsHTTPSRR pins the legacy
+// shape: HTTPS RR is generated alongside the `_ans` TXT family, NOT
+// alongside the consolidated SVCB rows (which would duplicate the
+// alpn/port SvcParams). §A.8.1 lists the HTTPS RR as RA-generated
+// content the AHP provisions when the apex isn't aliased via CNAME.
+func TestComputeRequiredDNSRecords_LegacyOnlyEmitsHTTPSRR(t *testing.T) {
+	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	reg := &AgentRegistration{
+		AnsName:        ansName,
+		DNSRecordStyle: DNSRecordStyleLegacy,
+		Endpoints: []AgentEndpoint{
+			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
+		},
+	}
+	records := ComputeRequiredDNSRecords(reg)
+
+	var sawHTTPS, sawSVCB bool
+	for _, r := range records {
+		switch r.Type {
+		case DNSRecordHTTPS:
+			sawHTTPS = true
+		case DNSRecordSVCB:
+			sawSVCB = true
+		}
+	}
+	assert.True(t, sawHTTPS, "legacy style must include an HTTPS RR")
+	assert.False(t, sawSVCB, "legacy style must NOT include SVCB rows")
+}
+
+// TestComputeRequiredDNSRecords_ConsolidatedOmitsHTTPSRR pins the
+// consolidated form's lean shape: HTTPS RR is omitted because the
+// SVCB rows already carry equivalent SvcParams (alpn, port, ECH).
+// Publishing both would duplicate content and risk drift between
+// the two records. §A.8.2 calls this out explicitly.
+func TestComputeRequiredDNSRecords_ConsolidatedOmitsHTTPSRR(t *testing.T) {
+	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	reg := &AgentRegistration{
+		AnsName:        ansName,
+		DNSRecordStyle: DNSRecordStyleConsolidated,
+		Endpoints: []AgentEndpoint{
+			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
+		},
+	}
+	records := ComputeRequiredDNSRecords(reg)
+	for _, r := range records {
+		assert.NotEqual(t, DNSRecordHTTPS, r.Type,
+			"consolidated style omits HTTPS RR (SVCB SvcParams subsume it)")
+	}
 }
 
 // TestComputeRequiredDNSRecords_SVCBWkPath pins the per-protocol `wk=`
