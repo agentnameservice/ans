@@ -20,17 +20,33 @@ type listResponse struct {
 }
 
 type listItem struct {
-	AgentID               string        `json:"agentId"`
-	AgentDisplayName      string        `json:"agentDisplayName"`
-	AgentDescription      string        `json:"agentDescription,omitempty"`
-	Version               string        `json:"version"`
-	AgentHost             string        `json:"agentHost"`
-	AnsName               string        `json:"ansName"`
+	AgentID          string `json:"agentId"`
+	AgentDisplayName string `json:"agentDisplayName"`
+	AgentDescription string `json:"agentDescription,omitempty"`
+	Version          string `json:"version"`
+	AgentHost        string `json:"agentHost"`
+	AnsName          string `json:"ansName"`
+	// AnchorType + AnchorResolvedID surface the registration's
+	// ANS-0 anchor profile. Both omitted for legacy FQDN-implicit
+	// rows; populated for any registration that came in through
+	// the anchor block on V2 register.
+	AnchorType            string        `json:"anchorType,omitempty"`
+	AnchorResolvedID      string        `json:"anchorResolvedId,omitempty"`
 	Status                string        `json:"status"`
 	TTL                   int           `json:"ttl"`
 	RegistrationTimestamp string        `json:"registrationTimestamp,omitempty"`
 	Endpoints             []endpointDTO `json:"endpoints"`
 	Links                 []linkDTO     `json:"links"`
+}
+
+// anchorFields returns the (anchorType, anchorResolvedId) pair for
+// a registration's DTO emission. Both empty when the registration
+// has no AnchorClaim attached (legacy rows).
+func anchorFields(reg *domain.AgentRegistration) (string, string) {
+	if reg == nil || reg.AnchorClaim == nil {
+		return "", ""
+	}
+	return string(reg.AnchorClaim.AnchorType), reg.AnchorClaim.ResolvedID
 }
 
 func mapListResponse(res *service.ListResult) listResponse {
@@ -49,6 +65,7 @@ func mapListResponse(res *service.ListResult) listResponse {
 		if !reg.IsBaseOnly() {
 			version = reg.AnsName.Version().String()
 		}
+		anchorType, anchorResolved := anchorFields(reg)
 		items = append(items, listItem{
 			AgentID:               reg.AgentID,
 			AgentDisplayName:      reg.Details.DisplayName,
@@ -56,6 +73,8 @@ func mapListResponse(res *service.ListResult) listResponse {
 			Version:               version,
 			AgentHost:             reg.FQDN(),
 			AnsName:               reg.AnsName.String(),
+			AnchorType:            anchorType,
+			AnchorResolvedID:      anchorResolved,
 			Status:                string(reg.Status),
 			TTL:                   300,
 			RegistrationTimestamp: reg.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
@@ -82,12 +101,17 @@ func mapListResponse(res *service.ListResult) listResponse {
 // ----- Detail DTO (matches V2 spec AgentDetails §1086) -----
 
 type agentDetails struct {
-	AgentID               string                       `json:"agentId"`
-	AgentDisplayName      string                       `json:"agentDisplayName"`
-	AgentDescription      string                       `json:"agentDescription,omitempty"`
-	Version               string                       `json:"version"`
-	AgentHost             string                       `json:"agentHost"`
-	AnsName               string                       `json:"ansName"`
+	AgentID          string `json:"agentId"`
+	AgentDisplayName string `json:"agentDisplayName"`
+	AgentDescription string `json:"agentDescription,omitempty"`
+	Version          string `json:"version"`
+	AgentHost        string `json:"agentHost"`
+	AnsName          string `json:"ansName"`
+	// AnchorType + AnchorResolvedID surface the registration's
+	// ANS-0 anchor profile. Both omitted for legacy FQDN-implicit
+	// registrations.
+	AnchorType            string                       `json:"anchorType,omitempty"`
+	AnchorResolvedID      string                       `json:"anchorResolvedId,omitempty"`
 	AgentStatus           string                       `json:"agentStatus"`
 	Endpoints             []endpointDTO                `json:"endpoints"`
 	RegistrationTimestamp string                       `json:"registrationTimestamp,omitempty"`
@@ -112,6 +136,7 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request) agentDetails {
 	if !reg.IsBaseOnly() {
 		version = reg.AnsName.Version().String()
 	}
+	anchorType, anchorResolved := anchorFields(reg)
 	d := agentDetails{
 		AgentID:               reg.AgentID,
 		AgentDisplayName:      reg.Details.DisplayName,
@@ -119,6 +144,8 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request) agentDetails {
 		Version:               version,
 		AgentHost:             reg.FQDN(),
 		AnsName:               reg.AnsName.String(),
+		AnchorType:            anchorType,
+		AnchorResolvedID:      anchorResolved,
 		AgentStatus:           string(reg.Status),
 		Endpoints:             mapEndpointsToDTO(res.Endpoints),
 		RegistrationTimestamp: reg.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),

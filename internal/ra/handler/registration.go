@@ -61,6 +61,27 @@ type registrationRequest struct {
 	// value rejected with 422 INVALID_DNS_RECORD_STYLE. See
 	// ANS_SPEC.md §4.4.2 for record-shape semantics.
 	DNSRecordStyle string `json:"dnsRecordStyle,omitempty"`
+
+	// Anchor optionally selects which ANS-0 anchor profile the
+	// caller wants applied. When omitted, the registration takes
+	// the legacy FQDN-implicit path (anchorType inferred from
+	// AgentHost). When present, the named profile resolver runs
+	// against AnchorInput and the resulting IdentityClaim attaches
+	// to the aggregate. Non-FQDN profiles (DID, LEI) force base-
+	// only registration invariants per the proposal at
+	// docs/proposals/2026-05-16-spec-skeletons/ans-0-identity-anchor.md.
+	Anchor *anchorRequestDTO `json:"anchor,omitempty"`
+}
+
+// anchorRequestDTO is the V2 register request's anchor block.
+// Slice 6 ships the wire shape; Slice 7+ wires the SDK and
+// the actual resolver dispatch in the service layer.
+type anchorRequestDTO struct {
+	// AnchorType is one of "fqdn", "did", "lei". Empty rejected.
+	AnchorType string `json:"anchorType"`
+	// Input is the anchor-resolver input string: an FQDN, a DID
+	// URI (did:web:...), or an ISO 17442 LEI.
+	Input string `json:"input"`
 }
 
 type endpointDTO struct {
@@ -159,6 +180,12 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	anchorClaim, err := resolveAnchorClaim(req.Anchor, req.AgentHost)
+	if err != nil {
+		WriteError(w, err)
+		return
+	}
+
 	resp, err := h.svc.RegisterAgent(r.Context(), service.RegisterRequest{
 		OwnerID:                   id.Subject,
 		AnsName:                   ansName,
@@ -166,6 +193,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		DisplayName:               req.AgentDisplayName,
 		Description:               req.AgentDescription,
 		Endpoints:                 eps,
+		AnchorClaim:               anchorClaim,
 		IdentityCSRPEM:            req.IdentityCSRPEM,
 		ServerCsrPEM:              req.ServerCsrPEM,
 		ServerCertificatePEM:      req.ServerCertificatePEM,
@@ -328,4 +356,73 @@ func resolveAnsNameForRegister(req *registrationRequest) (domain.AnsName, error)
 		return domain.AnsName{}, err
 	}
 	return domain.NewAnsName(semver, req.AgentHost)
+}
+
+// resolveAnchorClaim translates the optional anchor block in the
+// V2 register request into a verified domain.IdentityClaim that
+// the service layer attaches to the aggregate.
+//
+// Slice 6 keeps the handler scope tight: it accepts the wire shape,
+// validates the anchorType + input pair, and constructs an
+// IdentityClaim with PublicKeyJWK left empty (a sentinel meaning
+// "claim was not produced by an AnchorResolver"). Slice 7+ wires
+// the SDK; subsequent slices will plumb a real
+// port.AnchorResolver into the service layer so the handler-side
+// shortcut goes away. For now, the handler-side claim is a typed
+// breadcrumb the storage layer persists so V2 list/detail
+// responses can surface the anchor type.
+//
+// Validation rules:
+//   - Anchor block omitted: returns nil claim; service falls back
+//     to legacy FQDN-implicit behavior.
+//   - Anchor block present with empty anchorType: returns
+//     INVALID_ANCHOR_TYPE.
+//   - Anchor block present with empty input: returns
+//     MISSING_ANCHOR_INPUT.
+//   - anchorType "fqdn" with input that does not match agentHost:
+//     returns ANCHOR_INPUT_AGENT_HOST_MISMATCH. The two fields
+//     must agree for the FQDN profile.
+//   - anchorType "did" or "lei": input is accepted as-is (lexical
+//     validation belongs to the resolver, which lands in a later
+//     slice; today the input is a typed breadcrumb).
+func resolveAnchorClaim(anchor *anchorRequestDTO, agentHost string) (*domain.IdentityClaim, error) {
+	if anchor == nil {
+		return nil, nil //nolint:nilnil // (nil, nil) is the documented "no anchor block" signal
+	}
+	anchorType := strings.TrimSpace(strings.ToLower(anchor.AnchorType))
+	input := strings.TrimSpace(anchor.Input)
+	switch anchorType {
+	case "":
+		return nil, domain.NewValidationError(
+			"INVALID_ANCHOR_TYPE",
+			"anchor.anchorType is required when anchor block is present",
+		)
+	case string(domain.AnchorTypeFQDN), string(domain.AnchorTypeDID), string(domain.AnchorTypeLEI):
+	default:
+		return nil, domain.NewValidationError(
+			"INVALID_ANCHOR_TYPE",
+			"anchor.anchorType must be one of fqdn, did, lei (got "+anchorType+")",
+		)
+	}
+	if input == "" {
+		return nil, domain.NewValidationError(
+			"MISSING_ANCHOR_INPUT",
+			"anchor.input is required when anchor block is present",
+		)
+	}
+	// FQDN profile: input MUST match agentHost (case-insensitive).
+	// The two fields name the same operational identity, so a
+	// divergence is operator error caught at the boundary.
+	if anchorType == string(domain.AnchorTypeFQDN) {
+		if !strings.EqualFold(strings.TrimSpace(agentHost), input) {
+			return nil, domain.NewValidationError(
+				"ANCHOR_INPUT_AGENT_HOST_MISMATCH",
+				"anchor.input must match agentHost for the FQDN profile",
+			)
+		}
+	}
+	return &domain.IdentityClaim{
+		AnchorType: domain.AnchorType(anchorType),
+		ResolvedID: input,
+	}, nil
 }
