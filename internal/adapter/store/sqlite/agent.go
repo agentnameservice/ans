@@ -258,20 +258,43 @@ func (s *AgentStore) ExistsByAnsName(ctx context.Context, ansName domain.AnsName
 }
 
 // ExistsActiveBaseOnlyByAgentHost returns true if a non-revoked,
-// non-failed base-only registration already claims the given FQDN.
-// Migration 008 stores ans_name as NULL for base-only rows, but the
-// pre-008 path could leave an empty string in place; the predicate
-// matches both shapes so the check stays correct across an in-place
-// upgrade. The §3.2.0 path lets the same FQDN host multiple
-// registration rows over time (a base-only registration revoked, then
-// re-registered) but only one can be live at any moment.
-func (s *AgentStore) ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string) (bool, error) {
+// non-failed base-only registration already claims the given FQDN
+// under the given anchor type.
+//
+// Plan G note: the uniqueness scope is (agent_host, anchor_type),
+// not agent_host alone. The same operational FQDN MAY carry multiple
+// base-only registrations under different anchor profiles (FQDN,
+// DID, LEI) per ANS-0 §7 cross-anchor equivalence. Within a single
+// anchor profile, only one live base-only row per FQDN is admitted.
+//
+// anchorType is the empty string for the legacy "anchor unspecified"
+// path (rows registered before Plan G's anchor block landed); these
+// rows occupy their own implicit uniqueness slot so a fresh
+// anchor-aware DID or LEI registration on the same host is allowed
+// to land alongside a legacy FQDN-implicit row.
+//
+// Migration 008 stores ans_name as NULL for base-only rows; the
+// predicate also accepts the pre-008 empty-string shape for
+// in-place upgrade compatibility.
+func (s *AgentStore) ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string, anchorType string) (bool, error) {
 	var n int
+	if anchorType == "" {
+		const q = `SELECT COUNT(1) FROM agent_registrations
+                    WHERE agent_host = ?
+                      AND (ans_name IS NULL OR ans_name = '')
+                      AND (anchor_type IS NULL OR anchor_type = '')
+                      AND status NOT IN ('REVOKED', 'FAILED', 'EXPIRED')`
+		if err := s.db.extx(ctx).GetContext(ctx, &n, q, host); err != nil {
+			return false, err
+		}
+		return n > 0, nil
+	}
 	const q = `SELECT COUNT(1) FROM agent_registrations
                 WHERE agent_host = ?
                   AND (ans_name IS NULL OR ans_name = '')
+                  AND anchor_type = ?
                   AND status NOT IN ('REVOKED', 'FAILED', 'EXPIRED')`
-	if err := s.db.extx(ctx).GetContext(ctx, &n, q, host); err != nil {
+	if err := s.db.extx(ctx).GetContext(ctx, &n, q, host, anchorType); err != nil {
 		return false, err
 	}
 	return n > 0, nil

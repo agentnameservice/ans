@@ -48,10 +48,17 @@ type AgentStore interface {
 	ExistsByAnsName(ctx context.Context, ansName domain.AnsName) (bool, error)
 
 	// ExistsActiveBaseOnlyByAgentHost returns true if a base-only
-	// registration (no ANSName) is currently active or pending for
-	// the given FQDN. Versioned registrations on the same FQDN do NOT
-	// trigger this check.
-	ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string) (bool, error)
+	// registration (no ANSName) under the given anchor type is
+	// currently active or pending for the given FQDN. Versioned
+	// registrations on the same FQDN do NOT trigger this check.
+	//
+	// Plan G: the uniqueness scope is (host, anchorType), not host
+	// alone. The same operational FQDN MAY carry multiple base-only
+	// registrations under different anchor profiles (FQDN, DID, LEI)
+	// per ANS-0 §7 cross-anchor equivalence. Within one anchor
+	// profile, only one live base-only row per FQDN is admitted.
+	// Pass empty anchorType for the legacy "anchor unspecified" path.
+	ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string, anchorType string) (bool, error)
 
 	// FindAllByAgentHost returns every registration (any version, any status)
 	// for the given FQDN, newest first.

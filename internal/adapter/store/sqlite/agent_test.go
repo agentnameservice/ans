@@ -448,7 +448,7 @@ func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
 	ctx := context.Background()
 
 	// Empty store → false.
-	exists, err := store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com")
+	exists, err := store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com", "")
 	if err != nil {
 		t.Fatalf("empty: %v", err)
 	}
@@ -462,7 +462,7 @@ func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
 		t.Fatalf("save pending: %v", err)
 	}
 
-	exists, err = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com")
+	exists, err = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com", "")
 	if err != nil {
 		t.Fatalf("after pending: %v", err)
 	}
@@ -471,7 +471,7 @@ func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
 	}
 
 	// Different FQDN → still false.
-	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-b.example.com")
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-b.example.com", "")
 	if exists {
 		t.Error("unrelated FQDN should not match")
 	}
@@ -482,7 +482,7 @@ func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
 	if err := store.Save(ctx, versioned); err != nil {
 		t.Fatalf("save versioned: %v", err)
 	}
-	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-c.example.com")
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-c.example.com", "")
 	if exists {
 		t.Error("versioned row must not count as a base-only claim")
 	}
@@ -492,9 +492,83 @@ func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
 	if err := store.Save(ctx, pending); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
-	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com")
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, "skill-a.example.com", "")
 	if exists {
 		t.Error("revoked base-only row should release the FQDN")
+	}
+}
+
+// TestAgentStore_ExistsActiveBaseOnly_AnchorScoped pins the Plan G
+// cross-anchor coexistence rule: the same operational FQDN MAY carry
+// multiple base-only registrations under different anchor profiles
+// (FQDN, DID, LEI), and the uniqueness check fires only within the
+// same anchor profile. Discovered as a live-test failure in the
+// multi-anchor scenario; fixed by widening the predicate from
+// (host) alone to (host, anchorType).
+func TestAgentStore_ExistsActiveBaseOnly_AnchorScoped(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAgentStore(db)
+	ctx := context.Background()
+	host := "multi.example.com"
+
+	// Plant a base-only registration anchored to FQDN.
+	fqdnReg := newBaseOnlyFixture(t, "agent-fqdn", host)
+	fqdnReg.AnchorClaim = &domain.IdentityClaim{
+		AnchorType: domain.AnchorTypeFQDN,
+		ResolvedID: host,
+	}
+	if err := store.Save(ctx, fqdnReg); err != nil {
+		t.Fatalf("save fqdn: %v", err)
+	}
+
+	// Same host, fqdn anchor → conflict.
+	exists, err := store.ExistsActiveBaseOnlyByAgentHost(ctx, host, "fqdn")
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if !exists {
+		t.Error("same (host, fqdn) should conflict")
+	}
+
+	// Same host, did anchor → no conflict (different uniqueness slot).
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, host, "did")
+	if exists {
+		t.Error("(host, did) should not conflict with an existing (host, fqdn) row")
+	}
+
+	// Same host, lei anchor → no conflict.
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, host, "lei")
+	if exists {
+		t.Error("(host, lei) should not conflict with an existing (host, fqdn) row")
+	}
+
+	// Same host, empty anchor type (legacy implicit-FQDN slot) → no
+	// conflict either, because the FQDN row carries an explicit
+	// anchor_type and occupies a different slot.
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, host, "")
+	if exists {
+		t.Error("(host, empty) should not conflict with an existing (host, fqdn) anchored row")
+	}
+
+	// Plant a DID-anchored registration on the same host → succeeds.
+	didReg := newBaseOnlyFixture(t, "agent-did", host)
+	didReg.AnchorClaim = &domain.IdentityClaim{
+		AnchorType: domain.AnchorTypeDID,
+		ResolvedID: "did:web:" + host,
+	}
+	if err := store.Save(ctx, didReg); err != nil {
+		t.Fatalf("save did on same host: %v", err)
+	}
+
+	// Now (host, did) conflicts.
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, host, "did")
+	if !exists {
+		t.Error("after planting (host, did), same lookup should conflict")
+	}
+	// And (host, fqdn) still conflicts independently.
+	exists, _ = store.ExistsActiveBaseOnlyByAgentHost(ctx, host, "fqdn")
+	if !exists {
+		t.Error("(host, fqdn) should still conflict, independent of did row")
 	}
 }
 

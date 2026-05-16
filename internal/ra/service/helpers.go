@@ -18,22 +18,14 @@ import (
 
 // checkRegistrationUniqueness gates RegisterAgent on the appropriate
 // uniqueness scope. Versioned registrations conflict by ANSName;
-// base-only registrations (§3.2.0) conflict by agent FQDN since they
-// have no ANSName. Splitting the two paths into a helper keeps the
-// nested-if depth out of RegisterAgent.
+// base-only registrations (§3.2.0) conflict by (agent FQDN, anchor
+// type) since they have no ANSName. The (host, anchorType) scope
+// admits ANS-0 §7 cross-anchor coexistence: the same operational
+// FQDN MAY carry multiple base-only registrations under different
+// anchor profiles (FQDN, DID, LEI), one per profile.
 func (s *RegistrationService) checkRegistrationUniqueness(ctx context.Context, req RegisterRequest, fqdn string) error {
 	if req.AnsName.IsZero() {
-		baseExists, err := s.agents.ExistsActiveBaseOnlyByAgentHost(ctx, fqdn)
-		if err != nil {
-			return err
-		}
-		if baseExists {
-			return domain.NewConflictError(
-				"BASE_ONLY_FQDN_TAKEN",
-				fmt.Sprintf("a base-only registration for %q is already active or pending", fqdn),
-			)
-		}
-		return nil
+		return s.checkBaseOnlyUniqueness(ctx, req, fqdn)
 	}
 	exists, err := s.agents.ExistsByAnsName(ctx, req.AnsName)
 	if err != nil {
@@ -46,6 +38,32 @@ func (s *RegistrationService) checkRegistrationUniqueness(ctx context.Context, r
 		)
 	}
 	return nil
+}
+
+// checkBaseOnlyUniqueness handles the (host, anchorType)-scoped
+// rule for base-only registrations. Split out of
+// checkRegistrationUniqueness to keep the latter's nested-if depth
+// low.
+func (s *RegistrationService) checkBaseOnlyUniqueness(ctx context.Context, req RegisterRequest, fqdn string) error {
+	anchorType := ""
+	if req.AnchorClaim != nil {
+		anchorType = string(req.AnchorClaim.AnchorType)
+	}
+	baseExists, err := s.agents.ExistsActiveBaseOnlyByAgentHost(ctx, fqdn, anchorType)
+	if err != nil {
+		return err
+	}
+	if !baseExists {
+		return nil
+	}
+	scope := "implicit FQDN"
+	if anchorType != "" {
+		scope = "anchor=" + anchorType
+	}
+	return domain.NewConflictError(
+		"BASE_ONLY_FQDN_TAKEN",
+		fmt.Sprintf("a base-only registration for %q (%s) is already active or pending", fqdn, scope),
+	)
 }
 
 // buildOptionalIdentityCSR returns a fresh *AgentCSR when the
