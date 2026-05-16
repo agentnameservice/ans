@@ -6,11 +6,26 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
 )
+
+// buildOptionalIdentityCSR returns a fresh *AgentCSR when the
+// caller supplied a non-empty PEM, or nil when they didn't. Base-only
+// registrations (§3.2.0) submit no Identity CSR; the domain layer
+// enforces the both-or-neither invariant against the AnsName field.
+func buildOptionalIdentityCSR(pem string, now time.Time) *domain.AgentCSR {
+	if strings.TrimSpace(pem) == "" {
+		return nil
+	}
+	csr := domain.NewIdentityCSR(uuid.NewString(), pem, now)
+	return &csr
+}
 
 // hashAgentCardContent canonicalizes the raw JSON bytes per
 // RFC 8785 (JCS) and returns the SHA-256 hex-lowercase digest.

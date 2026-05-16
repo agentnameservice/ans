@@ -120,8 +120,15 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	// `v`-prefixed form only appears inside the ANS name's hostname
 	// label — TXT record payloads carry the machine-readable semver
 	// directly, matching the shape a client would parse with any
-	// semver library.
-	version := reg.AnsName.Version().String()
+	// semver library. Empty for base-only registrations (§3.2.0);
+	// the version= field is omitted from emitted records in that case
+	// per §4.4.1 record syntax ("version" is "Yes when the registrant
+	// declared a version; otherwise omitted").
+	baseOnly := reg.IsBaseOnly()
+	version := ""
+	if !baseOnly {
+		version = reg.AnsName.Version().String()
+	}
 	style := reg.DNSRecordStyle
 	if !style.IsValid() {
 		style = DefaultDNSRecordStyle
@@ -132,10 +139,17 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	emitConsolidated := style == DNSRecordStyleConsolidated || style == DNSRecordStyleBoth
 
 	// _ans TXT record for each protocol endpoint — legacy discovery.
+	// Base-only registrations omit the `version=` field per §4.4.1.
 	if emitLegacy {
 		for _, ep := range reg.Endpoints {
-			value := fmt.Sprintf("v=ans1; version=%s; p=%s; mode=direct; url=%s",
-				version, protocolToANSValue(ep.Protocol), ep.AgentURL)
+			var value string
+			if baseOnly {
+				value = fmt.Sprintf("v=ans1; p=%s; mode=direct; url=%s",
+					protocolToANSValue(ep.Protocol), ep.AgentURL)
+			} else {
+				value = fmt.Sprintf("v=ans1; version=%s; p=%s; mode=direct; url=%s",
+					version, protocolToANSValue(ep.Protocol), ep.AgentURL)
+			}
 			records = append(records, ExpectedDNSRecord{
 				Name:     fmt.Sprintf("_ans.%s", fqdn),
 				Type:     DNSRecordTXT,
@@ -229,10 +243,19 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	// _ans-badge TXT record — trust badge. Required alongside _ans:
 	// resolvers and badge-verifying clients expect to find both, and
 	// publishing _ans without _ans-badge would advertise an agent
-	// that fails the public discovery handshake.
+	// that fails the public discovery handshake. Base-only
+	// registrations omit the `version=` field per §4.4 record syntax
+	// for base-only badges; the ANSName field on the registration
+	// itself is absent so the badge records the registration without
+	// version pinning.
 	if len(reg.Endpoints) > 0 {
-		badgeValue := fmt.Sprintf("v=ans-badge1; version=%s; url=%s",
-			version, reg.Endpoints[0].AgentURL)
+		var badgeValue string
+		if baseOnly {
+			badgeValue = fmt.Sprintf("v=ans-badge1; url=%s", reg.Endpoints[0].AgentURL)
+		} else {
+			badgeValue = fmt.Sprintf("v=ans-badge1; version=%s; url=%s",
+				version, reg.Endpoints[0].AgentURL)
+		}
 		records = append(records, ExpectedDNSRecord{
 			Name:     fmt.Sprintf("_ans-badge.%s", fqdn),
 			Type:     DNSRecordTXT,

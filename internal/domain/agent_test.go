@@ -28,7 +28,7 @@ func newValidRegistration(t *testing.T) *AgentRegistration {
 	}
 
 	reg, err := NewRegistration(
-		"agent-uuid", "owner-1", ansName, "My Agent", "desc",
+		"agent-uuid", "owner-1", ansName, "", "My Agent", "desc",
 		endpoints, cert, &csr, time.Now(),
 	)
 	require.NoError(t, err)
@@ -64,15 +64,18 @@ func TestNewRegistration_Validations(t *testing.T) {
 	}{
 		{"missing agent id", "", "o", validName, "", "", validEndpoints, nil, &validCSR, "MISSING_AGENT_ID"},
 		{"missing owner", "a", "", validName, "", "", validEndpoints, nil, &validCSR, "MISSING_OWNER_ID"},
-		{"missing ans name", "a", "o", AnsName{}, "", "", validEndpoints, nil, &validCSR, "MISSING_ANS_NAME"},
+		// AnsName empty + Identity CSR present is incoherent under §3.2.0:
+		// base-only registrations cannot have an Identity Certificate
+		// because the cert's URI SAN encodes the ANSName.
+		{"base_only_with_csr_rejected", "a", "o", AnsName{}, "", "", validEndpoints, nil, &validCSR, "BASE_ONLY_REJECTS_IDENTITY_CSR"},
 		{"display name too long", "a", "o", validName, strings.Repeat("x", 65), "", validEndpoints, nil, &validCSR, "DISPLAY_NAME_TOO_LONG"},
 		{"description too long", "a", "o", validName, "", strings.Repeat("x", 151), validEndpoints, nil, &validCSR, "DESCRIPTION_TOO_LONG"},
 		{"no endpoints", "a", "o", validName, "", "", nil, nil, &validCSR, "MISSING_ENDPOINTS"},
-		{"missing csr", "a", "o", validName, "", "", validEndpoints, nil, nil, "MISSING_IDENTITY_CSR"},
+		{"missing csr (versioned)", "a", "o", validName, "", "", validEndpoints, nil, nil, "VERSIONED_REQUIRES_IDENTITY_CSR"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			_, err := NewRegistration(tc.agentID, tc.ownerID, tc.ansName, tc.displayName, tc.description, tc.endpoints, tc.cert, tc.csr, time.Now())
+			_, err := NewRegistration(tc.agentID, tc.ownerID, tc.ansName, "", tc.displayName, tc.description, tc.endpoints, tc.cert, tc.csr, time.Now())
 			require.Error(t, err)
 			var de *Error
 			require.ErrorAs(t, err, &de)
@@ -87,7 +90,7 @@ func TestNewRegistration_CertFQDNMismatch(t *testing.T) {
 	ep := []AgentEndpoint{{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"}}
 	cert := &ByocServerCertificate{SubjectCommonName: "other.example.com"}
 
-	_, err := NewRegistration("a", "o", ansName, "", "", ep, cert, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "", "", "", ep, cert, &csr, time.Now())
 	assert.ErrorIs(t, err, ErrCertificate)
 }
 
@@ -220,7 +223,7 @@ func TestNewRegistration_InvalidEndpoint(t *testing.T) {
 	badEndpoints := []AgentEndpoint{
 		{Protocol: ProtocolMCP, AgentURL: "https://other.example.com/mcp"},
 	}
-	_, err := NewRegistration("a", "o", ansName, "", "", badEndpoints, nil, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "", "", "", badEndpoints, nil, &csr, time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrValidation)
 }

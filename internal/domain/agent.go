@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -64,8 +65,19 @@ type AgentRegistration struct {
 	// OwnerID identifies the authenticated user who owns this registration.
 	OwnerID string `json:"ownerId"`
 
-	// AnsName is the versioned agent name (ans://v1.0.0.agent.example.com).
+	// AnsName is the versioned agent name (ans://v1.0.0.agent.example.com)
+	// when the registrant submitted both a version and an Identity CSR
+	// (the versioned path per §3.2.0). Zero-value AnsName indicates a
+	// base-only registration; the AgentHost field carries the FQDN
+	// identity in that case.
 	AnsName AnsName `json:"ansName"`
+
+	// AgentHost is the FQDN identity. Always non-empty post-validation.
+	// For versioned registrations, derived from AnsName.FQDN(). For
+	// base-only registrations, supplied explicitly because AnsName is
+	// zero. Read this field rather than AnsName when an emission path
+	// needs the FQDN regardless of registration variant.
+	AgentHost string `json:"agentHost"`
 
 	// Status is the current lifecycle state.
 	Status RegistrationStatus `json:"status"`
@@ -129,10 +141,27 @@ type AgentRegistration struct {
 }
 
 // NewRegistration creates a new agent registration in PENDING_VALIDATION state.
+//
+// Two paths per ANS_SPEC.md §3.2.0 / §1.8:
+//
+//	Versioned (default): registrant submits both a version (carried
+//	in ansName) and an Identity CSR. Aggregate ends with non-zero
+//	AnsName + non-nil identityCSR; an Identity Certificate is issued.
+//
+//	Base-only: registrant submits NEITHER a version nor an Identity
+//	CSR. Caller passes a zero-value ansName and identityCSR=nil;
+//	agentHost MUST be non-empty (it carries the FQDN identity in
+//	place of the ANSName). No Identity Certificate is issued; the
+//	AGENT_REGISTERED event omits the ANSName field.
+//
+// Mixed forms are rejected: a version requires an Identity CSR (and
+// vice versa) — the Identity Certificate's URI SAN encodes the
+// ANSName, so the two artifacts are coupled.
 func NewRegistration(
 	agentID string,
 	ownerID string,
 	ansName AnsName,
+	agentHost string,
 	displayName string,
 	description string,
 	endpoints []AgentEndpoint,
@@ -146,9 +175,42 @@ func NewRegistration(
 	if ownerID == "" {
 		return nil, NewValidationError("MISSING_OWNER_ID", "ownerId is required")
 	}
-	if ansName.IsZero() {
-		return nil, NewValidationError("MISSING_ANS_NAME", "ansName is required")
+
+	baseOnly := ansName.IsZero()
+	if baseOnly && identityCSR != nil {
+		return nil, NewValidationError(
+			"BASE_ONLY_REJECTS_IDENTITY_CSR",
+			"identity CSR submitted without a version: base-only registrations cannot have an Identity Certificate",
+		)
 	}
+	if !baseOnly && identityCSR == nil {
+		return nil, NewValidationError(
+			"VERSIONED_REQUIRES_IDENTITY_CSR",
+			"version submitted without an identity CSR: versioned registrations require both",
+		)
+	}
+
+	// Resolve canonical FQDN. Versioned: ansName carries it. Base-only:
+	// caller passes agentHost explicitly.
+	fqdn := strings.ToLower(strings.TrimSpace(agentHost))
+	if !baseOnly && fqdn == "" {
+		fqdn = ansName.FQDN()
+	}
+	if fqdn == "" {
+		return nil, NewValidationError("MISSING_AGENT_HOST", "agentHost is required (versioned: derived from ansName; base-only: explicit)")
+	}
+	if err := validateAgentHost(fqdn); err != nil {
+		return nil, err
+	}
+	// Catch operator-side mismatch when both ansName and agentHost are
+	// supplied for the versioned path.
+	if !baseOnly && agentHost != "" && !strings.EqualFold(strings.TrimSpace(agentHost), ansName.FQDN()) {
+		return nil, NewValidationError(
+			"AGENT_HOST_ANSNAME_MISMATCH",
+			fmt.Sprintf("agentHost %q does not match ansName host %q", agentHost, ansName.FQDN()),
+		)
+	}
+
 	if len(displayName) > maxDisplayNameLength {
 		return nil, NewValidationError(
 			"DISPLAY_NAME_TOO_LONG",
@@ -164,29 +226,27 @@ func NewRegistration(
 	if len(endpoints) == 0 {
 		return nil, NewValidationError("MISSING_ENDPOINTS", "at least one endpoint is required")
 	}
-	if identityCSR == nil {
-		return nil, NewValidationError("MISSING_IDENTITY_CSR", "identityCsrPEM is required")
-	}
 
-	// Validate endpoints against the agent host.
+	// Validate endpoints against the FQDN.
 	eps := AgentEndpoints{AgentID: agentID, Endpoints: endpoints}
-	if err := eps.Validate(ansName.FQDN()); err != nil {
+	if err := eps.Validate(fqdn); err != nil {
 		return nil, err
 	}
 
 	// Validate server cert matches FQDN if provided.
-	if serverCert != nil && !serverCert.MatchesFQDN(ansName.FQDN()) {
+	if serverCert != nil && !serverCert.MatchesFQDN(fqdn) {
 		return nil, NewCertificateError(
 			"SERVER_CERT_FQDN_MISMATCH",
-			fmt.Sprintf("server certificate does not match agent FQDN %q", ansName.FQDN()),
+			fmt.Sprintf("server certificate does not match agent FQDN %q", fqdn),
 		)
 	}
 
 	reg := &AgentRegistration{
-		AgentID: agentID,
-		OwnerID: ownerID,
-		AnsName: ansName,
-		Status:  StatusPendingValidation,
+		AgentID:   agentID,
+		OwnerID:   ownerID,
+		AnsName:   ansName,
+		AgentHost: fqdn,
+		Status:    StatusPendingValidation,
 		Details: RegistrationDetails{
 			RegistrationTimestamp: now,
 			DisplayName:           displayName,
@@ -346,9 +406,27 @@ func (r *AgentRegistration) AllowsSupersede(newVersion SimplifiedSemVer) bool {
 	return newVersion.GreaterThan(r.AnsName.Version())
 }
 
-// FQDN returns the lowercase FQDN from the ANS name.
+// FQDN returns the lowercase FQDN identity for this registration.
+// Reads from AgentHost (always set post-validation), so works for
+// both versioned and base-only registrations. The previous
+// implementation read from AnsName.FQDN(), which returned "" for
+// base-only registrations and broke any caller that needed the FQDN
+// regardless of registration variant.
 func (r *AgentRegistration) FQDN() string {
+	if r.AgentHost != "" {
+		return r.AgentHost
+	}
+	// Fall back to AnsName for any aggregate constructed before the
+	// AgentHost field landed (loaded from a pre-Plan-F DB row).
 	return r.AnsName.FQDN()
+}
+
+// IsBaseOnly reports whether this registration was made without a
+// version + Identity CSR (§3.2.0). Base-only agents have no
+// ANSName, no Identity Certificate, and emit DNS records without
+// the version= field.
+func (r *AgentRegistration) IsBaseOnly() bool {
+	return r.AnsName.IsZero()
 }
 
 // ClearEvents returns and clears the pending domain events.

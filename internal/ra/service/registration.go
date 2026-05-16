@@ -46,8 +46,16 @@ type OutboxEnqueuer interface {
 // AGENT_REGISTERED event. Empty treated as "V2" for backwards
 // compatibility with callers predating the V1 lane.
 type RegisterRequest struct {
-	OwnerID     string
-	AnsName     domain.AnsName
+	OwnerID string
+	// AnsName is the versioned agent name. Zero-value for base-only
+	// registrations (§3.2.0) where the operator submitted neither a
+	// version nor an Identity CSR. AgentHost carries the FQDN in that
+	// case.
+	AnsName domain.AnsName
+	// AgentHost is the FQDN. Required for base-only registrations
+	// (when AnsName is zero). For versioned registrations, optional —
+	// derived from AnsName.FQDN() if not supplied.
+	AgentHost   string
 	DisplayName string
 	Description string
 	Endpoints   []domain.AgentEndpoint
@@ -318,14 +326,15 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		return nil, domain.NewValidationError("INVALID_IDENTITY_CSR", err.Error())
 	}
 
-	// Build aggregates.
+	// Build aggregates. Identity CSR is optional under the §3.2.0
+	// base-only path; domain-layer NewRegistration enforces both-
+	// or-neither.
 	agentID := uuid.NewString()
-	csrID := uuid.NewString()
-	csr := domain.NewIdentityCSR(csrID, req.IdentityCSRPEM, now)
+	csrPtr := buildOptionalIdentityCSR(req.IdentityCSRPEM, now)
 
 	reg, err := domain.NewRegistration(
-		agentID, req.OwnerID, req.AnsName, req.DisplayName, req.Description,
-		req.Endpoints, byocCert, &csr, now,
+		agentID, req.OwnerID, req.AnsName, req.AgentHost, req.DisplayName, req.Description,
+		req.Endpoints, byocCert, csrPtr, now,
 	)
 	if err != nil {
 		return nil, err

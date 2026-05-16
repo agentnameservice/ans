@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 
 	"github.com/godaddy/ans/internal/adapter/auth"
 	"github.com/godaddy/ans/internal/domain"
@@ -30,15 +31,20 @@ func NewRegistrationHandler(svc *service.RegistrationService) *RegistrationHandl
 // `ServerCertificateAuthority` port; the BYOC path routes through
 // the certificate validator.
 type registrationRequest struct {
-	AgentDisplayName          string        `json:"agentDisplayName"`
-	AgentDescription          string        `json:"agentDescription,omitempty"`
-	Version                   string        `json:"version"`
-	AgentHost                 string        `json:"agentHost"`
-	Endpoints                 []endpointDTO `json:"endpoints"`
-	IdentityCSRPEM            string        `json:"identityCsrPEM"`
-	ServerCsrPEM              string        `json:"serverCsrPEM,omitempty"`
-	ServerCertificatePEM      string        `json:"serverCertificatePEM,omitempty"`
-	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
+	AgentDisplayName string `json:"agentDisplayName"`
+	AgentDescription string `json:"agentDescription,omitempty"`
+	// Version is optional under §3.2.0 (base-only registrations).
+	// Required when identityCsrPEM is supplied; rejected when
+	// identityCsrPEM is absent. The handler enforces both-or-neither.
+	Version   string        `json:"version,omitempty"`
+	AgentHost string        `json:"agentHost"`
+	Endpoints []endpointDTO `json:"endpoints"`
+	// IdentityCSRPEM is optional under §3.2.0. Required when Version
+	// is supplied; rejected when Version is absent.
+	IdentityCSRPEM            string `json:"identityCsrPEM,omitempty"`
+	ServerCsrPEM              string `json:"serverCsrPEM,omitempty"`
+	ServerCertificatePEM      string `json:"serverCertificatePEM,omitempty"`
+	ServerCertificateChainPEM string `json:"serverCertificateChainPEM,omitempty"`
 
 	// AgentCardContent is the optional ANS Trust Card body the
 	// operator submits per ANS_SPEC.md §A.1. Modeled as
@@ -141,13 +147,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse version + host into an AnsName.
-	semver, err := domain.ParseSemVer(req.Version)
-	if err != nil {
-		WriteError(w, err)
-		return
-	}
-	ansName, err := domain.NewAnsName(semver, req.AgentHost)
+	ansName, err := resolveAnsNameForRegister(&req)
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -162,6 +162,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 	resp, err := h.svc.RegisterAgent(r.Context(), service.RegisterRequest{
 		OwnerID:                   id.Subject,
 		AnsName:                   ansName,
+		AgentHost:                 req.AgentHost,
 		DisplayName:               req.AgentDisplayName,
 		Description:               req.AgentDescription,
 		Endpoints:                 eps,
@@ -293,3 +294,38 @@ func schemeOf(r *http.Request) string {
 
 // silence "imported and not used" if handlers evolve.
 var _ = errors.New
+
+// resolveAnsNameForRegister translates the request's optional version
+// and Identity CSR fields into a canonical AnsName per ANS_SPEC.md
+// §3.2.0 + §1.8.
+//
+// Returns:
+//   - non-zero AnsName when both version + identityCsrPEM are
+//     supplied (versioned registration);
+//   - zero-value AnsName when both are absent (base-only);
+//   - validation error when one is supplied without the other
+//     (VERSIONED_REQUIRES_IDENTITY_CSR or BASE_ONLY_REJECTS_IDENTITY_CSR).
+func resolveAnsNameForRegister(req *registrationRequest) (domain.AnsName, error) {
+	versionGiven := strings.TrimSpace(req.Version) != ""
+	csrGiven := strings.TrimSpace(req.IdentityCSRPEM) != ""
+	switch {
+	case versionGiven && !csrGiven:
+		return domain.AnsName{}, domain.NewValidationError(
+			"VERSIONED_REQUIRES_IDENTITY_CSR",
+			"version submitted without identityCsrPEM: versioned registrations require both",
+		)
+	case !versionGiven && csrGiven:
+		return domain.AnsName{}, domain.NewValidationError(
+			"BASE_ONLY_REJECTS_IDENTITY_CSR",
+			"identityCsrPEM submitted without a version: base-only registrations cannot have an Identity Certificate",
+		)
+	case !versionGiven && !csrGiven:
+		// Base-only path: zero-value AnsName signals to the service.
+		return domain.AnsName{}, nil
+	}
+	semver, err := domain.ParseSemVer(req.Version)
+	if err != nil {
+		return domain.AnsName{}, err
+	}
+	return domain.NewAnsName(semver, req.AgentHost)
+}
