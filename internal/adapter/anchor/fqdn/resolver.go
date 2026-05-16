@@ -12,9 +12,11 @@
 // Plan G Slice 1 keeps the resolver behavior-preserving: existing
 // FQDN registrations land identical IdentityClaim values regardless
 // of whether the resolver is on the hot path or bypassed. Subsequent
-// slices add the optional DNSid pre-step (anchor-0a-fqdn.md §3.4)
-// and the ACME challenge resolution that is currently inline in
-// internal/ra/service/lifecycle.go.
+// slices add the optional external key-locator pre-step
+// (anchor-0a-fqdn.md §3.4) and the ACME challenge resolution that is
+// currently inline in internal/ra/service/lifecycle.go. The pre-step
+// is structured as a pluggable adapter chain so the resolver does
+// not couple to any specific parallel agentic-discovery effort.
 package fqdn
 
 import (
