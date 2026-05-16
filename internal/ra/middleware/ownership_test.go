@@ -270,6 +270,9 @@ func (f *fakeAgentStore) FindByAnsName(_ context.Context, _ domain.AnsName) (*do
 func (f *fakeAgentStore) ExistsByAnsName(_ context.Context, _ domain.AnsName) (bool, error) {
 	return false, nil
 }
+func (f *fakeAgentStore) ExistsActiveBaseOnlyByAgentHost(_ context.Context, _ string) (bool, error) {
+	return false, nil
+}
 func (f *fakeAgentStore) FindAllByAgentHost(_ context.Context, _ string) ([]*domain.AgentRegistration, error) {
 	return nil, nil
 }

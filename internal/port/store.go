@@ -43,7 +43,15 @@ type AgentStore interface {
 	FindByAnsName(ctx context.Context, ansName domain.AnsName) (*domain.AgentRegistration, error)
 
 	// ExistsByAnsName returns true if any registration uses the given name.
+	// Returns false for the zero-value AnsName — base-only (§3.2.0)
+	// uniqueness is enforced via ExistsActiveBaseOnlyByAgentHost instead.
 	ExistsByAnsName(ctx context.Context, ansName domain.AnsName) (bool, error)
+
+	// ExistsActiveBaseOnlyByAgentHost returns true if a base-only
+	// registration (no ANSName) is currently active or pending for
+	// the given FQDN. Versioned registrations on the same FQDN do NOT
+	// trigger this check.
+	ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string) (bool, error)
 
 	// FindAllByAgentHost returns every registration (any version, any status)
 	// for the given FQDN, newest first.

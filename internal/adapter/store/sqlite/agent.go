@@ -28,7 +28,7 @@ type agentRow struct {
 	ID                       int64          `db:"id"`
 	AgentID                  string         `db:"agent_id"`
 	OwnerID                  string         `db:"owner_id"`
-	AnsName                  string         `db:"ans_name"`
+	AnsName                  sql.NullString `db:"ans_name"`
 	AgentHost                string         `db:"agent_host"`
 	Version                  string         `db:"version"`
 	Status                   string         `db:"status"`
@@ -46,17 +46,24 @@ type agentRow struct {
 }
 
 func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
-	ansName, err := domain.ParseAnsName(r.AnsName)
-	if err != nil {
-		return nil, fmt.Errorf("sqlite: decode ans_name: %w", err)
+	// ans_name is NULL for §3.2.0 base-only registrations; toDomain
+	// surfaces that as the zero-value AnsName rather than an error.
+	var ansName domain.AnsName
+	if r.AnsName.Valid && r.AnsName.String != "" {
+		parsed, err := domain.ParseAnsName(r.AnsName.String)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: decode ans_name: %w", err)
+		}
+		ansName = parsed
 	}
 
 	reg := &domain.AgentRegistration{
-		ID:      r.ID,
-		AgentID: r.AgentID,
-		OwnerID: r.OwnerID,
-		AnsName: ansName,
-		Status:  domain.RegistrationStatus(r.Status),
+		ID:        r.ID,
+		AgentID:   r.AgentID,
+		OwnerID:   r.OwnerID,
+		AnsName:   ansName,
+		AgentHost: r.AgentHost,
+		Status:    domain.RegistrationStatus(r.Status),
 		Details: domain.RegistrationDetails{
 			RegistrationTimestamp: msToTime(r.RegistrationTimestampMs),
 			DisplayName:           r.DisplayName,
@@ -105,11 +112,18 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 dns_record_style,
                 created_at_ms, updated_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+		// AnsName is the zero value for §3.2.0 base-only registrations.
+		// Persist it as NULL so the UNIQUE constraint allows multiple
+		// base-only rows (SQLite treats each NULL as distinct under
+		// UNIQUE), and read the FQDN from agent.FQDN() which falls back
+		// to agent.AgentHost when AnsName is zero. AnsName.String()
+		// returns "" for the zero value; nullableString promotes it to
+		// SQL NULL.
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
 			agent.AgentID,
 			agent.OwnerID,
-			agent.AnsName.String(),
-			agent.AnsName.FQDN(),
+			nullableString(agent.AnsName.String()),
+			agent.FQDN(),
 			agent.AnsName.Version().String(),
 			string(agent.Status),
 			agent.Details.DisplayName,
@@ -194,10 +208,35 @@ func (s *AgentStore) FindByAnsName(ctx context.Context, ansName domain.AnsName) 
 }
 
 // ExistsByAnsName returns true if any row uses the given ANS name.
+// Returns false for the zero-value AnsName: §3.2.0 base-only registrations
+// store an empty ans_name string, and treating empty as "exists" would
+// reject every base-only registration after the first one. Base-only
+// uniqueness is enforced via ExistsActiveBaseOnlyByAgentHost instead,
+// which scopes the conflict to the FQDN of the registration in question.
 func (s *AgentStore) ExistsByAnsName(ctx context.Context, ansName domain.AnsName) (bool, error) {
+	if ansName.IsZero() {
+		return false, nil
+	}
 	var n int
 	const q = `SELECT COUNT(1) FROM agent_registrations WHERE ans_name = ?`
 	if err := s.db.extx(ctx).GetContext(ctx, &n, q, ansName.String()); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ExistsActiveBaseOnlyByAgentHost returns true if a non-revoked,
+// non-failed base-only registration (ans_name empty) already claims
+// the given FQDN. The §3.2.0 path lets the same FQDN host multiple
+// registration rows over time (a base-only registration revoked, then
+// re-registered) but only one can be live at any moment.
+func (s *AgentStore) ExistsActiveBaseOnlyByAgentHost(ctx context.Context, host string) (bool, error) {
+	var n int
+	const q = `SELECT COUNT(1) FROM agent_registrations
+                WHERE agent_host = ?
+                  AND ans_name = ''
+                  AND status NOT IN ('REVOKED', 'FAILED', 'EXPIRED')`
+	if err := s.db.extx(ctx).GetContext(ctx, &n, q, host); err != nil {
 		return false, err
 	}
 	return n > 0, nil

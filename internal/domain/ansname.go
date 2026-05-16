@@ -101,7 +101,13 @@ func (n AnsName) AgentHost() string { return n.agentHost }
 func (n AnsName) FQDN() string { return n.agentHost }
 
 // String returns the full ANS name: ans://v1.2.0.myagent.example.com.
+// Returns "" for the zero value rather than a malformed "ans://v0.0.0."
+// — base-only registrations (§3.2.0) carry a zero AnsName and the
+// emitted JSON should reflect "no ANSName" as an absent string.
 func (n AnsName) String() string {
+	if n.IsZero() {
+		return ""
+	}
 	return fmt.Sprintf("%sv%s.%s", ansProtocolPrefix, n.version.String(), n.agentHost)
 }
 

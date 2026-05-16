@@ -247,16 +247,43 @@ func (s *RegistrationService) WithDNSVerifier(v port.DNSVerifier) *RegistrationS
 func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterRequest) (*RegisterResponse, error) {
 	now := s.clock()
 
-	// Uniqueness check before heavy work.
-	exists, err := s.agents.ExistsByAnsName(ctx, req.AnsName)
-	if err != nil {
-		return nil, err
+	// Resolve the canonical FQDN once, up front. Versioned registrations
+	// can derive it from req.AnsName; base-only registrations carry it
+	// in req.AgentHost. Downstream cert validators all need it, so a
+	// single source avoids the empty-FQDN trap that the §3.2.0 path
+	// would hit if we kept reading `req.AnsName.FQDN()` directly.
+	fqdn := req.AgentHost
+	if fqdn == "" {
+		fqdn = req.AnsName.FQDN()
 	}
-	if exists {
-		return nil, domain.NewConflictError(
-			"ANS_NAME_TAKEN",
-			fmt.Sprintf("ANS name %q is already registered", req.AnsName),
-		)
+
+	// Uniqueness check before heavy work. Versioned: by ANSName.
+	// Base-only (zero AnsName): the AnsName lookup short-circuits to
+	// false (the store treats empty as "not a key"), and we follow up
+	// with an FQDN scope so two base-only registrations cannot
+	// simultaneously claim the same agent host.
+	if req.AnsName.IsZero() {
+		baseExists, err := s.agents.ExistsActiveBaseOnlyByAgentHost(ctx, fqdn)
+		if err != nil {
+			return nil, err
+		}
+		if baseExists {
+			return nil, domain.NewConflictError(
+				"BASE_ONLY_FQDN_TAKEN",
+				fmt.Sprintf("a base-only registration for %q is already active or pending", fqdn),
+			)
+		}
+	} else {
+		exists, err := s.agents.ExistsByAnsName(ctx, req.AnsName)
+		if err != nil {
+			return nil, err
+		}
+		if exists {
+			return nil, domain.NewConflictError(
+				"ANS_NAME_TAKEN",
+				fmt.Sprintf("ANS name %q is already registered", req.AnsName),
+			)
+		}
 	}
 
 	// Server certificate: exactly one of CSR / BYOC.
@@ -292,7 +319,7 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	switch {
 	case byocSet:
 		v, err := s.validator.ValidateServerCertificate(ctx,
-			req.ServerCertificatePEM, req.ServerCertificateChainPEM, req.AnsName.FQDN())
+			req.ServerCertificatePEM, req.ServerCertificateChainPEM, fqdn)
 		if err != nil {
 			return nil, domain.NewCertificateError("INVALID_SERVER_CERT", err.Error())
 		}
@@ -313,17 +340,22 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 				"serverCsrPEM submitted but no server CA is configured — either configure one or use serverCertificatePEM (BYOC)",
 			)
 		}
-		if err := s.validator.ValidateServerCSR(ctx, req.ServerCsrPEM, req.AnsName.FQDN()); err != nil {
+		if err := s.validator.ValidateServerCSR(ctx, req.ServerCsrPEM, fqdn); err != nil {
 			return nil, domain.NewValidationError("INVALID_SERVER_CSR", err.Error())
 		}
 		srvCSR := domain.NewServerCSR(uuid.NewString(), req.ServerCsrPEM, now)
 		pendingServerCSR = &srvCSR
 	}
 
-	// Validate identity CSR shape. Signing is deferred to
+	// Validate identity CSR shape — only when the operator submitted
+	// one. Base-only registrations (§3.2.0) skip this entirely; the
+	// handler+resolveAnsNameForRegister already enforces the both-
+	// or-neither invariant against `version`. Signing is deferred to
 	// verify-acme; the CSR row stays PENDING until then.
-	if err := s.validator.ValidateIdentityCSR(ctx, req.IdentityCSRPEM, req.AnsName.String()); err != nil {
-		return nil, domain.NewValidationError("INVALID_IDENTITY_CSR", err.Error())
+	if req.IdentityCSRPEM != "" {
+		if err := s.validator.ValidateIdentityCSR(ctx, req.IdentityCSRPEM, req.AnsName.String()); err != nil {
+			return nil, domain.NewValidationError("INVALID_IDENTITY_CSR", err.Error())
+		}
 	}
 
 	// Build aggregates. Identity CSR is optional under the §3.2.0
@@ -380,8 +412,11 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		}); err != nil {
 			return err
 		}
-		if err := s.certs.SaveCSR(txCtx, reg.AgentID, reg.IdentityCSR); err != nil {
-			return err
+		// Identity CSR is absent for §3.2.0 base-only registrations.
+		if reg.IdentityCSR != nil {
+			if err := s.certs.SaveCSR(txCtx, reg.AgentID, reg.IdentityCSR); err != nil {
+				return err
+			}
 		}
 		if reg.ServerCSR != nil {
 			if err := s.certs.SaveCSR(txCtx, reg.AgentID, reg.ServerCSR); err != nil {
