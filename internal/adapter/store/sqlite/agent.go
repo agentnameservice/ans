@@ -41,6 +41,8 @@ type agentRow struct {
 	ACMEChallengeExpiresAtMs sql.NullInt64  `db:"acme_challenge_expires_at_ms"`
 	CapabilitiesHash         sql.NullString `db:"capabilities_hash"`
 	DNSRecordStyle           sql.NullString `db:"dns_record_style"`
+	AnchorType               sql.NullString `db:"anchor_type"`
+	AnchorResolvedID         sql.NullString `db:"anchor_resolved_id"`
 	CreatedAtMs              int64          `db:"created_at_ms"`
 	UpdatedAtMs              int64          `db:"updated_at_ms"`
 }
@@ -88,7 +90,31 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 	if r.DNSRecordStyle.Valid {
 		reg.DNSRecordStyle = domain.DNSRecordStyle(r.DNSRecordStyle.String)
 	}
+	// AnchorClaim is reconstructed from anchor_type + anchor_resolved_id.
+	// PublicKeyJWK and IssuedAt are intentionally not persisted: verifiers
+	// re-resolve the claim through the AnchorResolver on demand to honor
+	// the per-profile freshness budget. Pre-Plan-G rows have anchor_type
+	// NULL and surface a nil AnchorClaim downstream.
+	if r.AnchorType.Valid && r.AnchorType.String != "" {
+		reg.AnchorClaim = &domain.IdentityClaim{
+			AnchorType: domain.AnchorType(r.AnchorType.String),
+		}
+		if r.AnchorResolvedID.Valid {
+			reg.AnchorClaim.ResolvedID = r.AnchorResolvedID.String
+		}
+	}
 	return reg, nil
+}
+
+// anchorClaimColumns returns the (anchor_type, anchor_resolved_id)
+// values for the INSERT INTO agent_registrations row. Both are NULL
+// when the aggregate carries no AnchorClaim (legacy FQDN-only path).
+func anchorClaimColumns(claim *domain.IdentityClaim) (sql.NullString, sql.NullString) {
+	if claim == nil || claim.AnchorType == "" {
+		return sql.NullString{}, sql.NullString{}
+	}
+	return sql.NullString{String: string(claim.AnchorType), Valid: true},
+		sql.NullString{String: claim.ResolvedID, Valid: true}
 }
 
 // Save inserts or updates an AgentRegistration. Endpoints, server cert,
@@ -110,15 +136,19 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 acme_dns01_token, acme_challenge_expires_at_ms,
                 capabilities_hash,
                 dns_record_style,
+                anchor_type, anchor_resolved_id,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		// AnsName is the zero value for §3.2.0 base-only registrations.
 		// Persist it as NULL so the UNIQUE constraint allows multiple
 		// base-only rows (SQLite treats each NULL as distinct under
 		// UNIQUE), and read the FQDN from agent.FQDN() which falls back
 		// to agent.AgentHost when AnsName is zero. AnsName.String()
 		// returns "" for the zero value; nullableString promotes it to
-		// SQL NULL.
+		// SQL NULL. AnchorClaim is the verified IdentityClaim from the
+		// caller; pre-Plan-G code paths leave it nil and the columns
+		// stay NULL.
+		anchorType, anchorResolvedID := anchorClaimColumns(agent.AnchorClaim)
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
 			agent.AgentID,
 			agent.OwnerID,
@@ -135,6 +165,8 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 			nullableMs(agent.ACMEChallenge.ExpiresAt),
 			nullableString(agent.CapabilitiesHash),
 			nullableString(string(agent.DNSRecordStyle)),
+			anchorType,
+			anchorResolvedID,
 			now, now,
 		)
 		if err != nil {

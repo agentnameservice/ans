@@ -498,6 +498,99 @@ func TestAgentStore_ExistsActiveBaseOnlyByAgentHost(t *testing.T) {
 	}
 }
 
+func TestAgentStore_AnchorClaim_RoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAgentStore(db)
+	ctx := context.Background()
+
+	cases := []struct {
+		name  string
+		claim *domain.IdentityClaim
+	}{
+		{
+			name: "FQDN claim",
+			claim: &domain.IdentityClaim{
+				AnchorType: domain.AnchorTypeFQDN,
+				ResolvedID: "agent.example.com",
+			},
+		},
+		{
+			name: "DID claim",
+			claim: &domain.IdentityClaim{
+				AnchorType: domain.AnchorTypeDID,
+				ResolvedID: "did:web:agent.example.com",
+			},
+		},
+		{
+			name: "LEI claim",
+			claim: &domain.IdentityClaim{
+				AnchorType: domain.AnchorTypeLEI,
+				ResolvedID: "529900T8BM49AURSDO55",
+			},
+		},
+		{
+			name:  "no claim (legacy path)",
+			claim: nil,
+		},
+	}
+
+	for i, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			// Distinct host + agent ID per case so the per-FQDN
+			// base-only uniqueness check does not interfere.
+			agentID := "agent-anchor-" + strconvI(i)
+			host := "agent" + strconvI(i) + ".example.com"
+			fixture := newBaseOnlyFixture(t, agentID, host)
+			fixture.AnchorClaim = c.claim
+
+			if err := store.Save(ctx, fixture); err != nil {
+				t.Fatalf("Save: %v", err)
+			}
+			loaded, err := store.FindByID(ctx, fixture.ID)
+			if err != nil {
+				t.Fatalf("FindByID: %v", err)
+			}
+			if c.claim == nil {
+				if loaded.AnchorClaim != nil {
+					t.Errorf("expected nil AnchorClaim, got %+v", loaded.AnchorClaim)
+				}
+				return
+			}
+			if loaded.AnchorClaim == nil {
+				t.Fatal("expected AnchorClaim, got nil")
+			}
+			if loaded.AnchorClaim.AnchorType != c.claim.AnchorType {
+				t.Errorf("AnchorType: got %q, want %q",
+					loaded.AnchorClaim.AnchorType, c.claim.AnchorType)
+			}
+			if loaded.AnchorClaim.ResolvedID != c.claim.ResolvedID {
+				t.Errorf("ResolvedID: got %q, want %q",
+					loaded.AnchorClaim.ResolvedID, c.claim.ResolvedID)
+			}
+			// PublicKeyJWK is intentionally not persisted; verifiers
+			// re-resolve through the AnchorResolver to honor the
+			// per-profile freshness budget.
+			if len(loaded.AnchorClaim.PublicKeyJWK) != 0 {
+				t.Errorf("PublicKeyJWK should not be persisted, got %d bytes",
+					len(loaded.AnchorClaim.PublicKeyJWK))
+			}
+		})
+	}
+}
+
+// strconvI keeps the test imports minimal.
+func strconvI(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	digits := []byte{}
+	for n > 0 {
+		digits = append([]byte{byte('0' + n%10)}, digits...)
+		n /= 10
+	}
+	return string(digits)
+}
+
 // TestAgentStore_ExistsByAnsName_ZeroIsFalse pins the contract
 // guarding base-only registrations: looking up the zero-value AnsName
 // must short-circuit to false rather than match every empty ans_name
