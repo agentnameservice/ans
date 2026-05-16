@@ -252,6 +252,86 @@ func TestLookupVerifier_HTTPSMatch(t *testing.T) {
 	}
 }
 
+// TestLookupVerifier_SVCBMatch covers the Consolidated Approach SVCB
+// record at the bare agent FQDN. The expected value is the same
+// presentation form the RA's ComputeRequiredDNSRecords emits (see
+// internal/domain/dnsrecords.go), and the verifier matches after
+// whitespace normalization mirroring verifyHTTPS.
+//
+// Restricted to IANA-registered SvcParamKeys (alpn + port) because the
+// miekg/dns zone-file parser used by the test fixture rejects symbolic
+// names for the still-provisional Consolidated Approach SvcParams (`wk`,
+// `card-sha256`, `cap`, etc.). Until those keys are IANA-registered per
+// RFC 9460 §6, the test exercises the verifier dispatch and matching
+// path with registered keys; the unregistered keys are unit-tested at
+// the domain layer (internal/domain/dnsrecords_test.go).
+func TestLookupVerifier_SVCBMatch(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t)
+	s.add("agent.example.com.", "SVCB",
+		`agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443`)
+
+	recs := []domain.ExpectedDNSRecord{{
+		Name:     "agent.example.com",
+		Type:     domain.DNSRecordSVCB,
+		Value:    `1 . alpn=a2a port=443`,
+		Required: false,
+	}}
+	got := s.verifyAgainst(t, recs)
+	if !got[0].found {
+		t.Errorf("SVCB should match; got=%+v", got[0])
+	}
+}
+
+// TestLookupVerifier_SVCBMissing covers the absent-record path. The
+// agent's zone never published the SVCB record (or it was removed).
+// Verifier reports not-found without an error (NXDOMAIN-style empty
+// answer).
+func TestLookupVerifier_SVCBMissing(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t)
+	// Different name in the zone — query for the agent's FQDN returns
+	// no SVCB answers.
+	s.add("other.example.com.", "SVCB",
+		`other.example.com. 3600 IN SVCB 1 . alpn=a2a`)
+
+	recs := []domain.ExpectedDNSRecord{{
+		Name:     "agent.example.com",
+		Type:     domain.DNSRecordSVCB,
+		Value:    `1 . alpn=a2a`,
+		Required: false,
+	}}
+	got := s.verifyAgainst(t, recs)
+	if got[0].found {
+		t.Error("SVCB must not be Found when the zone has no matching record")
+	}
+}
+
+// TestLookupVerifier_SVCBWrongTargetMissesMatch confirms that a record
+// with the right alpn but a different SvcPriority/TargetName does not
+// satisfy the expectation. Matching is on the full normalized
+// presentation form, so a TargetName mismatch fails the comparison.
+func TestLookupVerifier_SVCBWrongTargetMissesMatch(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t)
+	// AliasMode (priority 0) at agent.example.com pointing at a
+	// hosting target — different shape than what the RA expects in
+	// ServiceMode (priority 1).
+	s.add("agent.example.com.", "SVCB",
+		`agent.example.com. 3600 IN SVCB 0 host.provider.example.`)
+
+	recs := []domain.ExpectedDNSRecord{{
+		Name:     "agent.example.com",
+		Type:     domain.DNSRecordSVCB,
+		Value:    `1 . alpn=a2a`,
+		Required: false,
+	}}
+	got := s.verifyAgainst(t, recs)
+	if got[0].found {
+		t.Error("ServiceMode expectation should not match an AliasMode record")
+	}
+}
+
 func TestLookupVerifier_NXDOMAINSurfacedAsError(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t)

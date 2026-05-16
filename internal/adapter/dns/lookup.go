@@ -86,6 +86,8 @@ func (v *LookupVerifier) VerifyRecords(
 			r = v.verifyTLSA(lookupCtx, server, rec)
 		case domain.DNSRecordHTTPS:
 			r = v.verifyHTTPS(lookupCtx, server, rec)
+		case domain.DNSRecordSVCB:
+			r = v.verifySVCB(lookupCtx, server, rec)
 		default:
 			r.Error = fmt.Sprintf("unsupported record type: %s", rec.Type)
 		}
@@ -251,6 +253,52 @@ func formatHTTPSValue(s *dns.SVCB) string {
 		fmt.Fprintf(&sb, " %s=%s", p.Key(), p.String())
 	}
 	return sb.String()
+}
+
+// verifySVCB checks for a Consolidated Approach SVCB record (RFC 9460)
+// at the agent's bare FQDN. Multiple SVCB records can share one RRset
+// name distinguished by alpn, so verification iterates the answer
+// section, normalizes each record's wire form, and matches against
+// the expected SvcParams. The matching strategy mirrors verifyHTTPS:
+// the expected value carries every SvcParam the RA computed (alpn,
+// port, wk, card-sha256), and the live record MUST carry the same
+// SvcParams in the same alpn-keyed form.
+//
+// SvcParam unknown-key ignore semantics (RFC 9460 §8) apply at the
+// client, not at this verifier — we only check that the SvcParams
+// the RA committed are present, not that the live record is free of
+// extra SvcParams from other ecosystems. Other agentic specs adding
+// their own SvcParams alongside ours is the entire point of the
+// Consolidated Approach.
+func (v *LookupVerifier) verifySVCB(ctx context.Context, server string, rec domain.ExpectedDNSRecord) port.RecordVerification {
+	r := port.RecordVerification{Record: rec}
+	resp, err := v.exchange(ctx, server, rec.Name, dns.TypeSVCB)
+	if err != nil {
+		r.Error = err.Error()
+		return r
+	}
+	if resp.Rcode != dns.RcodeSuccess {
+		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
+		return r
+	}
+	r.DNSSECVerified = resp.AuthenticatedData
+	wantNorm := normalizeHTTPS(rec.Value)
+	for _, rr := range resp.Answer {
+		svcb, ok := rr.(*dns.SVCB)
+		if !ok {
+			continue
+		}
+		got := formatHTTPSValue(svcb)
+		if r.Actual == "" {
+			r.Actual = got
+		}
+		if normalizeHTTPS(got) == wantNorm {
+			r.Found = true
+			r.Actual = got
+			return r
+		}
+	}
+	return r
 }
 
 // normalizeTLSA collapses whitespace and lowercases the hex so
