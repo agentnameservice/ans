@@ -86,6 +86,12 @@ const (
 	// TypeAgentDeprecated — the agent was superseded by a newer
 	// version and is scheduled for rotation.
 	TypeAgentDeprecated Type = "AGENT_DEPRECATED"
+
+	// TypeEquivalenceLink — two registrations share an operational
+	// identity. Carries Equivalence in place of Agent / Attestations.
+	// See ANS-0 §7 cross-anchor coexistence and the EquivalenceLink
+	// struct below.
+	TypeEquivalenceLink Type = "EQUIVALENCE_LINK"
 )
 
 // IsValid reports whether t is a recognized event type.
@@ -94,7 +100,8 @@ func (t Type) IsValid() bool {
 	case TypeAgentRegistered,
 		TypeAgentRenewed,
 		TypeAgentRevoked,
-		TypeAgentDeprecated:
+		TypeAgentDeprecated,
+		TypeEquivalenceLink:
 		return true
 	default:
 		return false
@@ -130,18 +137,66 @@ type Producer struct {
 // Event is the producer-authored payload. The producer JCS-canonicalizes
 // this and signs it; the resulting detached JWS lands in Producer.Signature.
 type Event struct {
-	AnsID                string        `json:"ansId"`
-	AnsName              string        `json:"ansName"`
-	EventType            Type          `json:"eventType"`
-	Agent                *Agent        `json:"agent,omitempty"`
-	Attestations         *Attestations `json:"attestations,omitempty"`
-	ExpiresAt            string        `json:"expiresAt,omitempty"`
-	IssuedAt             string        `json:"issuedAt,omitempty"`
-	RaID                 string        `json:"raId,omitempty"`
-	RenewalStatus        string        `json:"renewalStatus,omitempty"`
-	RevocationReasonCode string        `json:"revocationReasonCode,omitempty"`
-	RevokedAt            string        `json:"revokedAt,omitempty"`
-	Timestamp            string        `json:"timestamp"` // RFC3339, required
+	AnsID                string            `json:"ansId"`
+	AnsName              string            `json:"ansName"`
+	EventType            Type              `json:"eventType"`
+	Agent                *Agent            `json:"agent,omitempty"`
+	Attestations         *Attestations     `json:"attestations,omitempty"`
+	Equivalence          *EquivalenceLink  `json:"equivalence,omitempty"`
+	ExpiresAt            string            `json:"expiresAt,omitempty"`
+	IssuedAt             string            `json:"issuedAt,omitempty"`
+	RaID                 string            `json:"raId,omitempty"`
+	RenewalStatus        string            `json:"renewalStatus,omitempty"`
+	RevocationReasonCode string            `json:"revocationReasonCode,omitempty"`
+	RevokedAt            string            `json:"revokedAt,omitempty"`
+	Timestamp            string            `json:"timestamp"` // RFC3339, required
+}
+
+// EquivalenceLink records that two registrations share an operational
+// identity. Recorded under EventType=EQUIVALENCE_LINK; the AnsID at
+// the top of the event is the *primary* registration making the
+// assertion, and the LinkedAnsID is the *other* registration the
+// primary is asserting equivalence with.
+//
+// The producer signature on the enclosing event is the cryptographic
+// link: a verifier reading the event sees the producer (the RA) attest
+// that "AnsID and LinkedAnsID resolve to the same operational entity."
+// The producer's authority to make that claim derives from the RA's
+// position as the registrar of both sides; deployments enforce that
+// authority by validating that the asserting controller has authority
+// over both registrations before signing.
+//
+// The reference impl provides the type and validation; emission paths
+// and per-deployment authority checks are operator concerns.
+type EquivalenceLink struct {
+	// LinkedAnsID is the agentId of the linked registration (the one
+	// asserted to be the same operational entity as the event's
+	// primary AnsID). Required.
+	LinkedAnsID string `json:"linkedAnsId"`
+
+	// LinkedAnsName is the linked registration's ANSName when the
+	// linked anchor produces one; empty for non-FQDN anchors that
+	// register base-only. Optional.
+	LinkedAnsName string `json:"linkedAnsName,omitempty"`
+
+	// LinkedAnchorType reports the linked registration's anchor type
+	// ("fqdn", "did", "lei"). Optional but recommended; lets verifiers
+	// filter equivalence-graph edges by anchor type without joining
+	// against the registrations themselves.
+	LinkedAnchorType string `json:"linkedAnchorType,omitempty"`
+
+	// LinkedAnchorResolvedID is the linked registration's canonical
+	// anchor identifier (e.g., the LEI string, the DID URI, the FQDN
+	// for an FQDN anchor). Optional but recommended for the same
+	// reason as LinkedAnchorType.
+	LinkedAnchorResolvedID string `json:"linkedAnchorResolvedId,omitempty"`
+
+	// Rationale records why the link is being asserted. The default
+	// "operator-asserted-multi-anchor" applies when the operator
+	// registered the same operational entity under multiple anchors
+	// and is now publishing the cryptographic link. Other values are
+	// deployment-specific and not normatively constrained here.
+	Rationale string `json:"rationale,omitempty"`
 }
 
 // Agent identifies which agent the event refers to.
@@ -308,6 +363,25 @@ func (ev *Event) Validate() error {
 	}
 	if _, err := time.Parse(time.RFC3339, ev.Timestamp); err != nil {
 		return fmt.Errorf("event: timestamp must be RFC3339: %w", err)
+	}
+	if ev.EventType == TypeEquivalenceLink {
+		if ev.Equivalence == nil {
+			return errors.New("event: EQUIVALENCE_LINK requires equivalence")
+		}
+		if ev.Equivalence.LinkedAnsID == "" {
+			return errors.New("event: equivalence.linkedAnsId required")
+		}
+		if ev.Equivalence.LinkedAnsID == ev.AnsID {
+			return errors.New("event: equivalence.linkedAnsId must differ from ansId")
+		}
+		if ev.Agent != nil {
+			return errors.New("event: EQUIVALENCE_LINK must not carry agent")
+		}
+		if ev.Attestations != nil {
+			return errors.New("event: EQUIVALENCE_LINK must not carry attestations")
+		}
+	} else if ev.Equivalence != nil {
+		return fmt.Errorf("event: equivalence not allowed for eventType %q", ev.EventType)
 	}
 	return nil
 }
