@@ -65,10 +65,12 @@ type GLEIFRecord struct {
 // Resolver implements port.AnchorResolver for LEI anchors. The
 // stub form (no client injected) handles format-only resolution and
 // surfaces a clear LEI_GLEIF_NOT_CONFIGURED error on Resolve.
-// Production deployments inject a GLEIFClient via WithClient.
+// Production deployments inject a GLEIFClient via WithClient and an
+// AttestationJWKSource via WithAttestationSource.
 type Resolver struct {
-	client GLEIFClient
-	clock  func() time.Time
+	client       GLEIFClient
+	attestSource AttestationJWKSource
+	clock        func() time.Time
 }
 
 // New constructs a Resolver with no GLEIF client. Format
@@ -83,13 +85,23 @@ func New() *Resolver {
 // rate limiting, and any LOU mirror selection per
 // anchor-0c-lei.md §3.3.
 func (r *Resolver) WithClient(c GLEIFClient) *Resolver {
-	return &Resolver{client: c, clock: r.clock}
+	return &Resolver{client: c, attestSource: r.attestSource, clock: r.clock}
+}
+
+// WithAttestationSource injects a source for the entity's
+// attestation JWK and returns a copy of the resolver. The
+// AttestationJWKSource is separate from the GLEIFClient because the
+// GLEIF Public API does not carry an attestation key; deployments
+// supply the key through vLEI infrastructure, an LOU custom-field
+// mirror, or (for testbeds) a static map.
+func (r *Resolver) WithAttestationSource(s AttestationJWKSource) *Resolver {
+	return &Resolver{client: r.client, attestSource: s, clock: r.clock}
 }
 
 // WithClock returns a copy of the resolver with a deterministic
 // clock. Tests use this so IssuedAt is reproducible.
 func (r *Resolver) WithClock(clock func() time.Time) *Resolver {
-	return &Resolver{client: r.client, clock: clock}
+	return &Resolver{client: r.client, attestSource: r.attestSource, clock: clock}
 }
 
 // SupportedProfiles satisfies port.AnchorResolver.
@@ -143,17 +155,38 @@ func (r *Resolver) Resolve(ctx context.Context, input string) (*domain.IdentityC
 			"entity status is "+record.EntityStatus+"; only ACTIVE LEIs admitted",
 		)
 	}
-	if len(record.AttestationJWK) == 0 {
+
+	// Attestation key resolution. The GLEIF Public API Level 1
+	// record does not carry the entity's attestation JWK, so the
+	// resolver consults the configured AttestationJWKSource. The
+	// record's own AttestationJWK field stays usable for clients
+	// that already populate it (vLEI Option A clients may return
+	// the key inline); the source is the fallback path when the
+	// client does not.
+	jwk := record.AttestationJWK
+	if len(jwk) == 0 && r.attestSource != nil {
+		fromSource, sErr := r.attestSource.Lookup(ctx, canonical)
+		if sErr != nil {
+			return nil, domain.NewValidationError(
+				"LEI_ATTESTATION_LOOKUP_FAILED",
+				"attestation source error: "+sErr.Error(),
+			)
+		}
+		jwk = fromSource
+	}
+	if len(jwk) == 0 {
 		return nil, domain.NewValidationError(
 			"LEI_NO_ATTESTATION_KEY",
-			"GLEIF record has no ANS attestation key registered for "+canonical,
+			"no ANS attestation key for "+canonical+
+				": configure WithAttestationSource or supply a vLEI-aware GLEIFClient",
 		)
 	}
+
 	now := r.clock().UTC()
 	return &domain.IdentityClaim{
 		AnchorType:   domain.AnchorTypeLEI,
 		ResolvedID:   canonical,
-		PublicKeyJWK: record.AttestationJWK,
+		PublicKeyJWK: jwk,
 		IssuedAt:     now,
 		ExpiresAt:    now.Add(freshnessBudget),
 	}, nil
