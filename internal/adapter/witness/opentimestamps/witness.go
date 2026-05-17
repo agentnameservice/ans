@@ -6,9 +6,9 @@
 //
 //  1. Hash the TL checkpoint with SHA-256.
 //  2. POST the digest to a calendar (default
-//     https://btc.calendar.opentimestamps.org/digest). The calendar
-//     returns a binary OTS proof file containing pending Bitcoin
-//     attestations.
+//     https://alice.btc.calendar.opentimestamps.org/digest). The
+//     calendar returns a binary OTS proof file containing pending
+//     Bitcoin attestations.
 //  3. Wrap the bytes in a port.WitnessAttestation with profile
 //     "4.C-opentimestamps".
 //
@@ -50,10 +50,16 @@ import (
 // from Profile(). Matches the ANS_SPEC.md §4.11 enumeration.
 const ProfileID = "4.C-opentimestamps"
 
-// DefaultCalendarURL is the public OpenTimestamps calendar maintained
-// by the OTS project. Production deployments may swap to their own
-// calendar instance via WithCalendarURL.
-const DefaultCalendarURL = "https://btc.calendar.opentimestamps.org"
+// DefaultCalendarURL is one of the public OpenTimestamps calendars
+// maintained by the OTS project (alice). Bob (bob.btc.calendar.opentimestamps.org)
+// and finney (finney.calendar.eternitywall.com) are alternates a
+// production deployment may rotate to via WithCalendarURL. The OTS
+// reference client aggregates across all three; a future amendment
+// may admit a multi-calendar variant. The default targets one
+// because a single calendar is enough for a TL deployment whose own
+// state is already replicated, and multi-calendar dispatch belongs
+// in a wrapper rather than in the base adapter.
+const DefaultCalendarURL = "https://alice.btc.calendar.opentimestamps.org"
 
 // Witness implements port.Witness against an OTS calendar.
 type Witness struct {
