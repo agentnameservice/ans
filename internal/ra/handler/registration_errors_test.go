@@ -99,27 +99,20 @@ func TestRegister_AgentCardContent_OmittedNoHash(t *testing.T) {
 	}
 }
 
-// TestRegister_AgentCardContent_MalformedJSON_RejectedAt422 asserts
-// the validation path: the entire registration request is malformed
-// JSON if the agentCardContent value itself is malformed (the body
-// won't even decode), so 422 is the expected response. Submitting a
-// JSON value that decodes but then fails JCS canonicalization (e.g.,
-// an array — JCS only accepts objects in this context) routes through
-// the service-layer validator, which returns
-// INVALID_AGENT_CARD_CONTENT. We only test the latter here; the former
-// is already covered by TestRegister_BadJSONReturns422.
+// TestRegister_AgentCardContent_MalformedJSON_RejectedAt422 pins the
+// outer-body contract: when an operator embeds raw bytes the JSON
+// decoder cannot parse inside agentCardContent, the failure mode is
+// BAD_JSON at the handler, not INVALID_AGENT_CARD_CONTENT at the
+// service. The malformed bytes break the outer body decode before
+// the service runs.
+//
+// The service-layer INVALID_AGENT_CARD_CONTENT path is exercised by
+// TestRegister_AgentCardContent_NotAnObject_RejectedAt422 below,
+// which submits JSON that decodes successfully at the outer layer
+// (a JSON array) but the service rejects because agentCardContent
+// must be a JSON object per ANS_SPEC §A.1.
 func TestRegister_AgentCardContent_MalformedJSON_RejectedAt422(t *testing.T) {
 	t.Parallel()
-	// JCS canonicalization fails on inputs that aren't valid JSON.
-	// Embedding a literal "garbage" string in agentCardContent would
-	// be valid JSON (just a string), and JCS accepts strings. To
-	// trigger the service-layer validation error path, we send an
-	// agentCardContent that is itself raw bytes the JSON decoder
-	// won't accept — but those bytes break the outer body decode
-	// before reaching the service. So the production failure mode
-	// for malformed agentCardContent is BAD_JSON at the handler.
-	// This test pins that contract: handler rejects, service is
-	// never reached.
 	fx := newHandlerFixture(t)
 	bad := []byte(`{
         "agentDisplayName": "X",
@@ -130,6 +123,45 @@ func TestRegister_AgentCardContent_MalformedJSON_RejectedAt422(t *testing.T) {
 		bytes.NewReader(bad), fx.asOwner("alice"))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status: got %d want 422; body=%s", rec.Code, rec.Body)
+	}
+	var prob struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &prob)
+	if prob.Code != "BAD_JSON" {
+		t.Errorf("code: got %q want BAD_JSON (service is not reached)", prob.Code)
+	}
+}
+
+// TestRegister_AgentCardContent_NotAnObject_RejectedAt422 exercises
+// the service-layer INVALID_AGENT_CARD_CONTENT path. Submitting a
+// JSON array as agentCardContent decodes cleanly at the outer layer
+// (the body is valid JSON), so the request reaches the service. The
+// service rejects with INVALID_AGENT_CARD_CONTENT because the
+// agentCardContent shape MUST be a JSON object per ANS_SPEC §A.1.
+func TestRegister_AgentCardContent_NotAnObject_RejectedAt422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "X",
+		"version":          "1.0.0",
+		"agentHost":        "x.example.com",
+		"endpoints":        []map[string]any{{"agentUrl": "https://x.example.com", "protocol": "MCP", "transports": []string{"SSE"}}},
+		"identityCsrPEM":   newTestCSR(t, "ans://v1.0.0.x.example.com"),
+		"serverCsrPEM":     newTestServerCSR(t, "x.example.com"),
+		"agentCardContent": []string{"not", "an", "object"},
+	})
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("status: got %d want 422; body=%s", rec.Code, rec.Body)
+	}
+	var prob struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &prob)
+	if prob.Code != "INVALID_AGENT_CARD_CONTENT" {
+		t.Errorf("code: got %q want INVALID_AGENT_CARD_CONTENT", prob.Code)
 	}
 }
 

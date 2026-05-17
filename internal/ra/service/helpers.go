@@ -3,6 +3,7 @@ package service
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -40,6 +41,27 @@ func hashAgentCardContent(content []byte) (string, error) {
 func applyAgentCardContentHash(reg *domain.AgentRegistration, content []byte) error {
 	if len(content) == 0 {
 		return nil
+	}
+	// The OpenAPI declares agentCardContent as type=object with
+	// additionalProperties=true. JCS canonicalization itself accepts
+	// any valid JSON value (array, string, number, boolean, null), so
+	// without an explicit shape check the operator could submit a JSON
+	// array, get a capabilitiesHash sealed for it, and produce a hash
+	// the AIM cannot reproduce when it later fetches the live Trust
+	// Card and finds an object there. Reject anything that isn't a
+	// JSON object before hashing.
+	var probe any
+	if err := json.Unmarshal(content, &probe); err != nil {
+		return domain.NewValidationError(
+			"INVALID_AGENT_CARD_CONTENT",
+			fmt.Sprintf("agentCardContent could not be parsed as JSON: %v", err),
+		)
+	}
+	if _, ok := probe.(map[string]any); !ok {
+		return domain.NewValidationError(
+			"INVALID_AGENT_CARD_CONTENT",
+			fmt.Sprintf("agentCardContent must be a JSON object, got %T", probe),
+		)
 	}
 	hashHex, err := hashAgentCardContent(content)
 	if err != nil {
