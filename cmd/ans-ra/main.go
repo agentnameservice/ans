@@ -215,6 +215,14 @@ func run(cfgPath string) error {
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/identity", lifeH.SubmitIdentityCSR)
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/server", lifeH.SubmitServerCSR)
 
+	// EquivalenceLink (PR #20 schema; this PR's handler). Cross-anchor
+	// binding event: the caller must own both the primary {agentId}
+	// and the linked agentId in the body. The writeOwnership
+	// middleware confirms ownership of the primary; the handler
+	// re-checks ownership of the linked agent inside the service.
+	linkH := handler.NewEquivalenceLinkHandler(regSvc)
+	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/equivalence-links", linkH.CreateLink)
+
 	// Server certificate renewal routes.
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.GetServerCertRenewal)
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.SubmitServerCertRenewal)
