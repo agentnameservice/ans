@@ -13,10 +13,13 @@ type RecordVerification struct {
 	Actual string // What was actually returned by DNS (empty if not found).
 	Error  string // Lookup error, if any.
 	// DNSSECVerified is true when the response carried an
-	// authenticated-data (AD) bit from a validating resolver. Only
-	// meaningful for TLSA records — surfacing this to the TL lets a
-	// downstream verifier trust the cert-binding assertion without
-	// re-querying DNS themselves.
+	// authenticated-data (AD) bit from a validating resolver. Set
+	// on TLSA, SVCB, and HTTPS responses; surfaced to the TL
+	// attestation so a downstream verifier can trust the cert /
+	// capability / service binding without re-querying DNS. The
+	// service layer enforces a hard-fail rule when AD=true and the
+	// record's value disagrees with the expected one (the threat
+	// shape: an attacker rewrote a record in a DNSSEC-signed zone).
 	DNSSECVerified bool
 }
 

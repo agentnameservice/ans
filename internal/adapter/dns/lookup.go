@@ -213,6 +213,13 @@ func (v *LookupVerifier) verifyTLSA(ctx context.Context, server string, rec doma
 // verifyHTTPS checks for an HTTPS-type record (RFC 9460). Matching
 // compares the SvcPriority + TargetName + params text verbatim
 // against the expected value after whitespace normalization.
+//
+// Captures the DNSSEC AuthenticatedData bit on the response, mirroring
+// verifyTLSA and verifySVCB. The service-layer post-verify rule
+// (lifecycle.go verifyDNSRecords) treats a DNSSEC-authenticated HTTPS
+// record whose value disagrees with the expected one as a hard fail
+// — same threat shape as TLSA: an attacker rewrote a record in a
+// signed zone.
 func (v *LookupVerifier) verifyHTTPS(ctx context.Context, server string, rec domain.ExpectedDNSRecord) port.RecordVerification {
 	r := port.RecordVerification{Record: rec}
 	resp, err := v.exchange(ctx, server, rec.Name, dns.TypeHTTPS)
@@ -224,6 +231,7 @@ func (v *LookupVerifier) verifyHTTPS(ctx context.Context, server string, rec dom
 		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
 		return r
 	}
+	r.DNSSECVerified = resp.AuthenticatedData
 	wantNorm := normalizeHTTPS(rec.Value)
 	for _, rr := range resp.Answer {
 		https, ok := rr.(*dns.HTTPS)

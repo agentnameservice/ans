@@ -601,18 +601,29 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 	}
 	var out []DNSMismatch
 	for _, r := range res.Results {
-		// DNSSEC-authenticated TLSA that doesn't match is a hard
-		// fail regardless of the Required flag. `r.Found` from the
-		// TLSA verifier is true only when the actual matched the
-		// expected value after case-insensitive hex normalization,
-		// so `DNSSECVerified && !Found` captures "response was
-		// signed, but its content disagreed with the cert we
-		// issued" — the exact attack we block.
-		if r.Record.Type == domain.DNSRecordTLSA && r.DNSSECVerified && !r.Found {
-			out = append(out, DNSMismatch{
-				Expected: r.Record, Found: r.Actual, Code: "TLSA_DNSSEC_MISMATCH",
-			})
-			continue
+		// DNSSEC-authenticated record whose committed value disagrees
+		// with the expected one is a hard fail regardless of the
+		// Required flag. `r.Found` is true only when the actual
+		// matched after type-specific normalization, so
+		// `DNSSECVerified && !Found` captures "response was signed,
+		// but its content disagreed with what we issued" — the exact
+		// attack we block (an attacker rewrote a record in a signed
+		// zone). Applies to TLSA (cert binding), SVCB (capability
+		// locator with card-sha256), and HTTPS (service binding).
+		if r.DNSSECVerified && !r.Found {
+			switch r.Record.Type {
+			case domain.DNSRecordTLSA, domain.DNSRecordSVCB, domain.DNSRecordHTTPS:
+				out = append(out, DNSMismatch{
+					Expected: r.Record, Found: r.Actual,
+					Code: string(r.Record.Type) + "_DNSSEC_MISMATCH",
+				})
+				continue
+			case domain.DNSRecordTXT:
+				// TXT records (discovery, badge) carry no
+				// cryptographic commitment, so a DNSSEC-validated
+				// mismatch isn't a hard fail — fall through to the
+				// Required check below.
+			}
 		}
 		if !r.Record.Required {
 			continue
@@ -651,8 +662,8 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 	//
 	// DNSSECVerified carries forward from the per-record verification
 	// result (set true by the lookup verifier when a validating
-	// resolver marked the response with the AD bit). Only ever true
-	// for TLSA today — TXT and HTTPS records don't carry the flag.
+	// resolver marked the response with the AD bit). True on TLSA,
+	// SVCB, and HTTPS records; TXT records don't carry the flag.
 	dnssecByKey := make(map[string]bool, len(perRecord))
 	for _, r := range perRecord {
 		if r.DNSSECVerified {

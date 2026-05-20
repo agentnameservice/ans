@@ -6,6 +6,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/godaddy/ans/internal/domain"
@@ -14,23 +15,30 @@ import (
 // applyDNSRecordStyle resolves the DNS-record-style for the new
 // registration and stores it on the aggregate.
 //
-// V1 lane is pinned to "legacy" regardless of the request: V1 callers
+// V1 lane is pinned to LEGACY regardless of the request: V1 callers
 // predate the Consolidated Approach and their tooling expects the
 // original `_ans` TXT shape. V1 has no dnsRecordStyle field on the
 // wire, so this branch is the only path V1 registrations take.
 // V2 callers honor req.DNSRecordStyle: empty normalizes to
-// DefaultDNSRecordStyle (consolidated); invalid values surface as
+// DefaultDNSRecordStyle (CONSOLIDATED); invalid values surface as
 // INVALID_DNS_RECORD_STYLE.
+//
+// V1 detection routes through isV1Lane (lifecycle.go) so a future
+// schema-version evolution updates one site, not several. The error
+// message lists valid values from domain.DNSRecordStyles() so adding
+// a fourth style is a one-place change.
 func applyDNSRecordStyle(reg *domain.AgentRegistration, req RegisterRequest) error {
 	switch {
-	case req.SchemaVersion == "V1":
+	case isV1Lane(req.SchemaVersion):
 		reg.DNSRecordStyle = domain.DNSRecordStyleLegacy
 	case req.DNSRecordStyle == "":
 		reg.DNSRecordStyle = domain.DefaultDNSRecordStyle
 	case !req.DNSRecordStyle.IsValid():
 		return domain.NewValidationError(
 			"INVALID_DNS_RECORD_STYLE",
-			fmt.Sprintf("dnsRecordStyle %q is not one of consolidated, legacy, both", string(req.DNSRecordStyle)),
+			fmt.Sprintf("dnsRecordStyle %q is not one of %s",
+				string(req.DNSRecordStyle),
+				strings.Join(domain.DNSRecordStyles(), ", ")),
 		)
 	default:
 		reg.DNSRecordStyle = req.DNSRecordStyle

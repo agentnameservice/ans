@@ -1067,26 +1067,25 @@ components:
           type: string
         dnsRecordStyle:
           type: string
-          enum: [consolidated, legacy, both]
+          enum: [CONSOLIDATED, LEGACY, BOTH]
           description: |
-            Selects which DNS record family the RA emits for this
-            registration. Surfaces on the 202 register response's
-            dnsRecords[], on GET /v2/ans/agents/{agentId}, and on the
+            Selects which DNS record family the RA emits in the 202
+            register response's dnsRecords[] and in the
             AGENT_REGISTERED TL event's
-            attestations.dnsRecordsProvisioned[].
+            attestations.dnsRecordsProvisioned[]. Not echoed on
+            GET /v2/ans/agents/{agentId}.
 
-              consolidated (default, recommended): Consolidated
-                Approach SVCB rows at the bare FQDN per ANS_SPEC.md
-                §4.4.2, plus shared `_ans-`-prefixed records and TLSA.
-              legacy: original `_ans` TXT shape, supported
-                indefinitely for operators on existing zone-edit
-                tooling that targets `_ans.{fqdn}`.
-              both: union; the §4.4.2 transition shape.
+            - CONSOLIDATED (default, recommended): Consolidated
+              Approach SVCB rows at the bare FQDN per RFC 9460,
+              plus shared `_ans-`-prefixed records and TLSA.
+            - LEGACY: original `_ans` TXT shape, supported
+              indefinitely for operators with existing zone-edit
+              tooling that targets `_ans.{fqdn}`.
+            - BOTH: union of CONSOLIDATED + LEGACY for the
+              transition window.
 
-            Empty/missing → consolidated. Default points new
-            integrations at the lean shape per §4.4.2 SHOULD.
-          default: "consolidated"
-          example: "consolidated"
+            Empty/missing normalizes to CONSOLIDATED server-side.
+          example: "CONSOLIDATED"
       required:
         - agentDisplayName
         - version
@@ -1305,7 +1304,7 @@ components:
           type: string
         type:
           type: string
-          enum: [HTTPS, TLSA, TXT]
+          enum: [HTTPS, SVCB, TLSA, TXT]
         value:
           type: string
         priority:

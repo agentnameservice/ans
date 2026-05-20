@@ -4,24 +4,30 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"net/url"
+	"strconv"
 )
 
 // DNSRecordStyle selects which DNS record family the RA emits in its
 // dnsRecordsProvisioned attestation and in the records it tells the
 // operator to publish at registration time.
 //
-// Default is "consolidated": one SVCB record per protocol at the
+// Default is CONSOLIDATED: one SVCB record per protocol at the
 // agent's bare FQDN per the cross-draft Consolidated Approach (§4.4.2).
 // Operators on infrastructure that already publishes the legacy
-// `_ans` TXT family pick "legacy". Migration operators pick "both"
-// for a defined window, then flip back to "consolidated".
+// `_ans` TXT family pick LEGACY. Migration operators pick BOTH
+// for a defined window, then flip back to CONSOLIDATED.
 //
-// Legacy MUST stay supported indefinitely. Operators picking "legacy"
+// LEGACY MUST stay supported indefinitely. Operators picking LEGACY
 // will continue to receive the original `_ans` TXT shape this RA has
 // emitted since v0.1.x. The cross-channel hash consistency check
-// (§4.4.2) only applies when the SVCB record is present, so "legacy"
+// (§4.4.2) only applies when the SVCB record is present, so LEGACY
 // agents do not benefit from the card-sha256 ↔ capabilities_hash
 // guarantee — that is a property of the chosen style, not a defect.
+//
+// Wire values are CONSTANT_CASE, matching every other enum on the V2
+// register schema (Protocol, RevocationReason, AgentLifecycleStatus,
+// NextStep.action, ChallengeInfo.type, DnsRecord.type, etc.).
 type DNSRecordStyle string
 
 const (
@@ -29,21 +35,21 @@ const (
 	// records (one per protocol, bare-FQDN owner) plus the
 	// `_ans-prefixed` records that no SvcParam covers (badge,
 	// identity DANE) plus the server-cert TLSA. The default.
-	DNSRecordStyleConsolidated DNSRecordStyle = "consolidated"
+	DNSRecordStyleConsolidated DNSRecordStyle = "CONSOLIDATED"
 
 	// DNSRecordStyleLegacy emits the original `_ans` TXT family
 	// (one per protocol) plus the same `_ans-`-prefixed records
 	// plus the server-cert TLSA. No SVCB rows.
-	DNSRecordStyleLegacy DNSRecordStyle = "legacy"
+	DNSRecordStyleLegacy DNSRecordStyle = "LEGACY"
 
 	// DNSRecordStyleBoth emits the union of Consolidated Approach
 	// SVCB and legacy `_ans` TXT — the transition shape per §4.4.2
 	// where the two record families coexist on the same agent's zone.
-	DNSRecordStyleBoth DNSRecordStyle = "both"
+	DNSRecordStyleBoth DNSRecordStyle = "BOTH"
 )
 
 // DefaultDNSRecordStyle is the style applied when the registration
-// request omits dnsRecordStyle entirely. Pinned to "consolidated" so
+// request omits dnsRecordStyle entirely. Pinned to CONSOLIDATED so
 // new integrations follow §4.4.2's "publish one SVCB record... rather
 // than parallel per-ecosystem record trees" SHOULD by default.
 const DefaultDNSRecordStyle = DNSRecordStyleConsolidated
@@ -57,6 +63,18 @@ func (s DNSRecordStyle) IsValid() bool {
 		return true
 	}
 	return false
+}
+
+// DNSRecordStyles returns the canonical valid set as strings — the
+// single source of truth for enum membership. Used by error messages
+// and (eventually) by spec generation tooling so adding a fourth
+// style is a one-place change rather than a shotgun edit.
+func DNSRecordStyles() []string {
+	return []string{
+		string(DNSRecordStyleConsolidated),
+		string(DNSRecordStyleLegacy),
+		string(DNSRecordStyleBoth),
+	}
 }
 
 // DNSRecordType represents a DNS record type.
@@ -201,6 +219,7 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 		for _, ep := range reg.Endpoints {
 			alpn := protocolToANSValue(ep.Protocol)
 			wk := wkPathFor(ep.Protocol)
+			port := svcbPortFor(ep.AgentURL)
 			// RFC 9460 §2.1 presentation form: unquoted SvcParamValue when
 			// the value has no characters special to the presentation
 			// format. alpn tokens (a2a, mcp), port digits, well-known path
@@ -208,7 +227,7 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 			// The resolver-side formatter (formatHTTPSValue) also emits
 			// unquoted, so the verifier's normalize+compare matches without
 			// quote-stripping.
-			value := fmt.Sprintf(`1 . alpn=%s port=443`, alpn)
+			value := fmt.Sprintf(`1 . alpn=%s port=%d`, alpn, port)
 			if wk != "" {
 				value += fmt.Sprintf(` wk=%s`, wk)
 			}
@@ -306,6 +325,34 @@ func wkPathFor(p Protocol) string {
 	default:
 		return ""
 	}
+}
+
+// svcbPortFor returns the TCP port to advertise in the SVCB SvcParam
+// `port=`. Reads it from the endpoint URL's authority. Falls back to
+// 443 (https) / 80 (http) when the URL omits a port. Empty input or
+// unparseable URL returns 443 — the §4.4.2 default for agent endpoints.
+//
+// Without this, every endpoint emitted a hardcoded port=443 SvcParam,
+// silently breaking verify-dns for agents on non-443 endpoints
+// (operators would publish their actual port; the RA's expected
+// record would say 443; the records would mismatch).
+func svcbPortFor(agentURL string) int {
+	if agentURL == "" {
+		return 443
+	}
+	u, err := url.Parse(agentURL)
+	if err != nil {
+		return 443
+	}
+	if p := u.Port(); p != "" {
+		if n, err := strconv.Atoi(p); err == nil {
+			return n
+		}
+	}
+	if u.Scheme == "http" {
+		return 80
+	}
+	return 443
 }
 
 // capabilitiesHashBase64URL re-encodes a hex-lowercase SHA-256 digest

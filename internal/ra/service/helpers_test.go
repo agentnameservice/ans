@@ -14,6 +14,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -201,3 +202,108 @@ func selfSignedCertPEM(t *testing.T) string {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
+
+// ----- applyDNSRecordStyle -----
+
+// TestApplyDNSRecordStyle covers the V1-pin / V2-default / V2-validate
+// branches, including the INVALID_DNS_RECORD_STYLE error path. The
+// integration tests follow happy paths through RegisterAgent and don't
+// reach the invalid-value branch directly.
+func TestApplyDNSRecordStyle(t *testing.T) {
+	tests := []struct {
+		name        string
+		req         RegisterRequest
+		wantStyle   domain.DNSRecordStyle
+		wantErrCode string
+	}{
+		{
+			name: "v1_pins_to_legacy_ignoring_request_field",
+			req: RegisterRequest{
+				SchemaVersion:  "V1",
+				DNSRecordStyle: domain.DNSRecordStyleConsolidated,
+			},
+			wantStyle: domain.DNSRecordStyleLegacy,
+		},
+		{
+			name:      "v2_empty_normalizes_to_default",
+			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: ""},
+			wantStyle: domain.DefaultDNSRecordStyle,
+		},
+		{
+			name:      "unset_schema_treated_as_v2_default",
+			req:       RegisterRequest{SchemaVersion: "", DNSRecordStyle: ""},
+			wantStyle: domain.DefaultDNSRecordStyle,
+		},
+		{
+			name:      "v2_valid_consolidated",
+			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyleConsolidated},
+			wantStyle: domain.DNSRecordStyleConsolidated,
+		},
+		{
+			name:      "v2_valid_legacy",
+			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyleLegacy},
+			wantStyle: domain.DNSRecordStyleLegacy,
+		},
+		{
+			name:      "v2_valid_both",
+			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyleBoth},
+			wantStyle: domain.DNSRecordStyleBoth,
+		},
+		{
+			name:        "v2_invalid_value_rejected",
+			req:         RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyle("garbage")},
+			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+		},
+		{
+			// CONSTANT_CASE is the wire form. lowercase is rejected so the
+			// V2 enum stays consistent with every other enum on the spec.
+			name:        "v2_lowercase_legacy_rejected_as_invalid",
+			req:         RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyle("legacy")},
+			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := &domain.AgentRegistration{}
+			err := applyDNSRecordStyle(reg, tc.req)
+			if tc.wantErrCode != "" {
+				if err == nil {
+					t.Fatalf("want error code %q, got nil", tc.wantErrCode)
+				}
+				var verr *domain.Error
+				if !errors.As(err, &verr) {
+					t.Fatalf("want *domain.Error, got %T: %v", err, err)
+				}
+				if verr.Code != tc.wantErrCode {
+					t.Errorf("code: got %q want %q", verr.Code, tc.wantErrCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if reg.DNSRecordStyle != tc.wantStyle {
+				t.Errorf("DNSRecordStyle: got %q want %q", reg.DNSRecordStyle, tc.wantStyle)
+			}
+		})
+	}
+}
+
+// TestApplyDNSRecordStyle_ErrorMessageListsValidValues confirms the
+// error detail enumerates the canonical valid set so SDK authors get
+// an actionable message. Sourced from domain.DNSRecordStyles().
+func TestApplyDNSRecordStyle_ErrorMessageListsValidValues(t *testing.T) {
+	reg := &domain.AgentRegistration{}
+	err := applyDNSRecordStyle(reg, RegisterRequest{
+		SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyle("garbage"),
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range domain.DNSRecordStyles() {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message must list %q; got %q", want, err.Error())
+		}
+	}
+}
+

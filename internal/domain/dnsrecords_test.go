@@ -82,138 +82,172 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 	assert.Equal(t, 0, tlsaCount, "no cert → no TLSA record")
 }
 
-// TestComputeRequiredDNSRecords_LegacyOnlyEmitsHTTPSRR pins the legacy
-// shape: HTTPS RR is generated alongside the `_ans` TXT family, NOT
-// alongside the consolidated SVCB rows (which would duplicate the
-// alpn/port SvcParams). §A.8.1 lists the HTTPS RR as RA-generated
-// content the AHP provisions when the apex isn't aliased via CNAME.
-func TestComputeRequiredDNSRecords_LegacyOnlyEmitsHTTPSRR(t *testing.T) {
-	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
-	reg := &AgentRegistration{
-		AnsName:        ansName,
-		DNSRecordStyle: DNSRecordStyleLegacy,
-		Endpoints: []AgentEndpoint{
-			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
+// TestComputeRequiredDNSRecords_StyleMatrix exercises every per-style
+// emission rule in one table. Each row pins the per-record-type shape
+// the operator is asked to publish given a (style, protocol,
+// capabilitiesHash, agentURL) tuple. The matrix covers:
+//
+//   - LEGACY emits _ans TXT + HTTPS RR; no SVCB.
+//   - CONSOLIDATED emits SVCB only (no HTTPS RR — duplicate signalling).
+//   - BOTH emits the union.
+//   - SVCB SvcParam composition: wk= (per-protocol), port= (from URL),
+//     card-sha256= (only when CapabilitiesHash is set).
+//   - svcbPortFor: explicit non-443 port flows through, default https
+//     URLs fall back to 443.
+//   - Invalid style coerces to default (CONSOLIDATED).
+func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
+	const cardHex = "098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
+	const wantCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
+
+	tests := []struct {
+		name             string
+		style            DNSRecordStyle
+		protocol         Protocol
+		agentURL         string
+		capabilitiesHash string
+		wantHTTPS        bool
+		wantSVCB         bool
+		wantLegacyTXT    bool
+		wantSVCBPort     string // substring expected in SVCB value (e.g. "port=443")
+		wantSVCBWk       string // "" means SVCB MUST NOT contain "wk="
+		wantSVCBCard     string // "" means SVCB MUST NOT contain "card-sha256"
+	}{
+		{
+			name:          "legacy-emits-https-rr-no-svcb",
+			style:         DNSRecordStyleLegacy,
+			protocol:      ProtocolA2A,
+			agentURL:      "https://agent.example.com",
+			wantHTTPS:     true,
+			wantLegacyTXT: true,
+		},
+		{
+			name:         "consolidated-omits-https-rr",
+			style:        DNSRecordStyleConsolidated,
+			protocol:     ProtocolA2A,
+			agentURL:     "https://agent.example.com",
+			wantSVCB:     true,
+			wantSVCBPort: "port=443",
+			wantSVCBWk:   "wk=agent-card.json",
+		},
+		{
+			name:          "both-emits-union",
+			style:         DNSRecordStyleBoth,
+			protocol:      ProtocolA2A,
+			agentURL:      "https://agent.example.com",
+			wantHTTPS:     true,
+			wantLegacyTXT: true,
+			wantSVCB:      true,
+			wantSVCBPort:  "port=443",
+			wantSVCBWk:    "wk=agent-card.json",
+		},
+		{
+			name:         "svcb-mcp-wk-mcp-json",
+			style:        DNSRecordStyleConsolidated,
+			protocol:     ProtocolMCP,
+			agentURL:     "https://agent.example.com/mcp",
+			wantSVCB:     true,
+			wantSVCBPort: "port=443",
+			wantSVCBWk:   "wk=mcp.json",
+		},
+		{
+			name:         "svcb-http-api-omits-wk",
+			style:        DNSRecordStyleConsolidated,
+			protocol:     ProtocolHTTPAPI,
+			agentURL:     "https://agent.example.com",
+			wantSVCB:     true,
+			wantSVCBPort: "port=443",
+			// HTTP-API has no per-protocol metadata file convention.
+		},
+		{
+			name:             "svcb-card-sha256-present-when-set",
+			style:            DNSRecordStyleConsolidated,
+			protocol:         ProtocolA2A,
+			agentURL:         "https://agent.example.com",
+			capabilitiesHash: cardHex,
+			wantSVCB:         true,
+			wantSVCBPort:     "port=443",
+			wantSVCBWk:       "wk=agent-card.json",
+			wantSVCBCard:     "card-sha256=" + wantCardBase64,
+		},
+		{
+			name:         "svcb-non-443-port-from-url",
+			style:        DNSRecordStyleConsolidated,
+			protocol:     ProtocolA2A,
+			agentURL:     "https://agent.example.com:8443",
+			wantSVCB:     true,
+			wantSVCBPort: "port=8443",
+			wantSVCBWk:   "wk=agent-card.json",
+		},
+		{
+			name:         "svcb-http-scheme-defaults-port-80",
+			style:        DNSRecordStyleConsolidated,
+			protocol:     ProtocolA2A,
+			agentURL:     "http://agent.example.com",
+			wantSVCB:     true,
+			wantSVCBPort: "port=80",
+			wantSVCBWk:   "wk=agent-card.json",
+		},
+		{
+			name:         "invalid-style-coerces-to-consolidated",
+			style:        DNSRecordStyle("garbage"),
+			protocol:     ProtocolA2A,
+			agentURL:     "https://agent.example.com",
+			wantSVCB:     true,
+			wantSVCBPort: "port=443",
+			wantSVCBWk:   "wk=agent-card.json",
 		},
 	}
-	records := ComputeRequiredDNSRecords(reg)
 
-	var sawHTTPS, sawSVCB bool
-	for _, r := range records {
-		switch r.Type {
-		case DNSRecordHTTPS:
-			sawHTTPS = true
-		case DNSRecordSVCB:
-			sawSVCB = true
-		}
-	}
-	assert.True(t, sawHTTPS, "legacy style must include an HTTPS RR")
-	assert.False(t, sawSVCB, "legacy style must NOT include SVCB rows")
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+			reg := &AgentRegistration{
+				AnsName:          ansName,
+				DNSRecordStyle:   tc.style,
+				CapabilitiesHash: tc.capabilitiesHash,
+				Endpoints: []AgentEndpoint{
+					{Protocol: tc.protocol, AgentURL: tc.agentURL},
+				},
+			}
+			records := ComputeRequiredDNSRecords(reg)
 
-// TestComputeRequiredDNSRecords_ConsolidatedOmitsHTTPSRR pins the
-// consolidated form's lean shape: HTTPS RR is omitted because the
-// SVCB rows already carry equivalent SvcParams (alpn, port, ECH).
-// Publishing both would duplicate content and risk drift between
-// the two records. §A.8.2 calls this out explicitly.
-func TestComputeRequiredDNSRecords_ConsolidatedOmitsHTTPSRR(t *testing.T) {
-	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
-	reg := &AgentRegistration{
-		AnsName:        ansName,
-		DNSRecordStyle: DNSRecordStyleConsolidated,
-		Endpoints: []AgentEndpoint{
-			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
-		},
-	}
-	records := ComputeRequiredDNSRecords(reg)
-	for _, r := range records {
-		assert.NotEqual(t, DNSRecordHTTPS, r.Type,
-			"consolidated style omits HTTPS RR (SVCB SvcParams subsume it)")
-	}
-}
+			var sawHTTPS, sawSVCB, sawLegacyTXT bool
+			var svcbValue string
+			for _, r := range records {
+				switch r.Type {
+				case DNSRecordHTTPS:
+					sawHTTPS = true
+				case DNSRecordSVCB:
+					sawSVCB = true
+					svcbValue = r.Value
+				case DNSRecordTXT:
+					if strings.HasPrefix(r.Name, "_ans.") {
+						sawLegacyTXT = true
+					}
+				}
+			}
 
-// TestComputeRequiredDNSRecords_SVCBWkPath pins the per-protocol `wk=`
-// SvcParam value the Consolidated Approach SVCB carries. A2A maps to
-// `agent-card.json` (IANA-registered); MCP maps to `mcp.json` (de-facto
-// convention). Suffix-only — the consolidated draft's primary examples
-// use the suffix and clients prepend `/.well-known/`.
-func TestComputeRequiredDNSRecords_SVCBWkPath(t *testing.T) {
-	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
-	reg := &AgentRegistration{
-		AnsName: ansName,
-		Endpoints: []AgentEndpoint{
-			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
-			{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
-		},
-	}
-	records := ComputeRequiredDNSRecords(reg)
+			assert.Equal(t, tc.wantHTTPS, sawHTTPS, "HTTPS RR presence")
+			assert.Equal(t, tc.wantSVCB, sawSVCB, "SVCB row presence")
+			assert.Equal(t, tc.wantLegacyTXT, sawLegacyTXT, "_ans TXT presence")
 
-	for _, r := range records {
-		if r.Type != DNSRecordSVCB {
-			continue
-		}
-		switch {
-		case strings.Contains(r.Value, `alpn=a2a`):
-			assert.Contains(t, r.Value, `wk=agent-card.json`)
-		case strings.Contains(r.Value, `alpn=mcp`):
-			assert.Contains(t, r.Value, `wk=mcp.json`)
-		default:
-			t.Errorf("SVCB row missing recognized alpn: %q", r.Value)
-		}
-	}
-}
-
-// TestComputeRequiredDNSRecords_SVCBCardSHA256_PresentWhenSet verifies
-// that an agent registered with agentCardContent emits SVCB rows whose
-// card-sha256 SvcParam is the base64url form of reg.CapabilitiesHash.
-// This is the DNS half of §4.4.2's three-way cross-check (the live
-// Trust Card body, the TL-sealed capabilities_hash, and the SVCB
-// card-sha256 all commit to the same SHA-256).
-func TestComputeRequiredDNSRecords_SVCBCardSHA256_PresentWhenSet(t *testing.T) {
-	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
-	// Fixture digest used across the cross-check — the same hex appears
-	// in the TL event's attestations.metadataHashes.capabilitiesHash.
-	hexDigest := "098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
-	wantBase64 := "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
-	reg := &AgentRegistration{
-		AnsName:          ansName,
-		CapabilitiesHash: hexDigest,
-		Endpoints: []AgentEndpoint{
-			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
-		},
-	}
-	records := ComputeRequiredDNSRecords(reg)
-
-	var sawSVCB bool
-	for _, r := range records {
-		if r.Type != DNSRecordSVCB {
-			continue
-		}
-		sawSVCB = true
-		assert.Contains(t, r.Value, `card-sha256=`+wantBase64,
-			"SVCB card-sha256 must be base64url(decoded hex of reg.CapabilitiesHash)")
-	}
-	assert.True(t, sawSVCB, "expected at least one SVCB row")
-}
-
-// TestComputeRequiredDNSRecords_SVCBCardSHA256_AbsentWhenUnset verifies
-// the spec-conformant "no agentCardContent submitted" path: the SVCB
-// row omits the card-sha256 SvcParam entirely. A verifier seeing no
-// SvcParam falls back to TOFU on first Trust Card fetch (§4.4.2).
-func TestComputeRequiredDNSRecords_SVCBCardSHA256_AbsentWhenUnset(t *testing.T) {
-	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
-	reg := &AgentRegistration{
-		AnsName: ansName,
-		Endpoints: []AgentEndpoint{
-			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com"},
-		},
-	}
-	records := ComputeRequiredDNSRecords(reg)
-	for _, r := range records {
-		if r.Type == DNSRecordSVCB {
-			assert.NotContains(t, r.Value, "card-sha256",
-				"no agentCardContent → SVCB has no card-sha256 SvcParam")
-		}
+			if tc.wantSVCB {
+				assert.Contains(t, svcbValue, tc.wantSVCBPort,
+					"SVCB port SvcParam mismatch")
+				if tc.wantSVCBWk != "" {
+					assert.Contains(t, svcbValue, tc.wantSVCBWk, "SVCB wk SvcParam mismatch")
+				} else {
+					assert.NotContains(t, svcbValue, "wk=",
+						"SVCB MUST NOT carry wk= when protocol has no metadata convention")
+				}
+				if tc.wantSVCBCard != "" {
+					assert.Contains(t, svcbValue, tc.wantSVCBCard, "SVCB card-sha256 SvcParam mismatch")
+				} else {
+					assert.NotContains(t, svcbValue, "card-sha256",
+						"SVCB MUST NOT carry card-sha256 when CapabilitiesHash is empty")
+				}
+			}
+		})
 	}
 }
 
@@ -255,11 +289,54 @@ func TestCapabilitiesHashBase64URL(t *testing.T) {
 
 // TestWkPathFor pins the per-protocol well-known suffix mapping.
 func TestWkPathFor(t *testing.T) {
-	assert.Equal(t, "agent-card.json", wkPathFor(ProtocolA2A))
-	assert.Equal(t, "mcp.json", wkPathFor(ProtocolMCP))
-	assert.Equal(t, "", wkPathFor(ProtocolHTTPAPI),
-		"HTTP-API has no per-protocol metadata file convention")
-	assert.Equal(t, "", wkPathFor(Protocol("UNKNOWN")))
+	tests := []struct {
+		p    Protocol
+		want string
+	}{
+		{ProtocolA2A, "agent-card.json"},
+		{ProtocolMCP, "mcp.json"},
+		{ProtocolHTTPAPI, ""},
+		{Protocol("UNKNOWN"), ""},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.p), func(t *testing.T) {
+			assert.Equal(t, tc.want, wkPathFor(tc.p))
+		})
+	}
+}
+
+// TestDNSRecordStyles pins the canonical valid set of DNSRecordStyle
+// values returned by the helper used in the V2 INVALID_DNS_RECORD_STYLE
+// error message. Order and contents are stable so an external client's
+// error-message fixtures can match.
+func TestDNSRecordStyles(t *testing.T) {
+	got := DNSRecordStyles()
+	want := []string{"CONSOLIDATED", "LEGACY", "BOTH"}
+	assert.Equal(t, want, got)
+}
+
+// TestSVCBPortFor pins the agentURL → port resolution that drives the
+// SVCB `port=` SvcParam. Covers https-default, http-default, explicit
+// port, malformed URL, and empty input.
+func TestSVCBPortFor(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want int
+	}{
+		{name: "https_default_443", in: "https://agent.example.com", want: 443},
+		{name: "http_default_80", in: "http://agent.example.com", want: 80},
+		{name: "explicit_port_8443", in: "https://agent.example.com:8443", want: 8443},
+		{name: "explicit_port_8080_http", in: "http://agent.example.com:8080", want: 8080},
+		{name: "with_path_keeps_port", in: "https://agent.example.com:9443/a2a", want: 9443},
+		{name: "empty_url_defaults_443", in: "", want: 443},
+		{name: "malformed_url_defaults_443", in: "://not-a-url", want: 443},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, svcbPortFor(tc.in))
+		})
+	}
 }
 
 func TestComputeRequiredDNSRecords_WithCert(t *testing.T) {
