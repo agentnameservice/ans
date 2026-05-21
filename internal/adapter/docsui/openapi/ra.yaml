@@ -1023,6 +1023,23 @@ components:
       type: string
       enum: [A2A, MCP, HTTP-API]
 
+    DNSRecordStyle:
+      type: string
+      enum: [ANS_SVCB, ANS_TXT]
+      description: |
+        Names one DNS record family the RA can emit for an agent
+        registration. Used as the element type of dnsRecordStyles[].
+
+        - ANS_SVCB: Consolidated Approach SVCB rows at the bare FQDN
+          per RFC 9460. One row per protocol carrying alpn, port, and
+          capability-locator SvcParams (wk, card-sha256). The
+          recommended default for new integrations.
+        - ANS_TXT: original `_ans` TXT shape (one row per protocol),
+          supported indefinitely for operators with existing zone-edit
+          tooling that targets `_ans.{fqdn}`. Emits an HTTPS RR at
+          the bare FQDN alongside, since `_ans` TXT carries no
+          connection hints.
+
     RevocationReason:
       type: string
       enum:
@@ -1065,27 +1082,26 @@ components:
           type: string
         identityCsrPEM:
           type: string
-        dnsRecordStyle:
-          type: string
-          enum: [CONSOLIDATED, LEGACY, BOTH]
+        dnsRecordStyles:
+          type: array
+          items:
+            $ref: '#/components/schemas/DNSRecordStyle'
+          uniqueItems: true
+          minItems: 1
           description: |
-            Selects which DNS record family the RA emits in the 202
-            register response's dnsRecords[] and in the
-            AGENT_REGISTERED TL event's
-            attestations.dnsRecordsProvisioned[]. Not echoed on
+            Set of DNS record families the RA emits in the 202 register
+            response's dnsRecords[] and in the AGENT_REGISTERED TL
+            event's attestations.dnsRecordsProvisioned[]. Not echoed on
             GET /v2/ans/agents/{agentId}.
 
-            - CONSOLIDATED (default, recommended): Consolidated
-              Approach SVCB rows at the bare FQDN per RFC 9460,
-              plus shared `_ans-`-prefixed records and TLSA.
-            - LEGACY: original `_ans` TXT shape, supported
-              indefinitely for operators with existing zone-edit
-              tooling that targets `_ans.{fqdn}`.
-            - BOTH: union of CONSOLIDATED + LEGACY for the
-              transition window.
+            Each value names one record family; an operator publishing
+            the union (Consolidated Approach SVCB plus the original
+            `_ans` TXT shape) sends both. Order is not significant
+            and duplicates are rejected (`uniqueItems: true`).
 
-            Empty/missing normalizes to CONSOLIDATED server-side.
-          example: "CONSOLIDATED"
+            Omitted/missing normalizes to ["ANS_SVCB"] server-side
+            (the recommended default per RFC 9460).
+          example: ["ANS_SVCB"]
       required:
         - agentDisplayName
         - version

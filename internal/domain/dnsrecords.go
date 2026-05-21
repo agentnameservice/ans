@@ -8,73 +8,93 @@ import (
 	"strconv"
 )
 
-// DNSRecordStyle selects which DNS record family the RA emits in its
-// dnsRecordsProvisioned attestation and in the records it tells the
-// operator to publish at registration time.
-//
-// Default is CONSOLIDATED: one SVCB record per protocol at the
-// agent's bare FQDN per the cross-draft Consolidated Approach (§4.4.2).
-// Operators on infrastructure that already publishes the legacy
-// `_ans` TXT family pick LEGACY. Migration operators pick BOTH
-// for a defined window, then flip back to CONSOLIDATED.
-//
-// LEGACY MUST stay supported indefinitely. Operators picking LEGACY
-// will continue to receive the original `_ans` TXT shape this RA has
-// emitted since v0.1.x. The cross-channel hash consistency check
-// (§4.4.2) only applies when the SVCB record is present, so LEGACY
-// agents do not benefit from the card-sha256 ↔ capabilities_hash
-// guarantee — that is a property of the chosen style, not a defect.
+// DNSRecordStyle names one DNS record family the RA can emit for an
+// agent registration. A registration carries a *set* of styles
+// (AgentRegistration.DNSRecordStyles); operators publishing the union
+// during a Consolidated Approach transition include both ANS_SVCB and
+// ANS_TXT in the same set.
 //
 // Wire values are CONSTANT_CASE, matching every other enum on the V2
 // register schema (Protocol, RevocationReason, AgentLifecycleStatus,
-// NextStep.action, ChallengeInfo.type, DnsRecord.type, etc.).
+// NextStep.action, ChallengeInfo.type, DnsRecord.type, etc.). The
+// `ANS_` prefix anchors the namespace so a future second agentic spec
+// adding its own SVCB family doesn't collide.
 type DNSRecordStyle string
 
 const (
-	// DNSRecordStyleConsolidated emits Consolidated Approach SVCB
-	// records (one per protocol, bare-FQDN owner) plus the
-	// `_ans-prefixed` records that no SvcParam covers (badge,
-	// identity DANE) plus the server-cert TLSA. The default.
-	DNSRecordStyleConsolidated DNSRecordStyle = "CONSOLIDATED"
+	// DNSRecordStyleSVCB emits Consolidated Approach SVCB records per
+	// RFC 9460 — one row per protocol at the bare FQDN, carrying alpn,
+	// port, wk, and card-sha256 SvcParams.
+	DNSRecordStyleSVCB DNSRecordStyle = "ANS_SVCB"
 
-	// DNSRecordStyleLegacy emits the original `_ans` TXT family
-	// (one per protocol) plus the same `_ans-`-prefixed records
-	// plus the server-cert TLSA. No SVCB rows.
-	DNSRecordStyleLegacy DNSRecordStyle = "LEGACY"
-
-	// DNSRecordStyleBoth emits the union of Consolidated Approach
-	// SVCB and legacy `_ans` TXT — the transition shape per §4.4.2
-	// where the two record families coexist on the same agent's zone.
-	DNSRecordStyleBoth DNSRecordStyle = "BOTH"
+	// DNSRecordStyleTXT emits the original `_ans` TXT shape — one row
+	// per protocol at `_ans.{fqdn}`. Supported indefinitely for
+	// operators with existing zone-edit tooling that targets `_ans.`.
+	// Includes an HTTPS RR at the bare FQDN since `_ans` TXT carries
+	// no connection hints.
+	DNSRecordStyleTXT DNSRecordStyle = "ANS_TXT"
 )
 
-// DefaultDNSRecordStyle is the style applied when the registration
-// request omits dnsRecordStyle entirely. Pinned to CONSOLIDATED so
-// new integrations follow §4.4.2's "publish one SVCB record... rather
-// than parallel per-ecosystem record trees" SHOULD by default.
-const DefaultDNSRecordStyle = DNSRecordStyleConsolidated
+// DefaultDNSRecordStyles is the set applied when the registration
+// request omits dnsRecordStyles entirely. Pinned to {ANS_SVCB} so new
+// integrations follow §4.4.2's "publish one SVCB record... rather than
+// parallel per-ecosystem record trees" SHOULD by default. Returned as a
+// fresh slice so callers can mutate without affecting the canonical set.
+func DefaultDNSRecordStyles() []DNSRecordStyle {
+	return []DNSRecordStyle{DNSRecordStyleSVCB}
+}
 
-// IsValid reports whether s is one of the three defined styles.
-// Empty string is treated as invalid; callers normalize empty to
-// DefaultDNSRecordStyle before validation.
+// IsValid reports whether s is one of the defined styles. Empty
+// string is treated as invalid; callers normalize empty/missing
+// dnsRecordStyles to DefaultDNSRecordStyles() before validation.
 func (s DNSRecordStyle) IsValid() bool {
 	switch s {
-	case DNSRecordStyleConsolidated, DNSRecordStyleLegacy, DNSRecordStyleBoth:
+	case DNSRecordStyleSVCB, DNSRecordStyleTXT:
 		return true
 	}
 	return false
 }
 
-// DNSRecordStyles returns the canonical valid set as strings — the
-// single source of truth for enum membership. Used by error messages
-// and (eventually) by spec generation tooling so adding a fourth
-// style is a one-place change rather than a shotgun edit.
-func DNSRecordStyles() []string {
+// ValidDNSRecordStyles returns the canonical valid set as strings —
+// the single source of truth for enum membership. Used by error
+// messages and spec generation tooling so adding a third style is a
+// one-place change rather than a shotgun edit.
+func ValidDNSRecordStyles() []string {
 	return []string{
-		string(DNSRecordStyleConsolidated),
-		string(DNSRecordStyleLegacy),
-		string(DNSRecordStyleBoth),
+		string(DNSRecordStyleSVCB),
+		string(DNSRecordStyleTXT),
 	}
+}
+
+// resolveEmissionFlags maps a set of styles onto the two orthogonal
+// "emit this record family?" booleans the record builder uses. An
+// empty/nil set normalizes to DefaultDNSRecordStyles(); invalid
+// values in the set are silently ignored (the service layer rejects
+// them at the boundary, so any value reaching here SHOULD already be
+// valid — defensive ignore keeps the domain layer pure).
+//
+// Returns (emitTXT, emitSVCB) — order matters; the caller destructures
+// positionally to two booleans guarding the legacy and consolidated
+// branches of ComputeRequiredDNSRecords.
+func resolveEmissionFlags(styles []DNSRecordStyle) (bool, bool) {
+	if len(styles) == 0 {
+		styles = DefaultDNSRecordStyles()
+	}
+	var emitTXT, emitSVCB bool
+	for _, s := range styles {
+		switch s {
+		case DNSRecordStyleSVCB:
+			emitSVCB = true
+		case DNSRecordStyleTXT:
+			emitTXT = true
+		}
+	}
+	if !emitTXT && !emitSVCB {
+		// Every element was invalid — fall back to the default set so
+		// the operator at least gets some records to publish.
+		emitSVCB = true
+	}
+	return emitTXT, emitSVCB
 }
 
 // DNSRecordType represents a DNS record type.
@@ -118,20 +138,21 @@ type ExpectedDNSRecord struct {
 // for a given agent registration. The RA does not create these records — the
 // operator manages their own DNS. The RA only verifies they exist.
 //
-// The set of records emitted depends on reg.DNSRecordStyle:
+// The set of records emitted is keyed off reg.DNSRecordStyles:
 //
-//   - "consolidated" (default, recommended): Consolidated Approach SVCB
+//   - {ANS_SVCB} (default, recommended): Consolidated Approach SVCB
 //     rows (one per protocol) plus the shared `_ans-`-prefixed records
 //     plus the server-cert TLSA. No legacy `_ans` TXT rows.
-//   - "legacy": the original `_ans` TXT shape (one row per protocol)
+//   - {ANS_TXT}: the original `_ans` TXT shape (one row per protocol)
 //     plus the same shared records. No SVCB rows. Backwards-compatible
 //     with operators who registered before the Consolidated Approach
 //     landed and have existing zone-edit tooling for `_ans` TXT.
-//   - "both": union of consolidated + legacy. The §4.4.2 transition
-//     shape; operators run both record families on the same zone for
-//     a defined window, then flip back to "consolidated".
+//   - {ANS_SVCB, ANS_TXT}: the §4.4.2 transition shape; operators run
+//     both record families on the same zone for a defined window.
 //
-// Empty reg.DNSRecordStyle is normalized to DefaultDNSRecordStyle.
+// Empty/missing reg.DNSRecordStyles is normalized to
+// DefaultDNSRecordStyles(); invalid elements are dropped (the
+// service layer rejects bad inputs at the boundary).
 func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	fqdn := reg.FQDN()
 	// Version is emitted as a bare semver string ("1.2.0"). The
@@ -140,17 +161,12 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	// directly, matching the shape a client would parse with any
 	// semver library.
 	version := reg.AnsName.Version().String()
-	style := reg.DNSRecordStyle
-	if !style.IsValid() {
-		style = DefaultDNSRecordStyle
-	}
 	var records []ExpectedDNSRecord
 
-	emitLegacy := style == DNSRecordStyleLegacy || style == DNSRecordStyleBoth
-	emitConsolidated := style == DNSRecordStyleConsolidated || style == DNSRecordStyleBoth
+	emitTXT, emitSVCB := resolveEmissionFlags(reg.DNSRecordStyles)
 
 	// _ans TXT record for each protocol endpoint — legacy discovery.
-	if emitLegacy {
+	if emitTXT {
 		for _, ep := range reg.Endpoints {
 			value := fmt.Sprintf("v=ans1; version=%s; p=%s; mode=direct; url=%s",
 				version, protocolToANSValue(ep.Protocol), ep.AgentURL)
@@ -214,7 +230,7 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	//
 	// Required=false: §4.4.2 marks the Consolidated Approach as MAY,
 	// opt-in alongside the `_ans` TXT family during the transition.
-	if emitConsolidated {
+	if emitSVCB {
 		cardSHA := capabilitiesHashBase64URL(reg.CapabilitiesHash)
 		for _, ep := range reg.Endpoints {
 			alpn := protocolToANSValue(ep.Protocol)

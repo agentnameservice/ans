@@ -203,69 +203,124 @@ func selfSignedCertPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
-// ----- applyDNSRecordStyle -----
+// ----- applyDNSRecordStyles -----
 
-// TestApplyDNSRecordStyle covers the V1-pin / V2-default / V2-validate
-// branches, including the INVALID_DNS_RECORD_STYLE error path. The
-// integration tests follow happy paths through RegisterAgent and don't
-// reach the invalid-value branch directly.
-func TestApplyDNSRecordStyle(t *testing.T) {
+// TestApplyDNSRecordStyles covers the V1-pin / V2-default / V2-validate
+// branches, including the INVALID_DNS_RECORD_STYLE error path and
+// duplicate-element deduplication. The integration tests follow happy
+// paths through RegisterAgent and don't reach the invalid-element
+// branch directly.
+func TestApplyDNSRecordStyles(t *testing.T) {
 	tests := []struct {
 		name        string
 		req         RegisterRequest
-		wantStyle   domain.DNSRecordStyle
+		wantStyles  []domain.DNSRecordStyle
 		wantErrCode string
 	}{
 		{
-			name: "v1_pins_to_legacy_ignoring_request_field",
+			name: "v1_pins_to_ans_txt_ignoring_request_field",
 			req: RegisterRequest{
-				SchemaVersion:  "V1",
-				DNSRecordStyle: domain.DNSRecordStyleConsolidated,
+				SchemaVersion:   "V1",
+				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
 			},
-			wantStyle: domain.DNSRecordStyleLegacy,
+			wantStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
 		},
 		{
-			name:      "v2_empty_normalizes_to_default",
-			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: ""},
-			wantStyle: domain.DefaultDNSRecordStyle,
+			name:       "v2_nil_normalizes_to_default",
+			req:        RegisterRequest{SchemaVersion: "V2"},
+			wantStyles: domain.DefaultDNSRecordStyles(),
 		},
 		{
-			name:      "unset_schema_treated_as_v2_default",
-			req:       RegisterRequest{SchemaVersion: "", DNSRecordStyle: ""},
-			wantStyle: domain.DefaultDNSRecordStyle,
+			name:       "v2_empty_slice_normalizes_to_default",
+			req:        RegisterRequest{SchemaVersion: "V2", DNSRecordStyles: []domain.DNSRecordStyle{}},
+			wantStyles: domain.DefaultDNSRecordStyles(),
 		},
 		{
-			name:      "v2_valid_consolidated",
-			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyleConsolidated},
-			wantStyle: domain.DNSRecordStyleConsolidated,
+			name:       "unset_schema_treated_as_v2_default",
+			req:        RegisterRequest{},
+			wantStyles: domain.DefaultDNSRecordStyles(),
 		},
 		{
-			name:      "v2_valid_legacy",
-			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyleLegacy},
-			wantStyle: domain.DNSRecordStyleLegacy,
+			name: "v2_valid_ans_svcb_only",
+			req: RegisterRequest{
+				SchemaVersion:   "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			},
+			wantStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
 		},
 		{
-			name:      "v2_valid_both",
-			req:       RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyleBoth},
-			wantStyle: domain.DNSRecordStyleBoth,
+			name: "v2_valid_ans_txt_only",
+			req: RegisterRequest{
+				SchemaVersion:   "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
+			},
+			wantStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
 		},
 		{
-			name:        "v2_invalid_value_rejected",
-			req:         RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyle("garbage")},
+			name: "v2_valid_union_preserves_order",
+			req: RegisterRequest{
+				SchemaVersion: "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{
+					domain.DNSRecordStyleSVCB,
+					domain.DNSRecordStyleTXT,
+				},
+			},
+			wantStyles: []domain.DNSRecordStyle{
+				domain.DNSRecordStyleSVCB,
+				domain.DNSRecordStyleTXT,
+			},
+		},
+		{
+			name: "v2_duplicate_elements_deduped",
+			req: RegisterRequest{
+				SchemaVersion: "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{
+					domain.DNSRecordStyleSVCB,
+					domain.DNSRecordStyleSVCB,
+					domain.DNSRecordStyleTXT,
+				},
+			},
+			wantStyles: []domain.DNSRecordStyle{
+				domain.DNSRecordStyleSVCB,
+				domain.DNSRecordStyleTXT,
+			},
+		},
+		{
+			name: "v2_invalid_element_rejected",
+			req: RegisterRequest{
+				SchemaVersion:   "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyle("garbage")},
+			},
 			wantErrCode: "INVALID_DNS_RECORD_STYLE",
 		},
 		{
 			// CONSTANT_CASE is the wire form. lowercase is rejected so the
 			// V2 enum stays consistent with every other enum on the spec.
-			name:        "v2_lowercase_legacy_rejected_as_invalid",
-			req:         RegisterRequest{SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyle("legacy")},
+			name: "v2_lowercase_element_rejected_as_invalid",
+			req: RegisterRequest{
+				SchemaVersion:   "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyle("ans_svcb")},
+			},
+			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+		},
+		{
+			// First valid, second invalid — error surfaces at the
+			// invalid element, no partial state stamped on the aggregate.
+			name: "v2_mixed_valid_then_invalid_rejected",
+			req: RegisterRequest{
+				SchemaVersion: "V2",
+				DNSRecordStyles: []domain.DNSRecordStyle{
+					domain.DNSRecordStyleSVCB,
+					domain.DNSRecordStyle("garbage"),
+				},
+			},
 			wantErrCode: "INVALID_DNS_RECORD_STYLE",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := &domain.AgentRegistration{}
-			err := applyDNSRecordStyle(reg, tc.req)
+			err := applyDNSRecordStyles(reg, tc.req)
 			if tc.wantErrCode != "" {
 				if err == nil {
 					t.Fatalf("want error code %q, got nil", tc.wantErrCode)
@@ -282,28 +337,44 @@ func TestApplyDNSRecordStyle(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if reg.DNSRecordStyle != tc.wantStyle {
-				t.Errorf("DNSRecordStyle: got %q want %q", reg.DNSRecordStyle, tc.wantStyle)
+			if !sameStyles(reg.DNSRecordStyles, tc.wantStyles) {
+				t.Errorf("DNSRecordStyles: got %v want %v", reg.DNSRecordStyles, tc.wantStyles)
 			}
 		})
 	}
 }
 
-// TestApplyDNSRecordStyle_ErrorMessageListsValidValues confirms the
+// TestApplyDNSRecordStyles_ErrorMessageListsValidValues confirms the
 // error detail enumerates the canonical valid set so SDK authors get
-// an actionable message. Sourced from domain.DNSRecordStyles().
-func TestApplyDNSRecordStyle_ErrorMessageListsValidValues(t *testing.T) {
+// an actionable message. Sourced from domain.ValidDNSRecordStyles().
+func TestApplyDNSRecordStyles_ErrorMessageListsValidValues(t *testing.T) {
 	reg := &domain.AgentRegistration{}
-	err := applyDNSRecordStyle(reg, RegisterRequest{
-		SchemaVersion: "V2", DNSRecordStyle: domain.DNSRecordStyle("garbage"),
+	err := applyDNSRecordStyles(reg, RegisterRequest{
+		SchemaVersion:   "V2",
+		DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyle("garbage")},
 	})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range domain.DNSRecordStyles() {
+	for _, want := range domain.ValidDNSRecordStyles() {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error message must list %q; got %q", want, err.Error())
 		}
 	}
 }
 
+// sameStyles compares two style slices for set-equal-with-order. Used
+// by TestApplyDNSRecordStyles to assert the expected ordering after
+// dedup without pulling in reflect.DeepEqual semantics that distinguish
+// nil from empty.
+func sameStyles(a, b []domain.DNSRecordStyle) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}

@@ -12,37 +12,49 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
-// applyDNSRecordStyle resolves the DNS-record-style for the new
-// registration and stores it on the aggregate.
+// applyDNSRecordStyles resolves the set of DNS record families the
+// registration emits and stores it on the aggregate.
 //
-// V1 lane is pinned to LEGACY regardless of the request: V1 callers
-// predate the Consolidated Approach and their tooling expects the
-// original `_ans` TXT shape. V1 has no dnsRecordStyle field on the
-// wire, so this branch is the only path V1 registrations take.
-// V2 callers honor req.DNSRecordStyle: empty normalizes to
-// DefaultDNSRecordStyle (CONSOLIDATED); invalid values surface as
-// INVALID_DNS_RECORD_STYLE.
+// V1 lane is pinned to {ANS_TXT} regardless of the request: V1
+// callers predate the Consolidated Approach and their tooling expects
+// the original `_ans` TXT shape. V1 has no dnsRecordStyles field on
+// the wire, so this branch is the only path V1 registrations take.
+// V2 callers honor req.DNSRecordStyles: empty/nil normalizes to
+// DefaultDNSRecordStyles() ({ANS_SVCB}); any invalid element surfaces
+// as INVALID_DNS_RECORD_STYLE; duplicates are deduplicated to keep
+// the persisted set canonical.
 //
 // V1 detection routes through isV1Lane (lifecycle.go) so a future
 // schema-version evolution updates one site, not several. The error
-// message lists valid values from domain.DNSRecordStyles() so adding
-// a fourth style is a one-place change.
-func applyDNSRecordStyle(reg *domain.AgentRegistration, req RegisterRequest) error {
-	switch {
-	case isV1Lane(req.SchemaVersion):
-		reg.DNSRecordStyle = domain.DNSRecordStyleLegacy
-	case req.DNSRecordStyle == "":
-		reg.DNSRecordStyle = domain.DefaultDNSRecordStyle
-	case !req.DNSRecordStyle.IsValid():
-		return domain.NewValidationError(
-			"INVALID_DNS_RECORD_STYLE",
-			fmt.Sprintf("dnsRecordStyle %q is not one of %s",
-				string(req.DNSRecordStyle),
-				strings.Join(domain.DNSRecordStyles(), ", ")),
-		)
-	default:
-		reg.DNSRecordStyle = req.DNSRecordStyle
+// message lists valid values from domain.ValidDNSRecordStyles() so
+// adding a third style is a one-place change.
+func applyDNSRecordStyles(reg *domain.AgentRegistration, req RegisterRequest) error {
+	if isV1Lane(req.SchemaVersion) {
+		reg.DNSRecordStyles = []domain.DNSRecordStyle{domain.DNSRecordStyleTXT}
+		return nil
 	}
+	if len(req.DNSRecordStyles) == 0 {
+		reg.DNSRecordStyles = domain.DefaultDNSRecordStyles()
+		return nil
+	}
+	seen := make(map[domain.DNSRecordStyle]struct{}, len(req.DNSRecordStyles))
+	out := make([]domain.DNSRecordStyle, 0, len(req.DNSRecordStyles))
+	for _, s := range req.DNSRecordStyles {
+		if !s.IsValid() {
+			return domain.NewValidationError(
+				"INVALID_DNS_RECORD_STYLE",
+				fmt.Sprintf("dnsRecordStyles element %q is not one of %s",
+					string(s),
+					strings.Join(domain.ValidDNSRecordStyles(), ", ")),
+			)
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	reg.DNSRecordStyles = out
 	return nil
 }
 

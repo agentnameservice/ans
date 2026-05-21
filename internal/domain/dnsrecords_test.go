@@ -12,10 +12,10 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 	ansName, _ := NewAnsName(mustSemVer(1, 2, 3), "agent.example.com")
 	reg := &AgentRegistration{
 		AnsName: ansName,
-		// Force "both" style so this fixture exercises the union path:
-		// _ans TXT + Consolidated Approach SVCB. Tests below cover the
-		// single-style emission paths.
-		DNSRecordStyle: DNSRecordStyleBoth,
+		// Force the union set so this fixture exercises both record
+		// families: _ans TXT + Consolidated Approach SVCB. Tests below
+		// cover the single-style emission paths.
+		DNSRecordStyles: []DNSRecordStyle{DNSRecordStyleSVCB, DNSRecordStyleTXT},
 		Endpoints: []AgentEndpoint{
 			{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
 			{Protocol: ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},
@@ -82,26 +82,28 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 	assert.Equal(t, 0, tlsaCount, "no cert → no TLSA record")
 }
 
-// TestComputeRequiredDNSRecords_StyleMatrix exercises every per-style
-// emission rule in one table. Each row pins the per-record-type shape
-// the operator is asked to publish given a (style, protocol,
+// TestComputeRequiredDNSRecords_StyleMatrix exercises every emission
+// rule in one table. Each row pins the per-record-type shape the
+// operator is asked to publish given a (styles, protocol,
 // capabilitiesHash, agentURL) tuple. The matrix covers:
 //
-//   - LEGACY emits _ans TXT + HTTPS RR; no SVCB.
-//   - CONSOLIDATED emits SVCB only (no HTTPS RR — duplicate signalling).
-//   - BOTH emits the union.
+//   - {ANS_TXT} emits _ans TXT + HTTPS RR; no SVCB.
+//   - {ANS_SVCB} emits SVCB only (no HTTPS RR — duplicate signalling).
+//   - {ANS_SVCB, ANS_TXT} emits the union.
 //   - SVCB SvcParam composition: wk= (per-protocol), port= (from URL),
 //     card-sha256= (only when CapabilitiesHash is set).
 //   - svcbPortFor: explicit non-443 port flows through, default https
 //     URLs fall back to 443.
-//   - Invalid style coerces to default (CONSOLIDATED).
+//   - Empty styles (nil slice) coerces to the default ({ANS_SVCB}).
+//   - All-invalid styles set still produces records (defensive
+//     fallback in the domain layer; the service rejects bad inputs).
 func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 	const cardHex = "098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
 	const wantCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
 
 	tests := []struct {
 		name             string
-		style            DNSRecordStyle
+		styles           []DNSRecordStyle
 		protocol         Protocol
 		agentURL         string
 		capabilitiesHash string
@@ -113,16 +115,16 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 		wantSVCBCard     string // "" means SVCB MUST NOT contain "card-sha256"
 	}{
 		{
-			name:          "legacy-emits-https-rr-no-svcb",
-			style:         DNSRecordStyleLegacy,
+			name:          "ans_txt_only_emits_https_rr_no_svcb",
+			styles:        []DNSRecordStyle{DNSRecordStyleTXT},
 			protocol:      ProtocolA2A,
 			agentURL:      "https://agent.example.com",
 			wantHTTPS:     true,
 			wantLegacyTXT: true,
 		},
 		{
-			name:         "consolidated-omits-https-rr",
-			style:        DNSRecordStyleConsolidated,
+			name:         "ans_svcb_only_omits_https_rr",
+			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
 			protocol:     ProtocolA2A,
 			agentURL:     "https://agent.example.com",
 			wantSVCB:     true,
@@ -130,8 +132,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantSVCBWk:   "wk=agent-card.json",
 		},
 		{
-			name:          "both-emits-union",
-			style:         DNSRecordStyleBoth,
+			name:          "union_emits_both_families",
+			styles:        []DNSRecordStyle{DNSRecordStyleSVCB, DNSRecordStyleTXT},
 			protocol:      ProtocolA2A,
 			agentURL:      "https://agent.example.com",
 			wantHTTPS:     true,
@@ -141,8 +143,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantSVCBWk:    "wk=agent-card.json",
 		},
 		{
-			name:         "svcb-mcp-wk-mcp-json",
-			style:        DNSRecordStyleConsolidated,
+			name:         "svcb_mcp_wk_mcp_json",
+			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
 			protocol:     ProtocolMCP,
 			agentURL:     "https://agent.example.com/mcp",
 			wantSVCB:     true,
@@ -150,8 +152,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantSVCBWk:   "wk=mcp.json",
 		},
 		{
-			name:         "svcb-http-api-omits-wk",
-			style:        DNSRecordStyleConsolidated,
+			name:         "svcb_http_api_omits_wk",
+			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
 			protocol:     ProtocolHTTPAPI,
 			agentURL:     "https://agent.example.com",
 			wantSVCB:     true,
@@ -159,8 +161,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			// HTTP-API has no per-protocol metadata file convention.
 		},
 		{
-			name:             "svcb-card-sha256-present-when-set",
-			style:            DNSRecordStyleConsolidated,
+			name:             "svcb_card_sha256_present_when_set",
+			styles:           []DNSRecordStyle{DNSRecordStyleSVCB},
 			protocol:         ProtocolA2A,
 			agentURL:         "https://agent.example.com",
 			capabilitiesHash: cardHex,
@@ -170,8 +172,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantSVCBCard:     "card-sha256=" + wantCardBase64,
 		},
 		{
-			name:         "svcb-non-443-port-from-url",
-			style:        DNSRecordStyleConsolidated,
+			name:         "svcb_non_443_port_from_url",
+			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
 			protocol:     ProtocolA2A,
 			agentURL:     "https://agent.example.com:8443",
 			wantSVCB:     true,
@@ -179,8 +181,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantSVCBWk:   "wk=agent-card.json",
 		},
 		{
-			name:         "svcb-http-scheme-defaults-port-80",
-			style:        DNSRecordStyleConsolidated,
+			name:         "svcb_http_scheme_defaults_port_80",
+			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
 			protocol:     ProtocolA2A,
 			agentURL:     "http://agent.example.com",
 			wantSVCB:     true,
@@ -188,8 +190,17 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantSVCBWk:   "wk=agent-card.json",
 		},
 		{
-			name:         "invalid-style-coerces-to-consolidated",
-			style:        DNSRecordStyle("garbage"),
+			name:         "empty_styles_coerces_to_default",
+			styles:       nil,
+			protocol:     ProtocolA2A,
+			agentURL:     "https://agent.example.com",
+			wantSVCB:     true,
+			wantSVCBPort: "port=443",
+			wantSVCBWk:   "wk=agent-card.json",
+		},
+		{
+			name:         "all_invalid_styles_falls_back_to_default",
+			styles:       []DNSRecordStyle{DNSRecordStyle("garbage"), DNSRecordStyle("nonsense")},
 			protocol:     ProtocolA2A,
 			agentURL:     "https://agent.example.com",
 			wantSVCB:     true,
@@ -203,7 +214,7 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
 			reg := &AgentRegistration{
 				AnsName:          ansName,
-				DNSRecordStyle:   tc.style,
+				DNSRecordStyles:  tc.styles,
 				CapabilitiesHash: tc.capabilitiesHash,
 				Endpoints: []AgentEndpoint{
 					{Protocol: tc.protocol, AgentURL: tc.agentURL},
@@ -305,13 +316,22 @@ func TestWkPathFor(t *testing.T) {
 	}
 }
 
-// TestDNSRecordStyles pins the canonical valid set of DNSRecordStyle
-// values returned by the helper used in the V2 INVALID_DNS_RECORD_STYLE
-// error message. Order and contents are stable so an external client's
-// error-message fixtures can match.
-func TestDNSRecordStyles(t *testing.T) {
-	got := DNSRecordStyles()
-	want := []string{"CONSOLIDATED", "LEGACY", "BOTH"}
+// TestValidDNSRecordStyles pins the canonical valid set of
+// DNSRecordStyle values returned by the helper used in the V2
+// INVALID_DNS_RECORD_STYLE error message and (eventually) by spec
+// generation tooling. Order and contents are stable so an external
+// client's error-message fixtures can match.
+func TestValidDNSRecordStyles(t *testing.T) {
+	got := ValidDNSRecordStyles()
+	want := []string{"ANS_SVCB", "ANS_TXT"}
+	assert.Equal(t, want, got)
+}
+
+// TestDefaultDNSRecordStyles pins the default set applied when a V2
+// register request omits dnsRecordStyles. {ANS_SVCB} per §4.4.2.
+func TestDefaultDNSRecordStyles(t *testing.T) {
+	got := DefaultDNSRecordStyles()
+	want := []DNSRecordStyle{DNSRecordStyleSVCB}
 	assert.Equal(t, want, got)
 }
 

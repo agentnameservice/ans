@@ -40,13 +40,13 @@ type registrationRequest struct {
 	ServerCertificatePEM      string        `json:"serverCertificatePEM,omitempty"`
 	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
 
-	// DNSRecordStyle selects which DNS record family the RA emits
-	// for this registration. One of "consolidated" (default,
-	// recommended), "legacy" (original `_ans` TXT shape), "both"
-	// (transition union). Empty/missing → consolidated. Invalid
-	// value rejected with 422 INVALID_DNS_RECORD_STYLE. See
-	// ANS_SPEC.md §4.4.2 for record-shape semantics.
-	DNSRecordStyle string `json:"dnsRecordStyle,omitempty"`
+	// DNSRecordStyles is the set of DNS record families the RA emits
+	// for this registration. Each element is one of "ANS_SVCB" or
+	// "ANS_TXT". Typical values: ["ANS_SVCB"] (default, recommended),
+	// ["ANS_TXT"], or ["ANS_SVCB", "ANS_TXT"] (transition union).
+	// Empty/missing → ["ANS_SVCB"]. Any invalid element rejected
+	// with 422 INVALID_DNS_RECORD_STYLE. See ANS_SPEC.md §4.4.2.
+	DNSRecordStyles []string `json:"dnsRecordStyles,omitempty"`
 }
 
 type endpointDTO struct {
@@ -161,7 +161,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		ServerCsrPEM:              req.ServerCsrPEM,
 		ServerCertificatePEM:      req.ServerCertificatePEM,
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
-		DNSRecordStyle:            domain.DNSRecordStyle(req.DNSRecordStyle),
+		DNSRecordStyles:           toDomainDNSRecordStyles(req.DNSRecordStyles),
 	})
 	if err != nil {
 		WriteError(w, err)
@@ -169,6 +169,21 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusAccepted, mapRegistrationResponse(resp, r))
+}
+
+// toDomainDNSRecordStyles converts the wire []string into the typed
+// domain slice. Empty/nil flows through as nil so the service layer
+// can apply DefaultDNSRecordStyles(). Per-element validity is enforced
+// downstream by applyDNSRecordStyles.
+func toDomainDNSRecordStyles(raw []string) []domain.DNSRecordStyle {
+	if len(raw) == 0 {
+		return nil
+	}
+	out := make([]domain.DNSRecordStyle, len(raw))
+	for i, s := range raw {
+		out[i] = domain.DNSRecordStyle(s)
+	}
+	return out
 }
 
 // mapEndpointsFromDTO converts the incoming JSON endpoints to the

@@ -111,12 +111,13 @@ type AgentRegistration struct {
 	// populator path is intentionally not wired in this PR.
 	CapabilitiesHash string `json:"capabilitiesHash,omitempty"`
 
-	// DNSRecordStyle selects which DNS record family the RA emits
-	// for this registration: "consolidated" (Consolidated Approach
-	// SVCB rows, default), "legacy" (the original `_ans` TXT shape),
-	// or "both" (the transition union). Empty at the domain layer
-	// is treated as DefaultDNSRecordStyle by ComputeRequiredDNSRecords.
-	DNSRecordStyle DNSRecordStyle `json:"dnsRecordStyle,omitempty"`
+	// DNSRecordStyles is the set of DNS record families the RA emits
+	// for this registration. Each value names one family — typically
+	// {ANS_SVCB} (Consolidated Approach), {ANS_TXT} (original `_ans`
+	// TXT shape), or the {ANS_SVCB, ANS_TXT} transition union. Empty
+	// at the domain layer is treated as DefaultDNSRecordStyles() by
+	// ComputeRequiredDNSRecords.
+	DNSRecordStyles []DNSRecordStyle `json:"dnsRecordStyles,omitempty"`
 
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.
