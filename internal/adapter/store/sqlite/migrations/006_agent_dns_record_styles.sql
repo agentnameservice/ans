@@ -1,4 +1,4 @@
--- 007_agent_dns_record_style.sql
+-- 006_agent_dns_record_styles.sql
 -- Persist the operator's chosen set of DNS record families on the
 -- registration row so verify-acme / verify-dns / badge responses
 -- carry the same shape the operator chose at registration time.
