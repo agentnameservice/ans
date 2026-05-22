@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -265,18 +266,18 @@ func formatHTTPSValue(s *dns.SVCB) string {
 
 // verifySVCB checks for a Consolidated Approach SVCB record (RFC 9460)
 // at the agent's bare FQDN. Multiple SVCB records can share one RRset
-// name distinguished by alpn, so verification iterates the answer
-// section, normalizes each record's wire form, and matches against
-// the expected SvcParams. The matching strategy mirrors verifyHTTPS:
-// the expected value carries every SvcParam the RA computed (alpn,
-// port, wk, card-sha256), and the live record MUST carry the same
-// SvcParams in the same alpn-keyed form.
+// name distinguished by alpn, and the Consolidated Approach explicitly
+// designs for multi-spec coexistence in a single record (DNS-AID, ANS,
+// and other agentic specs sharing one SVCB row, distinguished by their
+// own SvcParamKeys). Verification therefore implements RFC 9460 §8
+// unknown-key ignore semantics as a *subset* match: priority and
+// target must equal the expected value exactly, every expected
+// SvcParam must be present in the live record with an equal value,
+// and additional SvcParams in the live record are tolerated.
 //
-// SvcParam unknown-key ignore semantics (RFC 9460 §8) apply at the
-// client, not at this verifier — we only check that the SvcParams
-// the RA committed are present, not that the live record is free of
-// extra SvcParams from other ecosystems. Other agentic specs adding
-// their own SvcParams alongside ours is the entire point of the
+// A strict-equality matcher would mark a multi-spec record not-found
+// and (in a DNSSEC-signed zone) trip the SVCB_DNSSEC_MISMATCH hard
+// fail in the lifecycle layer — defeating the entire point of the
 // Consolidated Approach.
 func (v *LookupVerifier) verifySVCB(ctx context.Context, server string, rec domain.ExpectedDNSRecord) port.RecordVerification {
 	r := port.RecordVerification{Record: rec}
@@ -290,23 +291,98 @@ func (v *LookupVerifier) verifySVCB(ctx context.Context, server string, rec doma
 		return r
 	}
 	r.DNSSECVerified = resp.AuthenticatedData
-	wantNorm := normalizeHTTPS(rec.Value)
+
+	expected, err := parseSVCBValue(rec.Value)
+	if err != nil {
+		r.Error = fmt.Sprintf("expected SVCB value: %v", err)
+		return r
+	}
 	for _, rr := range resp.Answer {
 		svcb, ok := rr.(*dns.SVCB)
 		if !ok {
 			continue
 		}
-		got := formatHTTPSValue(svcb)
+		gotStr := formatHTTPSValue(svcb)
 		if r.Actual == "" {
-			r.Actual = got
+			r.Actual = gotStr
 		}
-		if normalizeHTTPS(got) == wantNorm {
+		actual, err := parseSVCBValue(gotStr)
+		if err != nil {
+			// Skip records we can't parse — they'll surface as
+			// not-found if no other answer matches.
+			continue
+		}
+		if matchesSVCBSubset(expected, actual) {
 			r.Found = true
-			r.Actual = got
+			r.Actual = gotStr
 			return r
 		}
 	}
 	return r
+}
+
+// parsedSVCB is the structured form of an SVCB or HTTPS record's
+// presentation value: priority, target, and a SvcParam map. Used for
+// RFC 9460 §8-compliant subset matching in verifySVCB so that live
+// records carrying extra SvcParams from coexisting specs aren't
+// treated as mismatches.
+type parsedSVCB struct {
+	priority int
+	target   string
+	params   map[string]string
+}
+
+// parseSVCBValue parses the presentation form
+// "<priority> <target> [k=v] [k=v] ..." that formatHTTPSValue emits
+// (and that ComputeRequiredDNSRecords stores in
+// ExpectedDNSRecord.Value). Whitespace inside SvcParam values is not
+// supported because neither side emits it.
+func parseSVCBValue(s string) (parsedSVCB, error) {
+	fields := strings.Fields(s)
+	if len(fields) < 2 {
+		return parsedSVCB{}, fmt.Errorf("svcb: too few fields in %q", s)
+	}
+	priority, err := strconv.Atoi(fields[0])
+	if err != nil {
+		return parsedSVCB{}, fmt.Errorf("svcb: priority %q: %w", fields[0], err)
+	}
+	out := parsedSVCB{
+		priority: priority,
+		target:   fields[1],
+		params:   make(map[string]string, len(fields)-2),
+	}
+	for _, f := range fields[2:] {
+		eq := strings.IndexByte(f, '=')
+		if eq < 0 {
+			// Valueless SvcParamKey (e.g. `no-default-alpn`); store
+			// with empty value so an expected entry can still match.
+			out.params[f] = ""
+			continue
+		}
+		out.params[f[:eq]] = f[eq+1:]
+	}
+	return out, nil
+}
+
+// matchesSVCBSubset reports whether `actual` carries all SvcParams
+// in `expected` (with equal values), tolerating any additional
+// SvcParams in `actual`. Priority and target must match exactly.
+//
+// This is the verifier-side embodiment of RFC 9460 §8 unknown-key
+// ignore semantics: the RA only verifies the SvcParams it committed
+// to write; SvcParams from other agentic specs sharing the same
+// SVCB row pass through unexamined.
+func matchesSVCBSubset(expected, actual parsedSVCB) bool {
+	if expected.priority != actual.priority || expected.target != actual.target {
+		return false
+	}
+	for k, want := range expected.params {
+		got, ok := actual.params[k]
+		if !ok || got != want {
+			return false
+		}
+	}
+	return true
 }
 
 // normalizeTLSA collapses whitespace and lowercases the hex so

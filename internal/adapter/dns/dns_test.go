@@ -300,6 +300,34 @@ func TestLookupVerifier_SVCB(t *testing.T) {
 			found:     false,
 			why:       "ServiceMode expectation should not match an AliasMode record",
 		},
+		{
+			// RFC 9460 §8 unknown-key ignore: a live record with extra
+			// SvcParams (e.g. another agentic spec adding its own keys to
+			// the same SVCB row) must still match when our committed
+			// SvcParams are present with equal values. A strict-equality
+			// matcher would fail this and — under DNSSEC AD=true — trip
+			// the SVCB_DNSSEC_MISMATCH hard fail.
+			name:      "extra-svcparams-tolerated-rfc9460-section-8",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 mandatory=alpn`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     true,
+			why:       "subset match: live record carries extra `mandatory` param, expected params still satisfied",
+		},
+		{
+			// Mirror of the tolerance case to pin the missing-required-
+			// param failure: if the live record drops one of our
+			// committed SvcParams, the match must fail even though it
+			// shares priority+target with the expected value.
+			name:      "missing-expected-param-fails-subset-match",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     false,
+			why:       "subset match requires every expected SvcParam present in the live record",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
