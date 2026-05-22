@@ -13,29 +13,52 @@ import (
 )
 
 // applyDNSRecordStyles resolves the set of DNS record families the
-// registration emits and stores it on the aggregate.
+// registration emits and stores it on the aggregate, enforcing the
+// V2 spec's dnsRecordStyles validation rules at the API boundary.
 //
 // V1 lane is pinned to {ANS_TXT} regardless of the request: V1
 // callers predate the Consolidated Approach and their tooling expects
 // the original `_ans` TXT shape. V1 has no dnsRecordStyles field on
 // the wire, so this branch is the only path V1 registrations take.
-// V2 callers honor req.DNSRecordStyles: empty/nil normalizes to
-// DefaultDNSRecordStyles() ({ANS_SVCB}); any invalid element surfaces
-// as INVALID_DNS_RECORD_STYLE; duplicates are deduplicated to keep
-// the persisted set canonical.
+//
+// V2 validation enforces the OpenAPI contract:
+//   - Field absent (nil slice) → defaults to DefaultDNSRecordStyles()
+//     ({ANS_SVCB}). The spec doesn't list dnsRecordStyles in
+//     `required`, so omission is legal and the server picks the
+//     recommended Consolidated Approach.
+//   - Field present but empty (`"dnsRecordStyles": []`) → 422
+//     INVALID_DNS_RECORD_STYLE. Matches `minItems: 1` in the spec —
+//     a caller who explicitly sends an empty list is signalling
+//     intent that the schema doesn't permit.
+//   - Duplicate elements → 422 INVALID_DNS_RECORD_STYLE. Matches
+//     `uniqueItems: true`. Silent dedup would let a malformed
+//     client request persist as state the caller didn't intend.
+//   - Invalid element (not in ValidDNSRecordStyles()) → 422
+//     INVALID_DNS_RECORD_STYLE.
+//
+// The handler-side conversion (toDomainDNSRecordStyles) preserves
+// the nil-vs-empty distinction so this function can tell field
+// omission from explicit empty.
 //
 // V1 detection routes through isV1Lane (lifecycle.go) so a future
 // schema-version evolution updates one site, not several. The error
-// message lists valid values from domain.ValidDNSRecordStyles() so
-// adding a third style is a one-place change.
+// messages reference ValidDNSRecordStyles() so adding a third style
+// is a one-place change.
 func applyDNSRecordStyles(reg *domain.AgentRegistration, req RegisterRequest) error {
 	if isV1Lane(req.SchemaVersion) {
 		reg.DNSRecordStyles = []domain.DNSRecordStyle{domain.DNSRecordStyleTXT}
 		return nil
 	}
-	if len(req.DNSRecordStyles) == 0 {
+	if req.DNSRecordStyles == nil {
 		reg.DNSRecordStyles = domain.DefaultDNSRecordStyles()
 		return nil
+	}
+	if len(req.DNSRecordStyles) == 0 {
+		return domain.NewValidationError(
+			"INVALID_DNS_RECORD_STYLE",
+			"dnsRecordStyles must contain at least one element when present (omit the field to default to ["+
+				string(domain.DNSRecordStyleSVCB)+"])",
+		)
 	}
 	seen := make(map[domain.DNSRecordStyle]struct{}, len(req.DNSRecordStyles))
 	out := make([]domain.DNSRecordStyle, 0, len(req.DNSRecordStyles))
@@ -49,7 +72,10 @@ func applyDNSRecordStyles(reg *domain.AgentRegistration, req RegisterRequest) er
 			)
 		}
 		if _, dup := seen[s]; dup {
-			continue
+			return domain.NewValidationError(
+				"INVALID_DNS_RECORD_STYLE",
+				fmt.Sprintf("dnsRecordStyles must not contain duplicates (saw %q twice)", string(s)),
+			)
 		}
 		seen[s] = struct{}{}
 		out = append(out, s)

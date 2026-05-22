@@ -206,10 +206,10 @@ func selfSignedCertPEM(t *testing.T) string {
 // ----- applyDNSRecordStyles -----
 
 // TestApplyDNSRecordStyles covers the V1-pin / V2-default / V2-validate
-// branches, including the INVALID_DNS_RECORD_STYLE error path and
-// duplicate-element deduplication. The integration tests follow happy
-// paths through RegisterAgent and don't reach the invalid-element
-// branch directly.
+// branches, including every INVALID_DNS_RECORD_STYLE rejection path
+// the API guards: invalid element, duplicate, and explicit empty
+// array. The integration tests follow happy paths through
+// RegisterAgent and don't reach the rejection branches directly.
 func TestApplyDNSRecordStyles(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -231,9 +231,12 @@ func TestApplyDNSRecordStyles(t *testing.T) {
 			wantStyles: domain.DefaultDNSRecordStyles(),
 		},
 		{
-			name:       "v2_empty_slice_normalizes_to_default",
-			req:        RegisterRequest{SchemaVersion: "V2", DNSRecordStyles: []domain.DNSRecordStyle{}},
-			wantStyles: domain.DefaultDNSRecordStyles(),
+			// minItems: 1 in the spec — an explicit empty array is a
+			// signal of intent the schema doesn't allow. Distinct from
+			// "field omitted", which still defaults.
+			name:        "v2_explicit_empty_slice_rejected",
+			req:         RegisterRequest{SchemaVersion: "V2", DNSRecordStyles: []domain.DNSRecordStyle{}},
+			wantErrCode: "INVALID_DNS_RECORD_STYLE",
 		},
 		{
 			name:       "unset_schema_treated_as_v2_default",
@@ -271,7 +274,13 @@ func TestApplyDNSRecordStyles(t *testing.T) {
 			},
 		},
 		{
-			name: "v2_duplicate_elements_deduped",
+			// uniqueItems: true in the spec — duplicates are rejected
+			// rather than silently deduped. A caller sending the same
+			// style twice has either a client bug or an unclear
+			// intention; surfacing 422 forces the issue out into the
+			// open instead of letting a request the caller didn't
+			// quite mean to send become persisted state.
+			name: "v2_duplicate_elements_rejected",
 			req: RegisterRequest{
 				SchemaVersion: "V2",
 				DNSRecordStyles: []domain.DNSRecordStyle{
@@ -280,10 +289,7 @@ func TestApplyDNSRecordStyles(t *testing.T) {
 					domain.DNSRecordStyleTXT,
 				},
 			},
-			wantStyles: []domain.DNSRecordStyle{
-				domain.DNSRecordStyleSVCB,
-				domain.DNSRecordStyleTXT,
-			},
+			wantErrCode: "INVALID_DNS_RECORD_STYLE",
 		},
 		{
 			name: "v2_invalid_element_rejected",
@@ -363,10 +369,10 @@ func TestApplyDNSRecordStyles_ErrorMessageListsValidValues(t *testing.T) {
 	}
 }
 
-// sameStyles compares two style slices for set-equal-with-order. Used
-// by TestApplyDNSRecordStyles to assert the expected ordering after
-// dedup without pulling in reflect.DeepEqual semantics that distinguish
-// nil from empty.
+// sameStyles compares two style slices for set-equal-with-order.
+// Used by TestApplyDNSRecordStyles to assert ordering on the happy
+// paths without pulling in reflect.DeepEqual semantics that
+// distinguish nil from empty.
 func sameStyles(a, b []domain.DNSRecordStyle) bool {
 	if len(a) != len(b) {
 		return false

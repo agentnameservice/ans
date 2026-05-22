@@ -1096,11 +1096,12 @@ components:
 
             Each value names one record family; an operator publishing
             the union (Consolidated Approach SVCB plus the original
-            `_ans` TXT shape) sends both. Order is not significant
-            and duplicates are rejected (`uniqueItems: true`).
+            `_ans` TXT shape) sends both. Order is not significant and
+            duplicates are rejected (`uniqueItems: true`).
 
             Omitted/missing normalizes to ["ANS_SVCB"] server-side
-            (the recommended default per RFC 9460).
+            (the recommended default per RFC 9460). An explicit empty
+            array is rejected (`minItems: 1`).
           example: ["ANS_SVCB"]
       required:
         - agentDisplayName

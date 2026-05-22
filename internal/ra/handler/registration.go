@@ -172,11 +172,16 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 // toDomainDNSRecordStyles converts the wire []string into the typed
-// domain slice. Empty/nil flows through as nil so the service layer
-// can apply DefaultDNSRecordStyles(). Per-element validity is enforced
-// downstream by applyDNSRecordStyles.
+// domain slice while preserving the nil-vs-empty distinction. nil
+// (field omitted in the JSON request) flows through as nil so the
+// service layer applies DefaultDNSRecordStyles(); a non-nil empty
+// slice (explicit `"dnsRecordStyles": []`) flows through as an
+// empty non-nil []DNSRecordStyle so the service layer can reject it
+// per the spec's `minItems: 1`. Per-element validity, duplicate
+// rejection, and empty-array rejection all live in
+// applyDNSRecordStyles.
 func toDomainDNSRecordStyles(raw []string) []domain.DNSRecordStyle {
-	if len(raw) == 0 {
+	if raw == nil {
 		return nil
 	}
 	out := make([]domain.DNSRecordStyle, len(raw))
