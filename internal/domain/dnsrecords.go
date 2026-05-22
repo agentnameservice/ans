@@ -228,8 +228,15 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	// emits keyNNNNN form will see a mismatch the RA reports as a
 	// non-blocking integrity finding (Required=false below).
 	//
-	// Required=false: §4.4.2 marks the Consolidated Approach as MAY,
-	// opt-in alongside the `_ans` TXT family during the transition.
+	// Required: SVCB rows carry the registration's only
+	// PurposeDiscovery signal when ANS_SVCB is the sole style; in
+	// that mode verify-dns must require them, otherwise the agent
+	// could "register" without publishing any discovery record. When
+	// the operator opted into the union ({ANS_SVCB, ANS_TXT}), the
+	// legacy `_ans` TXT family above carries Required=true and the
+	// SVCB row stays optional alongside it (§4.4.2 marks the
+	// Consolidated Approach as MAY during the transition).
+	svcbRequired := emitSVCB && !emitTXT
 	if emitSVCB {
 		cardSHA := capabilitiesHashBase64URL(reg.CapabilitiesHash)
 		for _, ep := range reg.Endpoints {
@@ -255,7 +262,7 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 				Type:     DNSRecordSVCB,
 				Value:    value,
 				Purpose:  PurposeDiscovery,
-				Required: false,
+				Required: svcbRequired,
 				TTL:      3600,
 			})
 		}

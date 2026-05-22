@@ -46,7 +46,12 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 				svcbCount++
 				assert.Equal(t, "agent.example.com", r.Name,
 					"Consolidated Approach SVCB at the bare FQDN, not at _ans.{fqdn}")
-				assert.False(t, r.Required, "Consolidated Approach SVCB is MAY per §4.4.2")
+				// Union fixture ({ANS_SVCB, ANS_TXT}): legacy TXT
+				// carries Required=true, SVCB rides along as optional
+				// per §4.4.2's MAY-during-transition framing. The
+				// SVCB-sole path flips this to Required=true; covered
+				// in TestComputeRequiredDNSRecords_StyleMatrix.
+				assert.False(t, r.Required, "SVCB optional when emitted alongside legacy TXT")
 				assert.Contains(t, r.Value, `1 . `, "ServiceMode (priority 1) with TargetName .")
 				assert.Contains(t, r.Value, "alpn=", "alpn distinguishes protocols within the RRset")
 				assert.Contains(t, r.Value, "port=443")
@@ -109,6 +114,7 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 		capabilitiesHash string
 		wantHTTPS        bool
 		wantSVCB         bool
+		wantSVCBRequired bool // applies only when wantSVCB is true
 		wantLegacyTXT    bool
 		wantSVCBPort     string // substring expected in SVCB value (e.g. "port=443")
 		wantSVCBWk       string // "" means SVCB MUST NOT contain "wk="
@@ -123,13 +129,14 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantLegacyTXT: true,
 		},
 		{
-			name:         "ans_svcb_only_omits_https_rr",
-			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
-			protocol:     ProtocolA2A,
-			agentURL:     "https://agent.example.com",
-			wantSVCB:     true,
-			wantSVCBPort: "port=443",
-			wantSVCBWk:   "wk=agent-card.json",
+			name:             "ans_svcb_only_omits_https_rr",
+			styles:           []DNSRecordStyle{DNSRecordStyleSVCB},
+			protocol:         ProtocolA2A,
+			agentURL:         "https://agent.example.com",
+			wantSVCB:         true,
+			wantSVCBRequired: true, // SVCB-sole: only PurposeDiscovery record, must be required
+			wantSVCBPort:     "port=443",
+			wantSVCBWk:       "wk=agent-card.json",
 		},
 		{
 			name:          "union_emits_both_families",
@@ -139,25 +146,30 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			wantHTTPS:     true,
 			wantLegacyTXT: true,
 			wantSVCB:      true,
-			wantSVCBPort:  "port=443",
-			wantSVCBWk:    "wk=agent-card.json",
+			// wantSVCBRequired: false — legacy `_ans` TXT carries the
+			// Required signal during the §4.4.2 transition; SVCB rides
+			// along as optional.
+			wantSVCBPort: "port=443",
+			wantSVCBWk:   "wk=agent-card.json",
 		},
 		{
-			name:         "svcb_mcp_wk_mcp_json",
-			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
-			protocol:     ProtocolMCP,
-			agentURL:     "https://agent.example.com/mcp",
-			wantSVCB:     true,
-			wantSVCBPort: "port=443",
-			wantSVCBWk:   "wk=mcp.json",
+			name:             "svcb_mcp_wk_mcp_json",
+			styles:           []DNSRecordStyle{DNSRecordStyleSVCB},
+			protocol:         ProtocolMCP,
+			agentURL:         "https://agent.example.com/mcp",
+			wantSVCB:         true,
+			wantSVCBRequired: true,
+			wantSVCBPort:     "port=443",
+			wantSVCBWk:       "wk=mcp.json",
 		},
 		{
-			name:         "svcb_http_api_omits_wk",
-			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
-			protocol:     ProtocolHTTPAPI,
-			agentURL:     "https://agent.example.com",
-			wantSVCB:     true,
-			wantSVCBPort: "port=443",
+			name:             "svcb_http_api_omits_wk",
+			styles:           []DNSRecordStyle{DNSRecordStyleSVCB},
+			protocol:         ProtocolHTTPAPI,
+			agentURL:         "https://agent.example.com",
+			wantSVCB:         true,
+			wantSVCBRequired: true,
+			wantSVCBPort:     "port=443",
 			// HTTP-API has no per-protocol metadata file convention.
 		},
 		{
@@ -167,45 +179,50 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			agentURL:         "https://agent.example.com",
 			capabilitiesHash: cardHex,
 			wantSVCB:         true,
+			wantSVCBRequired: true,
 			wantSVCBPort:     "port=443",
 			wantSVCBWk:       "wk=agent-card.json",
 			wantSVCBCard:     "card-sha256=" + wantCardBase64,
 		},
 		{
-			name:         "svcb_non_443_port_from_url",
-			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
-			protocol:     ProtocolA2A,
-			agentURL:     "https://agent.example.com:8443",
-			wantSVCB:     true,
-			wantSVCBPort: "port=8443",
-			wantSVCBWk:   "wk=agent-card.json",
+			name:             "svcb_non_443_port_from_url",
+			styles:           []DNSRecordStyle{DNSRecordStyleSVCB},
+			protocol:         ProtocolA2A,
+			agentURL:         "https://agent.example.com:8443",
+			wantSVCB:         true,
+			wantSVCBRequired: true,
+			wantSVCBPort:     "port=8443",
+			wantSVCBWk:       "wk=agent-card.json",
 		},
 		{
-			name:         "svcb_http_scheme_defaults_port_80",
-			styles:       []DNSRecordStyle{DNSRecordStyleSVCB},
-			protocol:     ProtocolA2A,
-			agentURL:     "http://agent.example.com",
-			wantSVCB:     true,
-			wantSVCBPort: "port=80",
-			wantSVCBWk:   "wk=agent-card.json",
+			name:             "svcb_http_scheme_defaults_port_80",
+			styles:           []DNSRecordStyle{DNSRecordStyleSVCB},
+			protocol:         ProtocolA2A,
+			agentURL:         "http://agent.example.com",
+			wantSVCB:         true,
+			wantSVCBRequired: true,
+			wantSVCBPort:     "port=80",
+			wantSVCBWk:       "wk=agent-card.json",
 		},
 		{
-			name:         "empty_styles_coerces_to_default",
-			styles:       nil,
-			protocol:     ProtocolA2A,
-			agentURL:     "https://agent.example.com",
-			wantSVCB:     true,
-			wantSVCBPort: "port=443",
-			wantSVCBWk:   "wk=agent-card.json",
+			name:             "empty_styles_coerces_to_default",
+			styles:           nil,
+			protocol:         ProtocolA2A,
+			agentURL:         "https://agent.example.com",
+			wantSVCB:         true,
+			wantSVCBRequired: true, // default ({ANS_SVCB}) is SVCB-sole
+			wantSVCBPort:     "port=443",
+			wantSVCBWk:       "wk=agent-card.json",
 		},
 		{
-			name:         "all_invalid_styles_falls_back_to_default",
-			styles:       []DNSRecordStyle{DNSRecordStyle("garbage"), DNSRecordStyle("nonsense")},
-			protocol:     ProtocolA2A,
-			agentURL:     "https://agent.example.com",
-			wantSVCB:     true,
-			wantSVCBPort: "port=443",
-			wantSVCBWk:   "wk=agent-card.json",
+			name:             "all_invalid_styles_falls_back_to_default",
+			styles:           []DNSRecordStyle{DNSRecordStyle("garbage"), DNSRecordStyle("nonsense")},
+			protocol:         ProtocolA2A,
+			agentURL:         "https://agent.example.com",
+			wantSVCB:         true,
+			wantSVCBRequired: true, // fallback default ({ANS_SVCB}) is SVCB-sole
+			wantSVCBPort:     "port=443",
+			wantSVCBWk:       "wk=agent-card.json",
 		},
 	}
 
@@ -224,6 +241,7 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 
 			var sawHTTPS, sawSVCB, sawLegacyTXT bool
 			var svcbValue string
+			var svcbRequired bool
 			for _, r := range records {
 				switch r.Type {
 				case DNSRecordHTTPS:
@@ -231,6 +249,7 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 				case DNSRecordSVCB:
 					sawSVCB = true
 					svcbValue = r.Value
+					svcbRequired = r.Required
 				case DNSRecordTXT:
 					if strings.HasPrefix(r.Name, "_ans.") {
 						sawLegacyTXT = true
@@ -243,6 +262,8 @@ func TestComputeRequiredDNSRecords_StyleMatrix(t *testing.T) {
 			assert.Equal(t, tc.wantLegacyTXT, sawLegacyTXT, "_ans TXT presence")
 
 			if tc.wantSVCB {
+				assert.Equal(t, tc.wantSVCBRequired, svcbRequired,
+					"SVCB Required flag mismatch (true iff ANS_SVCB is the sole style)")
 				assert.Contains(t, svcbValue, tc.wantSVCBPort,
 					"SVCB port SvcParam mismatch")
 				if tc.wantSVCBWk != "" {
