@@ -16,7 +16,8 @@ type DNSRecordStyle string
 const (
 	// DNSRecordStyleSVCB emits Consolidated Approach SVCB records per
 	// RFC 9460 — one row per protocol at the bare FQDN, carrying alpn,
-	// port, wk, and card-sha256 SvcParams.
+	// port, wk, and (when the endpoint has a MetadataHash) card-sha256
+	// SvcParams.
 	DNSRecordStyleSVCB DNSRecordStyle = "ANS_SVCB"
 
 	// DNSRecordStyleTXT emits the original `_ans` TXT shape — one row

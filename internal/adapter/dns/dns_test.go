@@ -259,11 +259,12 @@ func TestLookupVerifier_HTTPSMatch(t *testing.T) {
 //
 // Restricted to IANA-registered SvcParamKeys (alpn + port) because the
 // miekg/dns zone-file parser used by the test fixture rejects symbolic
-// names for the still-provisional Consolidated Approach SvcParams (`wk`,
-// `card-sha256`, `cap`, etc.). Until those keys are IANA-registered per
-// RFC 9460 §6, the verifier-side test exercises the dispatch and
+// names for the still-provisional Consolidated Approach SvcParams
+// (`wk`, `card-sha256`, etc.). Until those keys are IANA-registered
+// per RFC 9460 §6, the verifier-side test exercises the dispatch and
 // matching path with registered keys; the unregistered keys are
-// unit-tested at the domain layer (internal/domain/dnsrecords_test.go).
+// unit-tested at the adapter layer
+// (internal/adapter/discovery/ans/svcb_test.go).
 func TestLookupVerifier_SVCB(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -379,9 +380,10 @@ func TestLookupVerifier_HTTPS_DNSSECFlagPropagates(t *testing.T) {
 }
 
 // TestLookupVerifier_SVCB_DNSSECFlagPropagates is the SVCB-side
-// counterpart to the HTTPS test above. SVCB carries the security-
-// bearing card-sha256 SvcParam (when the RA committed one), so the AD
-// bit is load-bearing for the lifecycle SVCB_DNSSEC_MISMATCH rule.
+// counterpart to the HTTPS test above. SVCB rows carry per-protocol
+// service-binding parameters and the security-bearing card-sha256
+// SvcParam (when the endpoint has a MetadataHash), so the AD bit is
+// load-bearing for the lifecycle SVCB_DNSSEC_MISMATCH rule.
 func TestLookupVerifier_SVCB_DNSSECFlagPropagates(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t)

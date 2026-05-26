@@ -64,7 +64,7 @@ func TestTXTStyle_Records(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := mustReg(t, "agent.example.com", tc.eps, "", nil)
+			reg := mustReg(t, "agent.example.com", tc.eps, nil)
 			records := TXTStyle{}.Records(reg)
 
 			var txtRows int
@@ -110,7 +110,7 @@ func TestTXTStyle_Records(t *testing.T) {
 func TestTXTStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
-		"", &domain.ByocServerCertificate{Fingerprint: "deadbeef"})
+		&domain.ByocServerCertificate{Fingerprint: "deadbeef"})
 
 	records := TXTStyle{}.Records(reg)
 
@@ -132,7 +132,7 @@ func TestTXTStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 // empty record set when ServerCert is also nil. Zero endpoints + nil
 // cert means there's nothing meaningful to publish.
 func TestTXTStyle_NoEndpointsSkipsAllFamilyAndDiscoveryRecords(t *testing.T) {
-	reg := mustReg(t, "agent.example.com", nil, "", nil)
+	reg := mustReg(t, "agent.example.com", nil, nil)
 	records := TXTStyle{}.Records(reg)
 	require.Empty(t, records)
 }
@@ -141,7 +141,7 @@ func TestTXTStyle_NoEndpointsSkipsAllFamilyAndDiscoveryRecords(t *testing.T) {
 // zero endpoints, a registration that has a server cert still gets the
 // TLSA record. (The badge requires endpoints; TLSA does not.)
 func TestTXTStyle_ZeroEndpointsWithCertOnlyEmitsTLSA(t *testing.T) {
-	reg := mustReg(t, "agent.example.com", nil, "",
+	reg := mustReg(t, "agent.example.com", nil,
 		&domain.ByocServerCertificate{Fingerprint: "abcd"})
 	records := TXTStyle{}.Records(reg)
 	require.Len(t, records, 1)

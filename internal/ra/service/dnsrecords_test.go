@@ -40,18 +40,17 @@ func newComputeOnlyService(t *testing.T) *service.RegistrationService {
 	)
 }
 
-func mustReg(t *testing.T, host string, version string, eps []domain.AgentEndpoint, capHash string, cert *domain.ByocServerCertificate, styles []domain.DNSRecordStyle) *domain.AgentRegistration {
+func mustReg(t *testing.T, host string, version string, eps []domain.AgentEndpoint, cert *domain.ByocServerCertificate, styles []domain.DNSRecordStyle) *domain.AgentRegistration {
 	t.Helper()
 	v, err := domain.ParseSemVer(version)
 	require.NoError(t, err)
 	ansName, err := domain.NewAnsName(v, host)
 	require.NoError(t, err)
 	return &domain.AgentRegistration{
-		AnsName:          ansName,
-		Endpoints:        eps,
-		CapabilitiesHash: capHash,
-		ServerCert:       cert,
-		DNSRecordStyles:  styles,
+		AnsName:         ansName,
+		Endpoints:       eps,
+		ServerCert:      cert,
+		DNSRecordStyles: styles,
 	}
 }
 
@@ -62,15 +61,15 @@ func mustReg(t *testing.T, host string, version string, eps []domain.AgentEndpoi
 // styles cross-product (e.g. "SVCB-sole emits no HTTPS RR" — only
 // testable across both adapters' output).
 func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
-	const cardHex = "098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
-	const wantCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
+	const sampleMetadataHash = "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
+	const wantSampleCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
 
 	tests := []struct {
 		name             string
 		styles           []domain.DNSRecordStyle
 		protocol         domain.Protocol
 		agentURL         string
-		capabilitiesHash string
+		metadataHash     string // optional per-endpoint MetadataHash
 		wantHTTPS        bool
 		wantSVCB         bool
 		wantSVCBRequired bool // applies only when wantSVCB is true
@@ -131,16 +130,16 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			wantSVCBPort:     "port=443",
 		},
 		{
-			name:             "svcb_card_sha256_present_when_set",
+			name:             "svcb_card_sha256_from_endpoint_metadata_hash",
 			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com",
-			capabilitiesHash: cardHex,
+			metadataHash:     sampleMetadataHash,
 			wantSVCB:         true,
 			wantSVCBRequired: true,
 			wantSVCBPort:     "port=443",
 			wantSVCBWk:       "wk=agent-card.json",
-			wantSVCBCard:     "card-sha256=" + wantCardBase64,
+			wantSVCBCard:     "card-sha256=" + wantSampleCardBase64,
 		},
 		{
 			name:             "svcb_non_443_port_from_url",
@@ -189,8 +188,12 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := mustReg(t, "agent.example.com", "1.0.0",
-				[]domain.AgentEndpoint{{Protocol: tc.protocol, AgentURL: tc.agentURL}},
-				tc.capabilitiesHash, nil, tc.styles)
+				[]domain.AgentEndpoint{{
+					Protocol:     tc.protocol,
+					AgentURL:     tc.agentURL,
+					MetadataHash: tc.metadataHash,
+				}},
+				nil, tc.styles)
 
 			records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -231,7 +234,7 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 					assert.Contains(t, svcbValue, tc.wantSVCBCard, "SVCB card-sha256 SvcParam mismatch")
 				} else {
 					assert.NotContains(t, svcbValue, "card-sha256",
-						"SVCB MUST NOT carry card-sha256 when CapabilitiesHash is empty")
+						"SVCB MUST NOT carry card-sha256 when endpoint MetadataHash is empty")
 				}
 			}
 		})
@@ -247,7 +250,7 @@ func TestComputeRequiredDNSRecords_UnionDedupesFamilyTrustRecords(t *testing.T) 
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
-		"", &domain.ByocServerCertificate{Fingerprint: "abcdef"},
+		&domain.ByocServerCertificate{Fingerprint: "abcdef"},
 		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
@@ -271,7 +274,7 @@ func TestComputeRequiredDNSRecords_UnionDedupesFamilyTrustRecords(t *testing.T) 
 // handler hitting an aggregate that hasn't reached PENDING_DNS yet).
 func TestComputeRequiredDNSRecords_NoEndpoints(t *testing.T) {
 	svc := newComputeOnlyService(t)
-	reg := mustReg(t, "agent.example.com", "1.0.0", nil, "", nil, nil)
+	reg := mustReg(t, "agent.example.com", "1.0.0", nil, nil, nil)
 	records := svc.ComputeRequiredDNSRecords(reg)
 	assert.Empty(t, records)
 }
@@ -305,7 +308,7 @@ func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
-		"", nil,
+		nil,
 		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyle("UNKNOWN_FUTURE")})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
@@ -327,19 +330,26 @@ func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 // SHA-256, signal a wire-shape regression, and break offline-verifier
 // hashes for in-flight agents at deploy time.
 //
-// The hex constant was captured from the pre-refactor domain function
-// against this exact input. Do NOT regenerate without explicit
-// approval — a change here is a wire-format change, not a test fix.
+// The hex constant was captured against this exact input. Do NOT
+// regenerate without explicit approval — a change here is a
+// wire-format change, not a test fix.
 func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
-	const wantSHA256Hex = "20b7c2c90986deb7891e8637e2be0adf439b3050ecad9d07429f0b707ad05875"
+	const wantSHA256Hex = "ab1efc56fcc5dc088ff0f35d5ed1e0164b8ee70a11116e60f180a55fe794bf64"
 
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.2.3",
 		[]domain.AgentEndpoint{
-			{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},
-			{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+			{
+				Protocol:     domain.ProtocolA2A,
+				AgentURL:     "https://agent.example.com/a2a",
+				MetadataHash: "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27",
+			},
+			{
+				Protocol:     domain.ProtocolMCP,
+				AgentURL:     "https://agent.example.com/mcp",
+				MetadataHash: "SHA256:1111111111111111111111111111111111111111111111111111111111111111",
+			},
 		},
-		"098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27",
 		&domain.ByocServerCertificate{Fingerprint: "deadbeefcafe1234"},
 		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT})
 
@@ -409,7 +419,7 @@ func TestComputeRequiredDNSRecords_RegistryIterationOrderDeterminesEmission(t *t
 
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
-		"", nil,
+		nil,
 		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT})
 
 	defaultOut := defaultSvc.ComputeRequiredDNSRecords(reg)
@@ -469,7 +479,7 @@ func TestComputeRequiredDNSRecords_RegistryGetMissDoesNotPanic(t *testing.T) {
 		inconsistentRegistry{})
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
-		"", nil,
+		nil,
 		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB})
 
 	// IDs() returns SVCB; Get returns (nil, false). Walker must

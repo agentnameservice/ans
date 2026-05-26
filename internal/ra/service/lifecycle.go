@@ -608,8 +608,9 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 		// `DNSSECVerified && !Found` captures "response was signed,
 		// but its content disagreed with what we issued" — the exact
 		// attack we block (an attacker rewrote a record in a signed
-		// zone). Applies to TLSA (cert binding), SVCB (capability
-		// locator with card-sha256), and HTTPS (service binding).
+		// zone). Applies to TLSA (cert binding), SVCB (per-protocol
+		// service binding, including card-sha256 commitments), and
+		// HTTPS (service binding).
 		if r.DNSSECVerified && !r.Found {
 			switch r.Record.Type {
 			case domain.DNSRecordTLSA, domain.DNSRecordSVCB, domain.DNSRecordHTTPS:

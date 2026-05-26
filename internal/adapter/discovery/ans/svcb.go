@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
@@ -32,9 +33,11 @@ import (
 //     80 (http) when the URL omits a port.
 //   - wk: well-known suffix per protocol (agent-card.json for A2A,
 //     mcp.json for MCP, omitted for HTTP-API).
-//   - card-sha256: base64url(reg.CapabilitiesHash) when set; absent
-//     otherwise, in which case verifiers fall back to TOFU on first
-//     Trust Card fetch.
+//   - card-sha256: base64url(raw SHA-256 bytes) sourced from this
+//     endpoint's MetadataHash when the operator submitted one.
+//     Absent when MetadataHash is empty or malformed; in that case
+//     verifiers fetch the metadata document and accept any payload
+//     whose URL matches.
 //
 // `wk` and `card-sha256` are not yet IANA-registered SvcParamKeys;
 // see the consolidated-draft §6 note for the keyNNNNN-form fallback
@@ -48,16 +51,16 @@ func (SVCBStyle) ID() domain.DNSRecordStyle { return domain.DNSRecordStyleSVCB }
 // needs an operator to publish.
 func (s SVCBStyle) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord {
 	fqdn := reg.FQDN()
-	cardSHA := capabilitiesHashBase64URL(reg.CapabilitiesHash)
 	records := make([]domain.ExpectedDNSRecord, 0, len(reg.Endpoints)+2)
 	for _, ep := range reg.Endpoints {
 		alpn := protocolToANSValue(ep.Protocol)
 		wk := wkPathFor(ep.Protocol)
 		port := svcbPortFor(ep.AgentURL)
+		cardSHA := metadataHashToCardSHA256(ep.MetadataHash)
 		// RFC 9460 §2.1 presentation form: unquoted SvcParamValue when the
 		// value has no characters special to the presentation format.
-		// alpn tokens, port digits, well-known path suffixes, and base64url
-		// digests all qualify.
+		// alpn tokens, port digits, well-known path suffixes, and
+		// base64url digests all qualify.
 		value := fmt.Sprintf(`1 . alpn=%s port=%d`, alpn, port)
 		if wk != "" {
 			value += fmt.Sprintf(` wk=%s`, wk)
@@ -111,21 +114,24 @@ func svcbPortFor(agentURL string) int {
 	return 443
 }
 
-// capabilitiesHashBase64URL re-encodes a hex-lowercase SHA-256 digest
-// (the form `AgentRegistration.CapabilitiesHash` carries) into the
-// base64url form (RFC 4648 §5, no padding) the SVCB `card-sha256`
-// SvcParam expects. Empty input returns empty output, which the caller
-// treats as "omit the SvcParam entirely" — agents registered without
-// `agentCardContent` have no committed value to publish.
-func capabilitiesHashBase64URL(hexDigest string) string {
-	if hexDigest == "" {
+// metadataHashToCardSHA256 converts an AgentEndpoint.MetadataHash
+// (`SHA256:<64-hex-chars>`) into the base64url form (RFC 4648 §5,
+// no padding) the SVCB `card-sha256` SvcParam expects. Empty input,
+// missing prefix, or malformed hex all return the empty string,
+// which the caller treats as "omit the SvcParam entirely". The
+// domain layer (endpoint.go's metadataHashPattern) validates the
+// canonical shape on input, so the defensive returns here exist
+// for boundary safety only.
+func metadataHashToCardSHA256(metadataHash string) string {
+	if metadataHash == "" {
 		return ""
 	}
-	raw, err := hex.DecodeString(hexDigest)
+	const prefix = "SHA256:"
+	if !strings.HasPrefix(metadataHash, prefix) {
+		return ""
+	}
+	raw, err := hex.DecodeString(strings.TrimPrefix(metadataHash, prefix))
 	if err != nil || len(raw) == 0 {
-		// Malformed hex is logically equivalent to absence; the RA
-		// stores well-formed hex by construction (helpers.go:
-		// hashAgentCardContent), but defensive on the boundary.
 		return ""
 	}
 	return base64.RawURLEncoding.EncodeToString(raw)

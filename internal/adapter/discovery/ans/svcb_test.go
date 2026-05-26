@@ -10,17 +10,16 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
-func mustReg(t *testing.T, host string, eps []domain.AgentEndpoint, capHash string, cert *domain.ByocServerCertificate) *domain.AgentRegistration {
+func mustReg(t *testing.T, host string, eps []domain.AgentEndpoint, cert *domain.ByocServerCertificate) *domain.AgentRegistration {
 	t.Helper()
 	v, err := domain.NewSemVer(1, 0, 0)
 	require.NoError(t, err)
 	ansName, err := domain.NewAnsName(v, host)
 	require.NoError(t, err)
 	return &domain.AgentRegistration{
-		AnsName:          ansName,
-		Endpoints:        eps,
-		CapabilitiesHash: capHash,
-		ServerCert:       cert,
+		AnsName:    ansName,
+		Endpoints:  eps,
+		ServerCert: cert,
 	}
 }
 
@@ -32,13 +31,12 @@ func TestSVCBStyle_ID(t *testing.T) {
 // port / wk / card-sha256) the consolidated-draft fixes, plus the
 // always-Required default the service walker post-processes.
 func TestSVCBStyle_Records(t *testing.T) {
-	const cardHex = "098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
-	const wantCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
+	const sampleMetadataHash = "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
+	const wantSampleCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
 
 	tests := []struct {
 		name        string
 		eps         []domain.AgentEndpoint
-		capHash     string
 		wantCount   int // svcb rows expected
 		wantPort    string
 		wantAlpn    string
@@ -77,16 +75,19 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantWk:    "", // HTTP-API has no per-protocol metadata file
 		},
 		{
-			name: "card_sha256_present_when_capabilities_hash_set",
+			name: "card_sha256_present_when_endpoint_metadata_hash_set",
 			eps: []domain.AgentEndpoint{
-				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"},
+				{
+					Protocol:     domain.ProtocolA2A,
+					AgentURL:     "https://agent.example.com",
+					MetadataHash: sampleMetadataHash,
+				},
 			},
-			capHash:   cardHex,
 			wantCount: 1,
 			wantPort:  "port=443",
 			wantAlpn:  "alpn=a2a",
 			wantWk:    "wk=agent-card.json",
-			wantCard:  "card-sha256=" + wantCardBase64,
+			wantCard:  "card-sha256=" + wantSampleCardBase64,
 		},
 		{
 			name: "non_443_port_from_url_authority",
@@ -134,7 +135,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			reg := mustReg(t, "agent.example.com", tc.eps, tc.capHash, nil)
+			reg := mustReg(t, "agent.example.com", tc.eps, nil)
 			records := SVCBStyle{}.Records(reg)
 
 			var svcbRows []domain.ExpectedDNSRecord
@@ -172,7 +173,8 @@ func TestSVCBStyle_Records(t *testing.T) {
 			if tc.wantCard != "" {
 				assert.Contains(t, r.Value, tc.wantCard)
 			} else {
-				assert.NotContains(t, r.Value, "card-sha256", "card-sha256 MUST be absent when CapabilitiesHash is empty")
+				assert.NotContains(t, r.Value, "card-sha256",
+					"card-sha256 MUST be absent when endpoint MetadataHash is empty")
 			}
 		})
 	}
@@ -185,7 +187,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 func TestSVCBStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
-		"", &domain.ByocServerCertificate{Fingerprint: "deadbeef"})
+		&domain.ByocServerCertificate{Fingerprint: "deadbeef"})
 
 	records := SVCBStyle{}.Records(reg)
 
@@ -202,6 +204,34 @@ func TestSVCBStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	}
 	assert.True(t, sawBadge, "SVCB style must include the family `_ans-badge` record")
 	assert.True(t, sawTLSA, "SVCB style must include the TLSA record when ServerCert is set")
+}
+
+func TestMetadataHashToCardSHA256(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{
+			name: "valid_sha256_prefixed_hex_lowers_to_base64url",
+			in:   "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27",
+			want: "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc",
+		},
+		{
+			name: "all_zeros_round_trip",
+			in:   "SHA256:0000000000000000000000000000000000000000000000000000000000000000",
+			want: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+		},
+		{name: "empty_input_empty_output", in: "", want: ""},
+		{name: "missing_sha256_prefix_returns_empty", in: "098d650cc6d2", want: ""},
+		{name: "wrong_prefix_returns_empty", in: "SHA1:abc", want: ""},
+		{name: "malformed_hex_after_prefix_returns_empty", in: "SHA256:not hex", want: ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, metadataHashToCardSHA256(tc.in))
+		})
+	}
 }
 
 func TestSVCBPortFor(t *testing.T) {
@@ -221,32 +251,6 @@ func TestSVCBPortFor(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, tc.want, svcbPortFor(tc.in))
-		})
-	}
-}
-
-func TestCapabilitiesHashBase64URL(t *testing.T) {
-	tests := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{
-			name: "live_webmesh_trust_card_digest",
-			in:   "098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27",
-			want: "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc",
-		},
-		{
-			name: "all_zeros",
-			in:   "0000000000000000000000000000000000000000000000000000000000000000",
-			want: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
-		},
-		{name: "empty_input_empty_output", in: "", want: ""},
-		{name: "malformed_hex_returns_empty", in: "not hex", want: ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, capabilitiesHashBase64URL(tc.in))
 		})
 	}
 }

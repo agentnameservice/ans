@@ -1031,9 +1031,9 @@ components:
         registration. Used as the element type of dnsRecordStyles[].
 
         - ANS_SVCB: Consolidated Approach SVCB rows at the bare FQDN
-          per RFC 9460. One row per protocol carrying alpn, port, and
-          capability-locator SvcParams (wk, card-sha256). The
-          recommended default for new integrations.
+          per RFC 9460. One row per protocol carrying alpn, port, wk,
+          and (when the endpoint has a metadataHash) card-sha256
+          SvcParams. The recommended default for new integrations.
         - ANS_TXT: original `_ans` TXT shape (one row per protocol),
           supported indefinitely for operators with existing zone-edit
           tooling that targets `_ans.{fqdn}`. Emits an HTTPS RR at
