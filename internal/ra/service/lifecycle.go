@@ -456,7 +456,7 @@ type DNSMismatch struct {
 }
 
 // VerifyDNS checks the operator's authoritative nameserver for the
-// required records (computed by domain.ComputeRequiredDNSRecords) and
+// required records (computed by s.ComputeRequiredDNSRecords) and
 // advances the registration to ACTIVE on success.
 //
 // On success, emits an AGENT_ACTIVE event whose attestations carry
@@ -502,7 +502,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		reg.ServerCert = byoc
 	}
 
-	expected := domain.ComputeRequiredDNSRecords(reg)
+	expected := s.ComputeRequiredDNSRecords(reg)
 
 	mismatches, perRecord, err := s.verifyDNSRecords(ctx, reg.FQDN(), expected)
 	if err != nil {
@@ -809,7 +809,7 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return &RevokeResult{
 			Registration:       reg,
 			RevokedAt:          now,
-			DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg),
+			DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
 		}, nil
 	}
 
@@ -923,6 +923,6 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 	return &RevokeResult{
 		Registration:       reg,
 		RevokedAt:          now,
-		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg),
+		DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
 	}, nil
 }

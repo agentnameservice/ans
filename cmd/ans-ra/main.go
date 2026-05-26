@@ -34,6 +34,7 @@ import (
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	"github.com/godaddy/ans/internal/adapter/tlclient"
 	"github.com/godaddy/ans/internal/config"
+	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/handler"
 	ramiddleware "github.com/godaddy/ans/internal/ra/middleware"
@@ -158,9 +159,22 @@ func run(cfgPath string) error {
 	// Event bus.
 	bus := eventbus.NewInMemoryBus(logger)
 
+	// Discovery registry: composes the bundled ANS-family port.DiscoveryStyle
+	// adapters (ANS_TXT, ANS_SVCB) the V2 register / verify-dns paths walk
+	// to compute `dnsRecordsProvisioned[]`. Insertion order here pins the
+	// canonical-bytes emission order for the §4.4.2 union case
+	// (`[TXT×N, HTTPS, SVCB×N, badge, TLSA]`).
+	discoveryReg, err := service.NewDefaultDiscoveryRegistry()
+	if err != nil {
+		return fmt.Errorf("init discovery registry: %w", err)
+	}
+	if err := assertRegistryDomainCoherence(discoveryReg); err != nil {
+		return fmt.Errorf("init discovery registry: %w", err)
+	}
+
 	// Services.
 	regSvc := service.NewRegistrationService(
-		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db,
+		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      signerKeyID,
@@ -392,6 +406,40 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 // auth.OIDCProvider since they share Middleware().
 type providerWithAnonymous interface {
 	Middleware() func(http.Handler) http.Handler
+}
+
+// assertRegistryDomainCoherence verifies the discovery registry's
+// wired styles are exactly the set domain advertises as valid via
+// domain.ValidDNSRecordStyles(). Drift in either direction is a
+// startup misconfig: registry-only style means request-side validation
+// rejects it (operator error noise); domain-only style means
+// applyDNSRecordStyles accepts a value verify-dns can never satisfy
+// (silent broken-by-omission). Both fail server start.
+func assertRegistryDomainCoherence(reg port.DiscoveryRegistry) error {
+	registryIDs := make(map[string]bool)
+	for _, id := range reg.IDs() {
+		registryIDs[string(id)] = true
+	}
+	domainIDs := make(map[string]bool)
+	for _, s := range domain.ValidDNSRecordStyles() {
+		domainIDs[s] = true
+	}
+	var registryOnly, domainOnly []string
+	for id := range registryIDs {
+		if !domainIDs[id] {
+			registryOnly = append(registryOnly, id)
+		}
+	}
+	for id := range domainIDs {
+		if !registryIDs[id] {
+			domainOnly = append(domainOnly, id)
+		}
+	}
+	if len(registryOnly) > 0 || len(domainOnly) > 0 {
+		return fmt.Errorf("drift between registry.IDs() and domain.ValidDNSRecordStyles(): registry-only=%v, domain-only=%v",
+			registryOnly, domainOnly)
+	}
+	return nil
 }
 
 // selectDNSVerifier returns the configured DNS adapter. Returns a

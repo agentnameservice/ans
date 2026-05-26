@@ -129,18 +129,19 @@ type OutboxPayload struct {
 // sqlx.Tx, cloud adapters can use TransactWriteItems-style atomic
 // batches.
 type RegistrationService struct {
-	agents      port.AgentStore
-	endpoints   port.EndpointStore
-	certs       port.CertificateStore
-	byoc        port.ByocCertificateStore
-	renewals    port.RenewalStore
-	validator   port.CertificateValidator
-	identityCA  port.IdentityCertificateAuthority
-	serverCA    port.ServerCertificateAuthority // optional; nil = CSR path rejected
-	bus         port.EventBus
-	outbox      OutboxEnqueuer
-	uow         port.UnitOfWork
-	dnsVerifier port.DNSVerifier
+	agents            port.AgentStore
+	endpoints         port.EndpointStore
+	certs             port.CertificateStore
+	byoc              port.ByocCertificateStore
+	renewals          port.RenewalStore
+	validator         port.CertificateValidator
+	identityCA        port.IdentityCertificateAuthority
+	serverCA          port.ServerCertificateAuthority // optional; nil = CSR path rejected
+	bus               port.EventBus
+	outbox            OutboxEnqueuer
+	uow               port.UnitOfWork
+	dnsVerifier       port.DNSVerifier
+	discoveryRegistry port.DiscoveryRegistry
 	// signer is the KeyManager + keyID + raID tuple used to sign
 	// outbox events. When nil, events are still persisted but without
 	// a signature — this is only valid for tests; production configs
@@ -159,6 +160,18 @@ type EventSigner struct {
 
 // NewRegistrationService constructs a RegistrationService. Dependencies
 // are injected per SOLID; tests substitute fakes.
+//
+// discoveryRegistry is required at construction and the constructor
+// panics on nil — a missing registry would silently emit zero
+// `dnsRecordsProvisioned[]` and accept any DNS state at verify-dns
+// (trust-root corruption masquerading as graceful degradation), so
+// fail-loud at construction is the only correct policy. Construction
+// runs at process start, never on a request path, so the no-panics-in-
+// request-paths rule (CLAUDE.md) is upheld. Production builds wire the
+// bundled ANS-family registry in cmd/ans-ra/main.go via
+// registry.New(ans.TXTStyle{}, ans.SVCBStyle{}); tests build the same
+// registry through service.NewDefaultDiscoveryRegistry. There is no
+// optional builder.
 func NewRegistrationService(
 	agents port.AgentStore,
 	endpoints port.EndpointStore,
@@ -170,19 +183,24 @@ func NewRegistrationService(
 	bus port.EventBus,
 	outbox OutboxEnqueuer,
 	uow port.UnitOfWork,
+	discoveryRegistry port.DiscoveryRegistry,
 ) *RegistrationService {
+	if discoveryRegistry == nil {
+		panic("service.NewRegistrationService: discoveryRegistry is required (nil interface — wire registry.New(...) at construction)")
+	}
 	return &RegistrationService{
-		agents:     agents,
-		endpoints:  endpoints,
-		certs:      certs,
-		byoc:       byoc,
-		renewals:   renewals,
-		validator:  validator,
-		identityCA: identityCA,
-		bus:        bus,
-		outbox:     outbox,
-		uow:        uow,
-		clock:      time.Now,
+		agents:            agents,
+		endpoints:         endpoints,
+		certs:             certs,
+		byoc:              byoc,
+		renewals:          renewals,
+		validator:         validator,
+		identityCA:        identityCA,
+		bus:               bus,
+		outbox:            outbox,
+		uow:               uow,
+		discoveryRegistry: discoveryRegistry,
+		clock:             time.Now,
 	}
 }
 

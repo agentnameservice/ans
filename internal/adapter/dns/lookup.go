@@ -267,9 +267,9 @@ func formatHTTPSValue(s *dns.SVCB) string {
 // verifySVCB checks for a Consolidated Approach SVCB record (RFC 9460)
 // at the agent's bare FQDN. Multiple SVCB records can share one RRset
 // name distinguished by alpn, and the Consolidated Approach explicitly
-// designs for multi-spec coexistence in a single record (DNS-AID, ANS,
-// and other agentic specs sharing one SVCB row, distinguished by their
-// own SvcParamKeys). Verification therefore implements RFC 9460 §8
+// designs for multi-family coexistence in a single record — sibling
+// families can share one SVCB row, distinguished by their own
+// SvcParamKeys. Verification therefore implements RFC 9460 §8
 // unknown-key ignore semantics as a *subset* match: priority and
 // target must equal the expected value exactly, every expected
 // SvcParam must be present in the live record with an equal value,

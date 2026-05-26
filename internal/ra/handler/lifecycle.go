@@ -91,7 +91,7 @@ func (h *LifecycleHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, mapAgentDetails(res, r))
+	WriteJSON(w, http.StatusOK, mapAgentDetails(res, r, h.svc))
 }
 
 // ----- GET /v2/ans/agents/{agentId}/certificates/identity -----
