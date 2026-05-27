@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/adapter/cert"
+	dnsadapter "github.com/godaddy/ans/internal/adapter/dns"
 	"github.com/godaddy/ans/internal/adapter/eventbus"
 	"github.com/godaddy/ans/internal/adapter/keymanager"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
@@ -366,6 +367,86 @@ func newRegFixture(t *testing.T) *regFixture {
 	}
 }
 
+func newRegFixtureWithProvisioner(t *testing.T) *regFixture {
+	t.Helper()
+	dir := t.TempDir()
+
+	db, err := sqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	agents := sqlite.NewAgentStore(db)
+	endpoints := sqlite.NewEndpointStore(db)
+	certsStore := sqlite.NewCertificateStore(db)
+	byoc := sqlite.NewByocCertificateStore(db)
+	renewals := sqlite.NewRenewalStore(db)
+	outbox := sqlite.NewOutboxStore(db)
+
+	identityCA, err := cert.NewSelfCA(dir+"/ca", "Test CA", 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validator := cert.NewX509Validator(cert.WithSkipChainVerify())
+	bus := eventbus.NewInMemoryBus(zerolog.Nop())
+
+	km, err := keymanager.NewFileKeyManager(dir + "/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := km.EnsureKey(context.Background(), "ra-signer", port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+
+	serverCA, err := cert.NewServerSelfCA(dir+"/server-ca", "Test Server CA", 365)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	svc := service.NewRegistrationService(
+		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db,
+	).WithSigner(service.EventSigner{
+		KeyManager: km,
+		KeyID:      "ra-signer",
+		RaID:       "ra-test",
+	}).WithServerCertificateAuthority(serverCA).
+		WithDNSProvisioner(dnsadapter.NewNoopProvisioner())
+
+	semver, _ := domain.ParseSemVer("1.0.0")
+	ansName, _ := domain.NewAnsName(semver, "agent.example.com")
+	csrPEM := testCSR(t, ansName.String())
+	serverCSR := testServerCSR(t, ansName.FQDN())
+
+	return &regFixture{
+		svc:         svc,
+		outboxStore: outbox,
+		uow:         db,
+		agents:      agents,
+		endpoints:   endpoints,
+		certs:       certsStore,
+		byoc:        byoc,
+		renewals:    renewals,
+		validator:   validator,
+		identityCA:  identityCA,
+		serverCA:    serverCA,
+		bus:         bus,
+		req: service.RegisterRequest{
+			OwnerID:     "owner-1",
+			AnsName:     ansName,
+			DisplayName: "test-agent",
+			Description: "a test agent",
+			Endpoints: []domain.AgentEndpoint{{
+				Protocol:   domain.Protocol("MCP"),
+				AgentURL:   "https://agent.example.com/mcp",
+				Transports: []domain.Transport{domain.Transport("SSE")},
+			}},
+			IdentityCSRPEM: csrPEM,
+			ServerCsrPEM:   serverCSR,
+		},
+	}
+}
+
 // testServerCSR builds a server-shaped CSR (DNS SAN matching the
 // agent FQDN) suitable for the server-cert issuance path.
 func testServerCSR(t *testing.T, fqdn string) string {
@@ -405,6 +486,34 @@ func testCSR(t *testing.T, uri string) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+}
+
+// TestRegistration_AutoProvision wires a DNSProvisioner and verifies
+// that RegisterAgent activates the agent in a single call (skipping
+// the manual verify-acme / verify-dns steps).
+func TestRegistration_AutoProvision(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixtureWithProvisioner(t)
+
+	semver, _ := domain.ParseSemVer("5.0.0")
+	an, _ := domain.NewAnsName(semver, "autoprov.example.com")
+	req := fx.req
+	req.AnsName = an
+	req.IdentityCSRPEM = testCSR(t, an.String())
+	req.ServerCsrPEM = testServerCSR(t, an.FQDN())
+	req.Endpoints = []domain.AgentEndpoint{{
+		Protocol:   domain.Protocol("MCP"),
+		AgentURL:   "https://autoprov.example.com/mcp",
+		Transports: []domain.Transport{domain.Transport("SSE")},
+	}}
+
+	resp, err := fx.svc.RegisterAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("RegisterAgent with auto-provision: %v", err)
+	}
+	if resp.Registration.Status != domain.StatusActive {
+		t.Fatalf("status: got %q want ACTIVE", resp.Registration.Status)
+	}
 }
 
 func parseTestURI(t *testing.T, s string) []*url.URL {

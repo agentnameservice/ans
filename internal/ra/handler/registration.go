@@ -125,13 +125,15 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse version + host into an AnsName.
+	// Parse version + host into an AnsName. The service may append
+	// a domain suffix to the host (e.g. "my-agent" → "my-agent.agents.example.com").
+	qualifiedHost := h.svc.QualifyHost(req.AgentHost)
 	semver, err := domain.ParseSemVer(req.Version)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
-	ansName, err := domain.NewAnsName(semver, req.AgentHost)
+	ansName, err := domain.NewAnsName(semver, qualifiedHost)
 	if err != nil {
 		WriteError(w, err)
 		return

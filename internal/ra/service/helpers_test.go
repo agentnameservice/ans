@@ -201,3 +201,71 @@ func selfSignedCertPEM(t *testing.T) string {
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
+
+// ----- WithTLPublicBaseURL / TLPublicBaseURL -----
+
+func TestTLPublicBaseURL(t *testing.T) {
+	svc := &RegistrationService{}
+	if svc.TLPublicBaseURL() != "" {
+		t.Error("empty by default")
+	}
+	svc.WithTLPublicBaseURL("https://tl.example.com")
+	if svc.TLPublicBaseURL() != "https://tl.example.com" {
+		t.Errorf("got %q", svc.TLPublicBaseURL())
+	}
+}
+
+// ----- WithDNSProvisioner -----
+
+func TestWithDNSProvisioner(t *testing.T) {
+	svc := &RegistrationService{}
+	svc.WithDNSProvisioner(nil)
+	if svc.dnsProvisioner != nil {
+		t.Error("expected nil provisioner")
+	}
+}
+
+// ----- DomainSuffix -----
+
+func TestDomainSuffix(t *testing.T) {
+	svc := &RegistrationService{}
+	if svc.DomainSuffix() != "" {
+		t.Error("empty by default")
+	}
+	svc.WithDomainSuffix("agents.example.com")
+	if svc.DomainSuffix() != "agents.example.com" {
+		t.Errorf("got %q", svc.DomainSuffix())
+	}
+}
+
+// ----- QualifyHost -----
+
+func TestQualifyHost(t *testing.T) {
+	tests := []struct {
+		name   string
+		suffix string
+		host   string
+		want   string
+	}{
+		{"empty suffix passthrough", "", "my-agent.example.com", "my-agent.example.com"},
+		{"suffix applied", "agents.example.com", "my-agent", "my-agent.agents.example.com"},
+		{"already qualified", "agents.example.com", "my-agent.agents.example.com", "my-agent.agents.example.com"},
+		{"case insensitive match", "AGENTS.EXAMPLE.COM", "my-agent.agents.example.com", "my-agent.agents.example.com"},
+		{"leading dot in suffix normalized", ".agents.example.com", "my-agent", "my-agent.agents.example.com"},
+		{"trailing dot in suffix normalized", "agents.example.com.", "my-agent", "my-agent.agents.example.com"},
+		{"trailing dot on host normalized", "agents.example.com", "my-agent.", "my-agent.agents.example.com"},
+		{"host equals suffix", "agents.example.com", "agents.example.com", "agents.example.com"},
+		{"uppercase host lowercased", "agents.example.com", "MY-AGENT", "my-agent.agents.example.com"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := &RegistrationService{}
+			svc.WithDomainSuffix(tc.suffix)
+			got := svc.QualifyHost(tc.host)
+			if got != tc.want {
+				t.Errorf("QualifyHost(%q) with suffix %q = %q, want %q",
+					tc.host, tc.suffix, got, tc.want)
+			}
+		})
+	}
+}

@@ -24,6 +24,19 @@ dns:
   # the resulting TL attestation.
   type: noop
   # server: "127.0.0.1:15353"
+  #
+  # provisioner: auto-create/delete DNS records via RFC 2136 DDNS.
+  # When configured, VerifyDNS provisions records before verifying
+  # them, and Revoke cleans them up.
+  # provisioner:
+  #   type: ddns
+  #   ddns:
+  #     server: "127.0.0.1:53"
+  #     zone: "example.com."
+  #     tsig-name: "ans-updater."
+  #     tsig-secret: "base64-encoded-secret"
+  #     tsig-algorithm: "hmac-sha256"
+  #     timeout: 5s
 
 keys:
   type: file

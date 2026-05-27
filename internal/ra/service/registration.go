@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -123,21 +124,21 @@ type OutboxPayload struct {
 // sqlx.Tx, cloud adapters can use TransactWriteItems-style atomic
 // batches.
 type RegistrationService struct {
-	agents      port.AgentStore
-	endpoints   port.EndpointStore
-	certs       port.CertificateStore
-	byoc        port.ByocCertificateStore
-	renewals    port.RenewalStore
-	validator   port.CertificateValidator
-	identityCA  port.IdentityCertificateAuthority
-	serverCA    port.ServerCertificateAuthority // optional; nil = CSR path rejected
-	bus         port.EventBus
-	outbox      OutboxEnqueuer
-	uow         port.UnitOfWork
-	dnsVerifier port.DNSVerifier
-	// tlPublicBaseURL is the externally-reachable Transparency Log URL
-	// used in _ans-badge DNS records (e.g. "https://tl.example.org").
+	agents          port.AgentStore
+	endpoints       port.EndpointStore
+	certs           port.CertificateStore
+	byoc            port.ByocCertificateStore
+	renewals        port.RenewalStore
+	validator       port.CertificateValidator
+	identityCA      port.IdentityCertificateAuthority
+	serverCA        port.ServerCertificateAuthority // optional; nil = CSR path rejected
+	bus             port.EventBus
+	outbox          OutboxEnqueuer
+	uow             port.UnitOfWork
+	dnsVerifier     port.DNSVerifier
+	dnsProvisioner  port.DNSProvisioner
 	tlPublicBaseURL string
+	domainSuffix    string
 	// signer is the KeyManager + keyID + raID tuple used to sign
 	// outbox events. When nil, events are still persisted but without
 	// a signature — this is only valid for tests; production configs
@@ -209,6 +210,14 @@ func (s *RegistrationService) WithDNSVerifier(v port.DNSVerifier) *RegistrationS
 	return s
 }
 
+// WithDNSProvisioner wires a DNSProvisioner that auto-creates and
+// deletes DNS records during VerifyDNS and Revoke. When nil (or
+// never called), operators manage DNS manually.
+func (s *RegistrationService) WithDNSProvisioner(p port.DNSProvisioner) *RegistrationService {
+	s.dnsProvisioner = p
+	return s
+}
+
 // WithTLPublicBaseURL sets the externally-reachable Transparency Log
 // URL used in _ans-badge DNS TXT records. Without this, badge records
 // fall back to the agent's own endpoint URL.
@@ -220,6 +229,36 @@ func (s *RegistrationService) WithTLPublicBaseURL(publicBaseURL string) *Registr
 // TLPublicBaseURL returns the configured public TL base URL.
 func (s *RegistrationService) TLPublicBaseURL() string {
 	return s.tlPublicBaseURL
+}
+
+// WithDomainSuffix sets the domain suffix appended to agent hostnames
+// at registration time. When set, agents submit a short name
+// ("my-agent") and the RA constructs the FQDN ("my-agent.example.com").
+// The suffix is normalized: leading/trailing dots are trimmed and the
+// value is lowercased.
+func (s *RegistrationService) WithDomainSuffix(suffix string) *RegistrationService {
+	s.domainSuffix = strings.ToLower(strings.Trim(suffix, "."))
+	return s
+}
+
+// DomainSuffix returns the configured domain suffix.
+func (s *RegistrationService) DomainSuffix() string {
+	return s.domainSuffix
+}
+
+// QualifyHost appends the domain suffix to a hostname if configured
+// and the host doesn't already end with it. Comparison is
+// case-insensitive.
+func (s *RegistrationService) QualifyHost(host string) string {
+	if s.domainSuffix == "" {
+		return host
+	}
+	normalized := strings.ToLower(strings.Trim(host, "."))
+	suffix := "." + s.domainSuffix
+	if strings.HasSuffix(normalized, suffix) || normalized == s.domainSuffix {
+		return normalized
+	}
+	return normalized + suffix
 }
 
 // RegisterAgent implements the V2 registration flow:
@@ -333,6 +372,14 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	}
 	reg.ServerCSR = pendingServerCSR
 
+	// When a DNS provisioner is configured, the RA controls the zone
+	// and domain ownership proof is unnecessary. Issue certs immediately
+	// and start at PENDING_DNS so the operator only needs to call
+	// verify-dns (which auto-provisions records).
+	if s.dnsProvisioner != nil {
+		return s.registerWithAutoProvision(ctx, reg, byocCert, pendingServerCSR, now)
+	}
+
 	// Generate the ACME DNS-01 challenge token + expiry. The only
 	// DNS action the operator should take before verify-acme.
 	dns01, _, err := generateChallengeTokens()
@@ -347,14 +394,6 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	}
 
 	// Persist the aggregate + CSR rows + BYOC cert (if any) atomically.
-	// Each Save participates in the same transaction via the scoped
-	// txCtx the UnitOfWork hands fn — partial failure rolls the whole
-	// batch back so a crash mid-chain can never leave an agent row
-	// without its endpoints, identity CSR, or server cert.
-	//
-	// No signed certs yet: verify-acme signs the identity CSR and
-	// the server CSR (CSR path); BYOC is already a cert and doesn't
-	// need signing here.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
 		if err := s.agents.Save(txCtx, reg); err != nil {
 			return err
@@ -384,26 +423,120 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		return nil, err
 	}
 
-	// Publish in-process events AFTER the commit. The bus is
-	// fire-and-forget for cross-cutting handlers (audit, metrics);
-	// publishing inside the transaction would mean a downstream
-	// subscriber that takes a long time, errors, or blocks could
-	// roll back state that's already durable.
 	for _, ev := range reg.ClearEvents() {
 		if err := s.bus.Publish(ctx, ev); err != nil {
 			return nil, err
 		}
 	}
 
-	// Register-time 202 carries NO `dnsRecords[]`. The only DNS
-	// action the operator can take before verify-acme is installing
-	// the ACME challenge TXT record, which lives in `challenges[]`.
-	// Production DNS records (TRUST / BADGE / DISCOVERY / TLSA)
-	// don't appear until after verify-acme issues certs — the TLSA
-	// fingerprint can't exist before the server cert does.
 	return &RegisterResponse{
 		Registration: reg,
 		DNSRecords:   nil,
+	}, nil
+}
+
+// registerWithAutoProvision handles registration when a DNS provisioner
+// is configured. Issues certs, provisions DNS records, and activates
+// the agent in a single registration call.
+func (s *RegistrationService) registerWithAutoProvision(
+	ctx context.Context,
+	reg *domain.AgentRegistration,
+	byocCert *domain.ByocServerCertificate,
+	pendingServerCSR *domain.AgentCSR,
+	now time.Time,
+) (*RegisterResponse, error) {
+	// Issue identity certificate.
+	issuedID, err := s.identityCA.IssueIdentityCertificate(ctx, reg.IdentityCSR.CSRContent, reg.AnsName.String())
+	if err != nil {
+		return nil, domain.NewInternalError("CERT_ISSUE_FAILED", "failed to issue identity cert", err)
+	}
+	signedID, err := reg.IdentityCSR.MarkSigned(now)
+	if err != nil {
+		return nil, err
+	}
+	reg.IdentityCSR = &signedID
+	storedID := &domain.StoredCertificate{
+		CSRID:               signedID.CSRID,
+		CertificateType:     domain.CertTypeIdentity,
+		CertificatePEM:      issuedID.CertPEM,
+		ChainPEM:            issuedID.ChainPEM,
+		Status:              domain.CertStatusValid,
+		IssueTimestamp:      issuedID.IssuedAt,
+		ExpirationTimestamp: issuedID.ExpiresAt,
+	}
+
+	// Issue server certificate (CSR path).
+	if pendingServerCSR != nil {
+		var err error
+		byocCert, *pendingServerCSR, err = s.signServerCSRForVerifyACME(ctx, reg, pendingServerCSR, now)
+		if err != nil {
+			return nil, err
+		}
+		reg.ServerCert = byocCert
+		reg.ServerCSR = pendingServerCSR
+	}
+
+	// Transition through PENDING_DNS → ACTIVE.
+	if err := reg.AdvanceToPendingDNS(); err != nil {
+		return nil, err
+	}
+
+	// Provision DNS records via DDNS.
+	expected := domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL)
+	if err := s.dnsProvisioner.ProvisionRecords(ctx, reg.FQDN(), expected); err != nil {
+		return nil, fmt.Errorf("dns provision: %w", err)
+	}
+
+	// Activate.
+	if err := reg.Activate(now); err != nil {
+		return nil, err
+	}
+
+	// Persist agent + certs + TL event atomically.
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		if err := s.agents.Save(txCtx, reg); err != nil {
+			return err
+		}
+		if err := s.endpoints.Save(txCtx, &domain.AgentEndpoints{
+			AgentID: reg.AgentID, Endpoints: reg.Endpoints,
+		}); err != nil {
+			return err
+		}
+		if err := s.certs.SaveCSR(txCtx, reg.AgentID, &signedID); err != nil {
+			return err
+		}
+		if err := s.certs.SaveIdentityCertificate(txCtx, reg.AgentID, storedID); err != nil {
+			return err
+		}
+		if pendingServerCSR != nil {
+			if err := s.certs.SaveCSR(txCtx, reg.AgentID, pendingServerCSR); err != nil {
+				return err
+			}
+		}
+		if byocCert != nil {
+			if err := s.byoc.Save(txCtx, reg.AgentID, byocCert); err != nil {
+				return err
+			}
+		}
+		// Emit AGENT_REGISTERED event to the TL.
+		inner, err := s.buildAgentRegisteredEvent(txCtx, reg, expected, nil, now)
+		if err != nil {
+			return err
+		}
+		return s.enqueueTLEvent(txCtx, string(event.TypeAgentRegistered), reg, inner, now)
+	}); err != nil {
+		return nil, err
+	}
+
+	for _, ev := range reg.ClearEvents() {
+		if err := s.bus.Publish(ctx, ev); err != nil {
+			return nil, err
+		}
+	}
+
+	return &RegisterResponse{
+		Registration: reg,
+		DNSRecords:   expected,
 	}, nil
 }
 

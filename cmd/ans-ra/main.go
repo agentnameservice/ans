@@ -146,8 +146,14 @@ func run(cfgPath string) error {
 	// remove WithSkipChainVerify in its config factory.
 	validator := cert.NewX509Validator(cert.WithSkipChainVerify())
 
-	// DNS verifier.
+	// DNS verifier + optional provisioner.
 	var dnsVerifier = selectDNSVerifier(cfg)
+	var dnsProvisioner = selectDNSProvisioner(cfg)
+
+	logger.Info().
+		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
+		Str("tlBaseURL", cfg.TLClient.BaseURL).
+		Msg("transparency log endpoints configured")
 
 	logger.Info().
 		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
@@ -171,8 +177,10 @@ func run(cfgPath string) error {
 		KeyID:      signerKeyID,
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
+		WithDNSProvisioner(dnsProvisioner).
 		WithServerCertificateAuthority(serverCA).
-		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL)
+		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL).
+		WithDomainSuffix(cfg.Registration.DomainSuffix)
 
 	// HTTP.
 	r := chi.NewRouter()
@@ -417,5 +425,23 @@ func selectDNSVerifier(cfg *config.RAConfig) port.DNSVerifier {
 		return dns.NewLookupVerifier(opts...)
 	default:
 		return dns.NewNoopVerifier()
+	}
+}
+
+func selectDNSProvisioner(cfg *config.RAConfig) port.DNSProvisioner {
+	if cfg.DNS.Provisioner == nil || cfg.DNS.Provisioner.Type == "" {
+		return nil
+	}
+	switch cfg.DNS.Provisioner.Type {
+	case "ddns":
+		d := cfg.DNS.Provisioner.DDNS
+		return dns.NewDDNSProvisioner(
+			dns.WithDDNSServer(d.Server),
+			dns.WithDDNSZone(d.Zone),
+			dns.WithTSIG(d.TSIGName, d.TSIGSecret, d.TSIGAlgorithm),
+			dns.WithDDNSTimeout(d.Timeout),
+		)
+	default:
+		return nil
 	}
 }
