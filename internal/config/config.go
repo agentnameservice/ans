@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -139,6 +140,10 @@ type StoreSQLite struct {
 type TLClient struct {
 	// BaseURL is the TL's listen URL, e.g. "http://localhost:18081".
 	BaseURL string `koanf:"base-url"`
+	// PublicBaseURL is the TL's externally-reachable URL used in
+	// _ans-badge DNS TXT records. Required — must be an https:// URL
+	// with no query string, fragment, or userinfo.
+	PublicBaseURL string `koanf:"public-base-url"`
 	// APIKey is the bearer token the TL's static auth accepts.
 	APIKey string `koanf:"api-key"`
 	// Timeout is the per-request HTTP timeout.
@@ -342,6 +347,9 @@ func (c *RAConfig) Validate() error {
 	if c.TLClient.BaseURL == "" {
 		return errors.New("tl-client.base-url is required")
 	}
+	if err := validatePublicBaseURL(c.TLClient.PublicBaseURL); err != nil {
+		return err
+	}
 	if c.TLClient.Timeout <= 0 {
 		c.TLClient.Timeout = 10 * time.Second
 	}
@@ -409,6 +417,32 @@ func validateStore(s *Store) error {
 	}
 	if s.SQLite == nil || s.SQLite.Path == "" {
 		return errors.New("store.sqlite.path is required")
+	}
+	return nil
+}
+
+func validatePublicBaseURL(raw string) error {
+	if raw == "" {
+		return errors.New("tl-client.public-base-url is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("tl-client.public-base-url: %w", err)
+	}
+	if u.Scheme != "https" {
+		return fmt.Errorf("tl-client.public-base-url must use https scheme, got %q", u.Scheme)
+	}
+	if u.Host == "" {
+		return errors.New("tl-client.public-base-url: missing host")
+	}
+	if u.User != nil {
+		return errors.New("tl-client.public-base-url: userinfo not allowed")
+	}
+	if u.RawQuery != "" {
+		return errors.New("tl-client.public-base-url: query string not allowed")
+	}
+	if u.Fragment != "" {
+		return errors.New("tl-client.public-base-url: fragment not allowed")
 	}
 	return nil
 }

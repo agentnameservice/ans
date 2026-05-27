@@ -246,7 +246,7 @@ func (h *V1RegistrationHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, mapV1AgentDetail(res.Registration, res.Endpoints, r))
+	WriteJSON(w, http.StatusOK, mapV1AgentDetail(res.Registration, res.Endpoints, r, h.svc.TLPublicBaseURL()))
 }
 
 // ----- DTO mapping helpers -----
@@ -376,7 +376,7 @@ func rfc3339Zero(t time.Time) string {
 // Endpoints arrive as a separate slice because the domain aggregate
 // stores them in their own repository; the service layer gathers
 // both and hands them in.
-func mapV1AgentDetail(reg *domain.AgentRegistration, endpoints []domain.AgentEndpoint, r *http.Request) *v1AgentDetailResponse {
+func mapV1AgentDetail(reg *domain.AgentRegistration, endpoints []domain.AgentEndpoint, r *http.Request, tlPublicBaseURL string) *v1AgentDetailResponse {
 	eps := make([]v1EndpointDTO, len(endpoints))
 	for i, e := range endpoints {
 		fns := make([]v1FunctionDTO, len(e.Functions))
@@ -421,7 +421,7 @@ func mapV1AgentDetail(reg *domain.AgentRegistration, endpoints []domain.AgentEnd
 		Endpoints:             eps,
 		RegistrationTimestamp: reg.Details.RegistrationTimestamp.UTC().Format("2006-01-02T15:04:05Z"),
 		LastRenewalTimestamp:  lastRenewal,
-		RegistrationPending:   buildV1RegistrationPending(reg, r),
+		RegistrationPending:   buildV1RegistrationPending(reg, r, tlPublicBaseURL),
 		Links: []v1LinkDTO{
 			{Rel: "self", Href: base},
 		},
@@ -444,7 +444,7 @@ func mapV1AgentDetail(reg *domain.AgentRegistration, endpoints []domain.AgentEnd
 //	                    publish (DISCOVERY/TRUST/BADGE/
 //	                    CERTIFICATE_BINDING), VERIFY_DNS nextStep,
 //	                    expiresAt scaled from the challenge deadline.
-func buildV1RegistrationPending(reg *domain.AgentRegistration, r *http.Request) *v1RegistrationPendingResponse {
+func buildV1RegistrationPending(reg *domain.AgentRegistration, r *http.Request, tlPublicBaseURL string) *v1RegistrationPendingResponse {
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		base := schemeOf(r) + "://" + r.Host + "/v1/agents/" + reg.AgentID
@@ -474,7 +474,7 @@ func buildV1RegistrationPending(reg *domain.AgentRegistration, r *http.Request) 
 		}
 	case domain.StatusPendingDNS:
 		base := schemeOf(r) + "://" + r.Host + "/v1/agents/" + reg.AgentID
-		expected := domain.ComputeRequiredDNSRecords(reg)
+		expected := domain.ComputeRequiredDNSRecords(reg, tlPublicBaseURL)
 		dnsRecords := make([]v1DNSRecordDTO, 0, len(expected))
 		for _, rec := range expected {
 			dnsRecords = append(dnsRecords, v1DNSRecordDTO{
