@@ -132,6 +132,9 @@ type RegistrationService struct {
 	outbox      OutboxEnqueuer
 	uow         port.UnitOfWork
 	dnsVerifier port.DNSVerifier
+	// tlPublicBaseURL is the externally-reachable Transparency Log URL
+	// used in _ans-badge DNS records (e.g. "https://tl.example.org").
+	tlPublicBaseURL string
 	// signer is the KeyManager + keyID + raID tuple used to sign
 	// outbox events. When nil, events are still persisted but without
 	// a signature — this is only valid for tests; production configs
@@ -201,6 +204,19 @@ func (s *RegistrationService) WithServerCertificateAuthority(ca port.ServerCerti
 func (s *RegistrationService) WithDNSVerifier(v port.DNSVerifier) *RegistrationService {
 	s.dnsVerifier = v
 	return s
+}
+
+// WithTLPublicBaseURL sets the externally-reachable Transparency Log
+// URL used in _ans-badge DNS TXT records. Without this, badge records
+// fall back to the agent's own endpoint URL.
+func (s *RegistrationService) WithTLPublicBaseURL(publicBaseURL string) *RegistrationService {
+	s.tlPublicBaseURL = publicBaseURL
+	return s
+}
+
+// TLPublicBaseURL returns the configured public TL base URL.
+func (s *RegistrationService) TLPublicBaseURL() string {
+	return s.tlPublicBaseURL
 }
 
 // RegisterAgent implements the V2 registration flow:
