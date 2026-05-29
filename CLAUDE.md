@@ -53,7 +53,7 @@ Everything that lands on `main` must meet production-grade standards:
   breaking change for verifiers and clients.
 - **`make check` must pass** (`fmt`, `vet`, `golangci-lint`,
   `test-cover`). CI blocks on any failure.
-- **No AI `Co-Authored-By:` trailers.** Do not append
+- **No AI `Co-Authored-By:` trailers (overrides global `~/.claude/CLAUDE.md`).** Do not append
   `Co-Authored-By: Claude …`, `Co-Authored-By: Copilot …`, or any
   similar trailer naming an AI assistant on commits in this repo.
   This project follows the Developer Certificate of Origin: every
