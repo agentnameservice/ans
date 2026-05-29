@@ -40,30 +40,60 @@ func TestDNSMissingFrom_FiltersMissingOnly(t *testing.T) {
 	}
 }
 
-func TestDNSIncorrectFrom_FiltersMismatchOnly(t *testing.T) {
-	in := []service.DNSMismatch{
-		{
-			Expected: domain.ExpectedDNSRecord{Name: "x", Type: domain.DNSRecordTXT, Value: "want"},
-			Code:     "MISSING", // filtered out
-		},
-		{
-			Expected: domain.ExpectedDNSRecord{Name: "y", Type: domain.DNSRecordTXT, Value: "want"},
-			Found:    "actually-got",
-			Code:     "MISMATCH",
-		},
+// The incorrect-record mappers must surface present-but-wrong records: a
+// plain value MISMATCH and DNSSEC-authenticated tampering on EVERY
+// DNSSEC-bearing record type (TLSA, SVCB, HTTPS) — not just TLSA, which
+// was the original gap. MISSING records are excluded (they belong in the
+// missing-records array). V2 and V1 classify identically, so one table
+// drives both lanes.
+func TestDNSIncorrectMappers_SurfaceMismatchAndAllDNSSEC(t *testing.T) {
+	cases := []struct {
+		name        string
+		code        string
+		wantSurface bool
+	}{
+		{"plain_value_mismatch", "MISMATCH", true},
+		{"tlsa_dnssec_tampering", "TLSA_DNSSEC_MISMATCH", true},
+		{"svcb_dnssec_tampering", "SVCB_DNSSEC_MISMATCH", true},
+		{"https_dnssec_tampering", "HTTPS_DNSSEC_MISMATCH", true},
+		{"missing_is_excluded", "MISSING", false},
 	}
-	got := dnsIncorrectFrom(in)
-	if len(got) != 1 {
-		t.Fatalf("want 1 mismatch, got %d", len(got))
-	}
-	if got[0].Record.Name != "y" {
-		t.Errorf("record.name: %q", got[0].Record.Name)
-	}
-	if got[0].Found != "actually-got" {
-		t.Errorf("found: %q", got[0].Found)
-	}
-	if got[0].Expected != "want" {
-		t.Errorf("expected: %q", got[0].Expected)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			in := []service.DNSMismatch{{
+				Expected: domain.ExpectedDNSRecord{
+					Name: "rec.example.com", Type: domain.DNSRecordSVCB, Value: "want",
+				},
+				Found: "wrong",
+				Code:  tc.code,
+			}}
+
+			v2 := dnsIncorrectFrom(in)
+			v1 := v1DNSIncorrectFrom(in)
+
+			if !tc.wantSurface {
+				if len(v2) != 0 {
+					t.Errorf("V2: code %q must be excluded, got %d", tc.code, len(v2))
+				}
+				if len(v1) != 0 {
+					t.Errorf("V1: code %q must be excluded, got %d", tc.code, len(v1))
+				}
+				return
+			}
+
+			if len(v2) != 1 {
+				t.Fatalf("V2: code %q must surface, got %d", tc.code, len(v2))
+			}
+			if v2[0].Record.Name != "rec.example.com" || v2[0].Found != "wrong" || v2[0].Expected != "want" {
+				t.Errorf("V2 mapping wrong: %+v", v2[0])
+			}
+			if len(v1) != 1 {
+				t.Fatalf("V1: code %q must surface, got %d", tc.code, len(v1))
+			}
+			if v1[0].Name != "rec.example.com" || v1[0].Found != "wrong" || v1[0].Expected != "want" {
+				t.Errorf("V1 mapping wrong: %+v", v1[0])
+			}
+		})
 	}
 }
 
@@ -83,24 +113,6 @@ func TestV1DNSMissingFrom_FiltersMissingOnly(t *testing.T) {
 	got := v1DNSMissingFrom(in)
 	if len(got) != 1 || got[0].Name != "a" {
 		t.Errorf("got %+v", got)
-	}
-}
-
-func TestV1DNSIncorrectFrom_FiltersMismatchOnly(t *testing.T) {
-	in := []service.DNSMismatch{
-		{Expected: domain.ExpectedDNSRecord{Name: "a"}, Code: "MISSING"},
-		{Expected: domain.ExpectedDNSRecord{Name: "b", Type: domain.DNSRecordTXT, Value: "want"},
-			Code: "MISMATCH", Found: "wrong"},
-	}
-	got := v1DNSIncorrectFrom(in)
-	if len(got) != 1 {
-		t.Fatalf("got %d, want 1", len(got))
-	}
-	if got[0].Name != "b" {
-		t.Errorf("name: %q", got[0].Name)
-	}
-	if got[0].Found != "wrong" || got[0].Expected != "want" {
-		t.Errorf("found/expected: %q/%q", got[0].Found, got[0].Expected)
 	}
 }
 

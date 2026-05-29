@@ -453,7 +453,7 @@ type incorrectRecordDTO struct {
 func dnsMissingFrom(mismatches []service.DNSMismatch) []dnsRecordDTO {
 	var out []dnsRecordDTO
 	for _, m := range mismatches {
-		if m.Code != "MISSING" {
+		if !m.IsMissing() {
 			continue
 		}
 		out = append(out, dnsRecordDTO{
@@ -471,12 +471,12 @@ func dnsMissingFrom(mismatches []service.DNSMismatch) []dnsRecordDTO {
 func dnsIncorrectFrom(mismatches []service.DNSMismatch) []incorrectRecordDTO {
 	var out []incorrectRecordDTO
 	for _, m := range mismatches {
-		// MISMATCH = required record with wrong value.
-		// TLSA_DNSSEC_MISMATCH = TLSA response came back
-		// DNSSEC-authenticated but didn't match the expected cert
-		// fingerprint (signed-zone tampering). Both surface as
-		// incorrect records — same DTO shape.
-		if m.Code != "MISMATCH" && m.Code != "TLSA_DNSSEC_MISMATCH" {
+		// Incorrect = present but wrong: a plain value MISMATCH, or
+		// DNSSEC-authenticated tampering on a TLSA/SVCB/HTTPS record
+		// (<RECORD_TYPE>_DNSSEC_MISMATCH, signed-zone tampering). All
+		// surface here as incorrect records — same DTO shape; missing
+		// records go to dnsMissingFrom.
+		if !m.IsIncorrect() {
 			continue
 		}
 		out = append(out, incorrectRecordDTO{

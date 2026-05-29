@@ -447,12 +447,43 @@ type VerifyDNSResult struct {
 	DNSMismatches []DNSMismatch // non-empty → handler emits 422
 }
 
+// DNS mismatch codes carried by DNSMismatch.Code. MISSING and MISMATCH
+// are exact codes; DNSSEC-authenticated tampering is reported per record
+// type as "<RECORD_TYPE>_DNSSEC_MISMATCH" (TLSA_DNSSEC_MISMATCH,
+// SVCB_DNSSEC_MISMATCH, HTTPS_DNSSEC_MISMATCH). Consumers classify with
+// the IsMissing / IsIncorrect predicates rather than matching raw strings,
+// so a new DNSSEC-bearing record type surfaces without editing every
+// consumer — the drift that previously dropped SVCB/HTTPS tampering from
+// the 422 body.
+const (
+	dnsCodeMissing       = "MISSING"
+	dnsCodeMismatch      = "MISMATCH"
+	dnssecMismatchSuffix = "_DNSSEC_MISMATCH"
+)
+
 // DNSMismatch names a missing or incorrect record encountered during
 // verification. Surface-level shape matches the V2 DnsVerificationError.
 type DNSMismatch struct {
 	Expected domain.ExpectedDNSRecord
 	Found    string // empty if the record was missing entirely
-	Code     string // "MISSING" | "MISMATCH"
+	// Code is "MISSING", "MISMATCH", or "<RECORD_TYPE>_DNSSEC_MISMATCH".
+	// Classify with IsMissing / IsIncorrect rather than comparing raw
+	// strings — the DNSSEC codes are generated per record type.
+	Code string
+}
+
+// IsMissing reports whether the expected record was absent from the zone.
+// These records belong in the 422 body's missingRecords array.
+func (m DNSMismatch) IsMissing() bool { return m.Code == dnsCodeMissing }
+
+// IsIncorrect reports whether the record was present but wrong: a plain
+// value mismatch (MISMATCH) or DNSSEC-authenticated tampering on a TLSA,
+// SVCB, or HTTPS record ("<RECORD_TYPE>_DNSSEC_MISMATCH"). Matching the
+// suffix rather than each type means a future DNSSEC-bearing record type
+// lands in incorrectRecords automatically. These records belong in the
+// 422 body's incorrectRecords array.
+func (m DNSMismatch) IsIncorrect() bool {
+	return m.Code == dnsCodeMismatch || strings.HasSuffix(m.Code, dnssecMismatchSuffix)
 }
 
 // VerifyDNS checks the operator's authoritative nameserver for the
@@ -616,7 +647,7 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 			case domain.DNSRecordTLSA, domain.DNSRecordSVCB, domain.DNSRecordHTTPS:
 				out = append(out, DNSMismatch{
 					Expected: r.Record, Found: r.Actual,
-					Code: string(r.Record.Type) + "_DNSSEC_MISMATCH",
+					Code: string(r.Record.Type) + dnssecMismatchSuffix,
 				})
 				continue
 			case domain.DNSRecordTXT:
@@ -631,9 +662,9 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 		}
 		switch {
 		case !r.Found:
-			out = append(out, DNSMismatch{Expected: r.Record, Code: "MISSING"})
+			out = append(out, DNSMismatch{Expected: r.Record, Code: dnsCodeMissing})
 		case r.Found && r.Actual != r.Record.Value:
-			out = append(out, DNSMismatch{Expected: r.Record, Found: r.Actual, Code: "MISMATCH"})
+			out = append(out, DNSMismatch{Expected: r.Record, Found: r.Actual, Code: dnsCodeMismatch})
 		}
 	}
 	return out, res.Results, nil
