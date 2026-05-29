@@ -774,7 +774,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		t.Fatal(err)
 	}
 
-	discoveryReg, err := service.NewDefaultDiscoveryRegistry()
+	discoveryReg, err := service.NewDefaultDiscoveryRegistry("")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -24,7 +24,20 @@ import (
 // Required=false because operators on CNAME-fronted apex zones cannot
 // publish this record at the same name (CNAME at @ blocks HTTPS RR
 // per RFC 1034 §3.6.2); the spec does not block them on its absence.
-type TXTStyle struct{}
+type TXTStyle struct {
+	// tlPublicBaseURL feeds the family `_ans-badge` url= via BadgeRecord
+	// (empty falls the badge back to the agent's own endpoint URL). Set
+	// once by NewTXTStyle; styles are immutable after wiring, so Records
+	// stays a pure function of reg.
+	tlPublicBaseURL string
+}
+
+// NewTXTStyle builds an ANS_TXT style whose family `_ans-badge` record
+// points at the transparency log at tlPublicBaseURL. Empty tlPublicBaseURL
+// falls the badge back to the agent's own endpoint URL.
+func NewTXTStyle(tlPublicBaseURL string) TXTStyle {
+	return TXTStyle{tlPublicBaseURL: tlPublicBaseURL}
+}
 
 // ID returns ANS_TXT.
 func (TXTStyle) ID() domain.DNSRecordStyle { return domain.DNSRecordStyleTXT }
@@ -58,7 +71,7 @@ func (s TXTStyle) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRec
 			TTL:      3600,
 		})
 	}
-	records = append(records, BadgeRecord(reg)...)
+	records = append(records, BadgeRecord(reg, s.tlPublicBaseURL)...)
 	records = append(records, TLSARecord(reg)...)
 	return records
 }

@@ -22,7 +22,7 @@ import (
 // emission order in tests matches production.
 func newTestRegistry(t *testing.T) port.DiscoveryRegistry {
 	t.Helper()
-	r, err := service.NewDefaultDiscoveryRegistry()
+	r, err := service.NewDefaultDiscoveryRegistry("")
 	require.NoError(t, err)
 	return r
 }
@@ -52,6 +52,40 @@ func mustReg(t *testing.T, host string, version string, eps []domain.AgentEndpoi
 		ServerCert:      cert,
 		DNSRecordStyles: styles,
 	}
+}
+
+// TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction pins the
+// end-to-end wiring: NewDefaultDiscoveryRegistry stamps the deployment TL
+// URL into the ANS styles, so the family `_ans-badge` record points at the
+// TL's per-agent endpoint rather than the agent's own host. The per-adapter
+// ansbadge_test covers BadgeRecord directly; this guards the
+// registry→style→walker path end to end — without the URL reaching the
+// styles, the badge silently regresses to the agent's endpoint URL.
+func TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction(t *testing.T) {
+	discoveryReg, err := service.NewDefaultDiscoveryRegistry("https://tl.example.org")
+	require.NoError(t, err)
+	svc := service.NewRegistrationService(
+		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
+		discoveryReg,
+	)
+
+	reg := mustReg(t, "agent.example.com", "1.0.0",
+		[]domain.AgentEndpoint{{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"}},
+		nil, []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB})
+	reg.AgentID = "test-agent-id"
+
+	records := svc.ComputeRequiredDNSRecords(reg)
+
+	var badge *domain.ExpectedDNSRecord
+	for i := range records {
+		if records[i].Purpose == domain.PurposeBadge {
+			badge = &records[i]
+			break
+		}
+	}
+	require.NotNil(t, badge, "expected a _ans-badge record")
+	assert.Contains(t, badge.Value, "url=https://tl.example.org/v1/agents/test-agent-id")
+	assert.NotContains(t, badge.Value, "agent.example.com/mcp")
 }
 
 // TestComputeRequiredDNSRecords_StyleMatrix_Integration is the
@@ -394,7 +428,7 @@ func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
 // returns a registry containing both ANS-family styles in TXT-then-SVCB
 // insertion order. The order is the V2 canonical-bytes input.
 func TestNewDefaultDiscoveryRegistry(t *testing.T) {
-	r, err := service.NewDefaultDiscoveryRegistry()
+	r, err := service.NewDefaultDiscoveryRegistry("")
 	require.NoError(t, err)
 
 	got := r.IDs()

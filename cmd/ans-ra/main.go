@@ -150,6 +150,11 @@ func run(cfgPath string) error {
 	// DNS verifier.
 	var dnsVerifier = selectDNSVerifier(cfg)
 
+	logger.Info().
+		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
+		Str("tlBaseURL", cfg.TLClient.BaseURL).
+		Msg("transparency log endpoints configured")
+
 	// Auth.
 	authProvider, err := buildAuth(ctx, cfg)
 	if err != nil {
@@ -164,7 +169,7 @@ func run(cfgPath string) error {
 	// to compute `dnsRecordsProvisioned[]`. Insertion order here pins the
 	// canonical-bytes emission order for the §4.4.2 union case
 	// (`[TXT×N, HTTPS, SVCB×N, badge, TLSA]`).
-	discoveryReg, err := service.NewDefaultDiscoveryRegistry()
+	discoveryReg, err := service.NewDefaultDiscoveryRegistry(cfg.TLClient.PublicBaseURL)
 	if err != nil {
 		return fmt.Errorf("init discovery registry: %w", err)
 	}

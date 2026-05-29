@@ -42,7 +42,20 @@ import (
 // `wk` and `card-sha256` are not yet IANA-registered SvcParamKeys;
 // see the consolidated-draft §6 note for the keyNNNNN-form fallback
 // strict-RFC parsers may need.
-type SVCBStyle struct{}
+type SVCBStyle struct {
+	// tlPublicBaseURL feeds the family `_ans-badge` url= via BadgeRecord
+	// (empty falls the badge back to the agent's own endpoint URL). Set
+	// once by NewSVCBStyle; styles are immutable after wiring, so Records
+	// stays a pure function of reg.
+	tlPublicBaseURL string
+}
+
+// NewSVCBStyle builds an ANS_SVCB style whose family `_ans-badge` record
+// points at the transparency log at tlPublicBaseURL. Empty tlPublicBaseURL
+// falls the badge back to the agent's own endpoint URL.
+func NewSVCBStyle(tlPublicBaseURL string) SVCBStyle {
+	return SVCBStyle{tlPublicBaseURL: tlPublicBaseURL}
+}
 
 // ID returns ANS_SVCB.
 func (SVCBStyle) ID() domain.DNSRecordStyle { return domain.DNSRecordStyleSVCB }
@@ -77,7 +90,7 @@ func (s SVCBStyle) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRe
 			TTL:      3600,
 		})
 	}
-	records = append(records, BadgeRecord(reg)...)
+	records = append(records, BadgeRecord(reg, s.tlPublicBaseURL)...)
 	records = append(records, TLSARecord(reg)...)
 	return records
 }

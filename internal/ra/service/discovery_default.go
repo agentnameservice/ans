@@ -26,6 +26,15 @@ import (
 // invalid IDs) — the bundled set passes both checks deterministically,
 // but the error return preserves callers' ability to fail loudly on
 // startup misconfig per the no-panic-in-request-paths rule.
-func NewDefaultDiscoveryRegistry() (port.DiscoveryRegistry, error) {
-	return registry.New(ans.TXTStyle{}, ans.SVCBStyle{})
+//
+// tlPublicBaseURL is the externally-reachable Transparency Log URL the
+// ANS styles stamp into the family `_ans-badge` record's url= (see
+// ans.NewTXTStyle / ans.NewSVCBStyle). Empty — tests, or a deployment
+// without a public TL URL — falls the badge back to the agent's own
+// endpoint URL.
+func NewDefaultDiscoveryRegistry(tlPublicBaseURL string) (port.DiscoveryRegistry, error) {
+	return registry.New(
+		ans.NewTXTStyle(tlPublicBaseURL),
+		ans.NewSVCBStyle(tlPublicBaseURL),
+	)
 }

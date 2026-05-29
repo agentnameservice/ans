@@ -27,6 +27,11 @@ type DiscoveryStyle interface {
 	// _ans-badge for the ANS family, TLSA for any HTTPS-endpoint binding).
 	// The service walker dedupes across styles, so a family's shared
 	// records emit once even when multiple sibling styles request them.
+	//
+	// A style that emits a transparency-log-relative trust record (the
+	// ANS family's _ans-badge) is configured with the deployment TL URL
+	// at construction — see ans.NewTXTStyle / ans.NewSVCBStyle — so this
+	// stays a pure function of reg with no per-call deployment input.
 	Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord
 }
 

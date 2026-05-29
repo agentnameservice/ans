@@ -37,6 +37,9 @@ store:
 
 tl-client:
   base-url: "http://localhost:18081"
+  # public-base-url: the externally-reachable TL URL used in _ans-badge
+  # DNS TXT records. Required — must be an https:// URL.
+  public-base-url: "https://localhost:18081"
   api-key: "tl-internal-key"
   timeout: 10s
 

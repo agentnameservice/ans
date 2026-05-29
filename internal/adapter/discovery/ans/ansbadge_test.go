@@ -22,6 +22,8 @@ func TestBadgeRecord(t *testing.T) {
 	tests := []struct {
 		name      string
 		reg       *domain.AgentRegistration
+		agentID   string
+		tlBaseURL string
 		wantEmpty bool
 		wantName  string
 		wantValue string
@@ -48,10 +50,37 @@ func TestBadgeRecord(t *testing.T) {
 			wantName:  "_ans-badge.agent.example.com",
 			wantValue: "v=ans-badge1; version=2.0.0; url=https://agent.example.com/mcp",
 		},
+		{
+			// When the deployment supplies a public TL URL and the
+			// registration carries an AgentID, the badge url= points at the
+			// TL's per-agent badge endpoint rather than the agent's own host
+			// — badge verifiers resolve trust through the log, not the agent.
+			name: "tl_base_url_points_badge_at_transparency_log",
+			reg: mustReg(t, "1.0.0", "agent.example.com", []domain.AgentEndpoint{
+				{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+			}),
+			agentID:   "test-agent-id",
+			tlBaseURL: "https://tl.example.org",
+			wantName:  "_ans-badge.agent.example.com",
+			wantValue: "v=ans-badge1; version=1.0.0; url=https://tl.example.org/v1/agents/test-agent-id",
+		},
+		{
+			// Fallback: a TL URL is set but the registration has no AgentID,
+			// so the per-agent TL path can't be formed and the badge falls
+			// back to the first endpoint's URL.
+			name: "tl_base_url_without_agent_id_falls_back_to_endpoint",
+			reg: mustReg(t, "1.0.0", "agent.example.com", []domain.AgentEndpoint{
+				{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+			}),
+			tlBaseURL: "https://tl.example.org",
+			wantName:  "_ans-badge.agent.example.com",
+			wantValue: "v=ans-badge1; version=1.0.0; url=https://agent.example.com/mcp",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := BadgeRecord(tc.reg)
+			tc.reg.AgentID = tc.agentID
+			got := BadgeRecord(tc.reg, tc.tlBaseURL)
 			if tc.wantEmpty {
 				assert.Empty(t, got)
 				return
