@@ -18,7 +18,7 @@ func TestComputeRequiredDNSRecords_WithoutCert(t *testing.T) {
 		},
 	}
 
-	records := ComputeRequiredDNSRecords(reg)
+	records := ComputeRequiredDNSRecords(reg, "")
 	require.NotEmpty(t, records)
 
 	// 2 endpoints → 2 _ans TXT records + 1 badge record.
@@ -63,7 +63,7 @@ func TestComputeRequiredDNSRecords_WithCert(t *testing.T) {
 		ServerCert: &ByocServerCertificate{Fingerprint: "abcdef"},
 	}
 
-	records := ComputeRequiredDNSRecords(reg)
+	records := ComputeRequiredDNSRecords(reg, "")
 
 	var tlsaFound bool
 	for _, r := range records {
@@ -87,8 +87,48 @@ func TestComputeRequiredDNSRecords_WithCert(t *testing.T) {
 func TestComputeRequiredDNSRecords_NoEndpoints(t *testing.T) {
 	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
 	reg := &AgentRegistration{AnsName: ansName}
-	records := ComputeRequiredDNSRecords(reg)
+	records := ComputeRequiredDNSRecords(reg, "")
 	assert.Empty(t, records)
+}
+
+func TestComputeRequiredDNSRecords_BadgeURLPointsToTL(t *testing.T) {
+	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	reg := &AgentRegistration{
+		AgentID: "test-agent-id",
+		AnsName: ansName,
+		Endpoints: []AgentEndpoint{
+			{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+		},
+	}
+
+	records := ComputeRequiredDNSRecords(reg, "https://tl.example.org")
+	for _, r := range records {
+		if r.Purpose == PurposeBadge {
+			assert.Contains(t, r.Value, "url=https://tl.example.org/v1/agents/test-agent-id")
+			assert.NotContains(t, r.Value, "agent.example.com/mcp")
+			return
+		}
+	}
+	t.Fatal("no badge record found")
+}
+
+func TestComputeRequiredDNSRecords_BadgeFallbackWithoutTLURL(t *testing.T) {
+	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	reg := &AgentRegistration{
+		AnsName: ansName,
+		Endpoints: []AgentEndpoint{
+			{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+		},
+	}
+
+	records := ComputeRequiredDNSRecords(reg, "")
+	for _, r := range records {
+		if r.Purpose == PurposeBadge {
+			assert.Contains(t, r.Value, "url=https://agent.example.com/mcp")
+			return
+		}
+	}
+	t.Fatal("no badge record found")
 }
 
 func TestProtocolToANSValue(t *testing.T) {

@@ -502,7 +502,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		reg.ServerCert = byoc
 	}
 
-	expected := domain.ComputeRequiredDNSRecords(reg)
+	expected := domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL)
 
 	mismatches, perRecord, err := s.verifyDNSRecords(ctx, reg.FQDN(), expected)
 	if err != nil {
@@ -798,7 +798,7 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return &RevokeResult{
 			Registration:       reg,
 			RevokedAt:          now,
-			DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg),
+			DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
 		}, nil
 	}
 
@@ -912,6 +912,6 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 	return &RevokeResult{
 		Registration:       reg,
 		RevokedAt:          now,
-		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg),
+		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
 	}, nil
 }

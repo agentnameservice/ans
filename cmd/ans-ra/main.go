@@ -149,6 +149,11 @@ func run(cfgPath string) error {
 	// DNS verifier.
 	var dnsVerifier = selectDNSVerifier(cfg)
 
+	logger.Info().
+		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
+		Str("tlBaseURL", cfg.TLClient.BaseURL).
+		Msg("transparency log endpoints configured")
+
 	// Auth.
 	authProvider, err := buildAuth(ctx, cfg)
 	if err != nil {
@@ -166,7 +171,8 @@ func run(cfgPath string) error {
 		KeyID:      signerKeyID,
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
-		WithServerCertificateAuthority(serverCA)
+		WithServerCertificateAuthority(serverCA).
+		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL)
 
 	// HTTP.
 	r := chi.NewRouter()

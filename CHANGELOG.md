@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.4](https://github.com/godaddy/ans/compare/v0.1.3...v0.1.4) (2026-05-28)
+
+
+### Bug Fixes
+
+* **domain:** point _ans-badge DNS record URL at transparency log ([#23](https://github.com/godaddy/ans/issues/23)) ([31adf40](https://github.com/godaddy/ans/commit/31adf40f28200beb65661c06c7507be36703b5ed))
+
 ## [0.1.3](https://github.com/godaddy/ans/compare/v0.1.2...v0.1.3) (2026-05-08)
 
 

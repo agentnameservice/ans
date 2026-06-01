@@ -87,7 +87,7 @@ type agentDetails struct {
 	Links                 []linkDTO                    `json:"links"`
 }
 
-func mapAgentDetails(res *service.DetailResult, r *http.Request) agentDetails {
+func mapAgentDetails(res *service.DetailResult, r *http.Request, tlPublicBaseURL string) agentDetails {
 	reg := res.Registration
 	// Stamp endpoints onto the aggregate so the pending-block builder's
 	// call to domain.ComputeRequiredDNSRecords produces the full record
@@ -104,7 +104,7 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request) agentDetails {
 		AgentStatus:           string(reg.Status),
 		Endpoints:             mapEndpointsToDTO(res.Endpoints),
 		RegistrationTimestamp: reg.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
-		RegistrationPending:   buildRegistrationPendingBlock(reg, r),
+		RegistrationPending:   buildRegistrationPendingBlock(reg, r, tlPublicBaseURL),
 		Links: []linkDTO{
 			{Rel: "self", Href: agentURL(r, reg.AgentID)},
 		},
@@ -119,7 +119,7 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request) agentDetails {
 // buildV1RegistrationPending. Agents still driving validation/DNS
 // expose the outstanding challenges + DNS records needed to
 // progress; terminal states omit the block.
-func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Request) *registrationPendingResponse {
+func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Request, tlPublicBaseURL string) *registrationPendingResponse {
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		base := schemeOf(r) + "://" + r.Host + "/v2/ans/agents/" + reg.AgentID
@@ -150,7 +150,7 @@ func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Reques
 		}
 	case domain.StatusPendingDNS:
 		base := schemeOf(r) + "://" + r.Host + "/v2/ans/agents/" + reg.AgentID
-		expected := domain.ComputeRequiredDNSRecords(reg)
+		expected := domain.ComputeRequiredDNSRecords(reg, tlPublicBaseURL)
 		dnsRecords := make([]dnsRecordDTO, 0, len(expected))
 		for _, rec := range expected {
 			dnsRecords = append(dnsRecords, dnsRecordDTO{

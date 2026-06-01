@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"fmt"
+	"net/url"
+)
 
 // DNSRecordType represents a DNS record type.
 type DNSRecordType string
@@ -34,7 +37,12 @@ type ExpectedDNSRecord struct {
 // ComputeRequiredDNSRecords generates the DNS records an operator must create
 // for a given agent registration. The RA does not create these records — the
 // operator manages their own DNS. The RA only verifies they exist.
-func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
+//
+// tlPublicBaseURL is the externally-reachable Transparency Log URL used in
+// the _ans-badge record (e.g. "https://tl.example.org"). When non-empty the
+// badge url= field points to the TL badge endpoint for this agent; when
+// empty it falls back to the agent's own endpoint URL.
+func ComputeRequiredDNSRecords(reg *AgentRegistration, tlPublicBaseURL string) []ExpectedDNSRecord {
 	fqdn := reg.FQDN()
 	// Version is emitted as a bare semver string ("1.2.0"). The
 	// `v`-prefixed form only appears inside the ANS name's hostname
@@ -63,8 +71,14 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration) []ExpectedDNSRecord {
 	// publishing _ans without _ans-badge would advertise an agent
 	// that fails the public discovery handshake.
 	if len(reg.Endpoints) > 0 {
+		badgeURL := reg.Endpoints[0].AgentURL
+		if tlPublicBaseURL != "" && reg.AgentID != "" {
+			// tlPublicBaseURL is validated at config load (https, no
+			// query/fragment/userinfo), so JoinPath cannot fail here.
+			badgeURL, _ = url.JoinPath(tlPublicBaseURL, "v1", "agents", reg.AgentID)
+		}
 		badgeValue := fmt.Sprintf("v=ans-badge1; version=%s; url=%s",
-			version, reg.Endpoints[0].AgentURL)
+			version, badgeURL)
 		records = append(records, ExpectedDNSRecord{
 			Name:     fmt.Sprintf("_ans-badge.%s", fqdn),
 			Type:     DNSRecordTXT,
