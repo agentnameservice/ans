@@ -11,6 +11,13 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
+// ProblemTypeBlank is the RFC 7807 default `type` value indicating
+// the consumer should derive the problem type from the `title` and
+// `status` fields rather than dereferencing a URI. Used by every
+// in-tree Problem response — no Problem currently carries a
+// custom type URI.
+const ProblemTypeBlank = "about:blank"
+
 // Problem is the RFC 7807 response body for errors.
 type Problem struct {
 	Type   string `json:"type"`
@@ -44,7 +51,7 @@ func mapError(err error) Problem {
 	var de *domain.Error
 	if errors.As(err, &de) {
 		return Problem{
-			Type:   "about:blank",
+			Type:   ProblemTypeBlank,
 			Title:  titleForCause(de.Cause),
 			Status: statusForCause(de.Cause),
 			Detail: de.Message,
