@@ -59,6 +59,12 @@ tags:
     description: Agent certificate revocation operations
   - name: Certificate Management
     description: Certificate retrieval, CSR submission, and renewal operations
+  - name: Attestation
+    description: |
+      Bundled signed agent attestations for third-party verifiers. Anonymous
+      reads; the attestation IS the document consumers fetch to verify an
+      agent's identity + transparency-log inclusion. See `/ans/agents/
+      {agentId}/attestation`.
 
 # Global security requirement. Every path inherits this and can
 # override with `security: []` to declare itself anonymous. The
@@ -882,6 +888,170 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '500':
+          description: Internal server error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # ──────────────────────────────────────────────────────────────────
+  # Attestation — anonymous read for third-party verifiers
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/attestation:
+    get:
+      tags:
+        - Attestation
+      summary: Get a bundled signed attestation for an agent
+      description: |
+        Returns a single COSE_Sign1 object (RFC 9052 — CBOR tag 18) bundling
+        the agent's current registration state with its transparency-log
+        inclusion proof.
+
+        **Wire format.** The body is binary CBOR with
+        `Content-Type: application/cose`. It is NOT JSON. The COSE_Sign1
+        wraps a CBOR-encoded payload map shaped as follows (the shape is
+        fixed; downstream verifiers encode against it byte-for-byte):
+
+            {
+              iss:  text          -- this RA's origin URL (CWT claim 1, also in protected header)
+              sub:  text          -- agent's flat-FQDN host (e.g. "morpheus.example.com")
+              did:  text          -- derivable did:web alias of sub; consumer may dereference
+              iat:  uint          -- issuance unix timestamp
+              exp:  uint          -- expiry unix timestamp (iat + 3600 by default)
+              identity_cert_spki_sha256: bytes -- SHA-256(SubjectPublicKeyInfo(identityCert))
+              server_cert_spki_sha256:   bytes -- SHA-256(SubjectPublicKeyInfo(serverCert))
+              dns: {
+                verified_at:      uint        -- when the RA's DNS verifier last witnessed the records
+                tlsa_records:     [bytes]     -- TLSA records (usage 3, selector 1, matching 1 preferred)
+                dnssec_validated: bool        -- AD bit from the resolver (per CLAUDE.md §Default adapters)
+              }
+              tl: {
+                log_url:   text   -- public base URL of the TL backing this attestation
+                leaf_hash: bytes  -- RFC 6962 SHA-256(0x00 || JCS-canonical event) for the registration leaf
+                tree_size: uint   -- TL tree size at the time of the inclusion proof
+                receipt:   bytes  -- embedded SCITT COSE_Sign1 receipt for this leaf, signed by the TL key
+              }
+              trust_scheme: text  -- optional; TRAIN trust-scheme DNS name; field is omitted when unconfigured
+            }
+
+        **Signing topology (two-key verification).** The outer COSE_Sign1 is
+        signed by the **RA's producer key** — the same ECDSA P-256 key that
+        signs every inner Event going to the TL via the outbox, listed in
+        the TL's `producerKeys[]` trust store. The embedded `tl.receipt` is
+        a separate COSE_Sign1, signed by the **TL's checkpoint key**
+        advertised at the TL's `/root-keys`. A verifier validates both:
+        outer against the producer pubkey, embedded receipt against the
+        TL root key.
+
+        This mirrors the OmniOne Open DID pattern — a TAS (Trust Agent
+        Service) issues membership credentials, anchored in a Trust
+        Repository — with ANS playing the TAS role (RA signs) and the TL
+        playing the Trust Repository role (signs the inclusion proof).
+
+        **COSE protected header** carries:
+          - `alg = ES256 (-7)`
+          - `kid = 4-byte SPKIKeyHash4(RA producer public key)`
+          - `CWT claims (label 15) = { iss: <RA origin URL>, iat: <unix> }`
+
+        **Anonymous read.** `security: []` overrides the global
+        `bearerAuth` requirement; the attestation IS the document a
+        third-party verifier fetches. The sibling endpoint
+        `GET /ans/agents/{agentId}` remains owner-scoped for operator
+        management.
+      operationId: getAgentAttestation
+      security: []
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Attestation generated and signed successfully
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: |
+                `public, max-age=3600` — matches the COSE payload's `exp`
+                lifetime so HTTP caches naturally expire with it.
+          content:
+            application/cose:
+              schema:
+                type: string
+                format: binary
+                description: |
+                  Binary CBOR-encoded COSE_Sign1 (tag 18). See the
+                  description on this operation for the wrapped payload
+                  shape.
+        '404':
+          description: |
+            Agent not found. Distinct from the ownership-scoped 404 on
+            `GET /ans/agents/{agentId}` — here, no agent with the given
+            agentId exists at all (this endpoint does not check
+            ownership, so it never 404s to hide existence).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                type: about:blank
+                title: Agent Not Found
+                status: 404
+                code: AGENT_NOT_FOUND
+                detail: no registration exists for the given agentId
+        '410':
+          description: |
+            Agent has been revoked. No attestation will be issued for a
+            revoked registration; verifiers MUST treat this as a hard
+            failure, not a transient one.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                type: about:blank
+                title: Agent Revoked
+                status: 410
+                code: AGENT_REVOKED
+                detail: the agent's registration has been revoked
+        '503':
+          description: |
+            Transparency-log inclusion is not yet available, or the
+            configured TL is unreachable. Includes a `Retry-After` header.
+            Two failure modes share this status:
+
+            - `TL_LEAF_UNCOMMITTED` — the registration event has been
+              appended to the log but no signed checkpoint yet covers it.
+              Mirrors the behaviour of `GET /v1/agents/{id}/receipt` on
+              the TL. Retry after the Retry-After delay.
+            - `TL_NOT_REACHABLE` — the RA cannot currently reach the
+              configured TL HTTP API to fetch the receipt + inclusion
+              proof. Operational failure; retry later.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
+              description: Seconds to wait before retrying.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                leafUncommitted:
+                  summary: TL append succeeded but no covering checkpoint yet
+                  value:
+                    type: about:blank
+                    title: Transparency Log Inclusion Pending
+                    status: 503
+                    code: TL_LEAF_UNCOMMITTED
+                    detail: the registration event has been appended but no signed checkpoint yet covers it; retry after Retry-After
+                tlNotReachable:
+                  summary: RA cannot reach the configured TL
+                  value:
+                    type: about:blank
+                    title: Transparency Log Unreachable
+                    status: 503
+                    code: TL_NOT_REACHABLE
+                    detail: the configured transparency log is not currently reachable
         '500':
           description: Internal server error
           content:
