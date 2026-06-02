@@ -302,6 +302,27 @@ func TestSign1_UnencodableProtectedHeader(t *testing.T) {
 	}
 }
 
+func TestMarshalDeterministic(t *testing.T) {
+	t.Parallel()
+	// Two encodes of the same input must be byte-identical.
+	in := map[int]any{2: "two", 1: "one", 3: []byte{0xAB}}
+	a, err := cose.MarshalDeterministic(in)
+	if err != nil {
+		t.Fatalf("MarshalDeterministic: %v", err)
+	}
+	b, err := cose.MarshalDeterministic(in)
+	if err != nil {
+		t.Fatalf("MarshalDeterministic: %v", err)
+	}
+	if !equalBytes(a, b) {
+		t.Fatal("two encodes of identical input differ")
+	}
+	// Unencodable type surfaces an error rather than panicking.
+	if _, err := cose.MarshalDeterministic(make(chan int)); err == nil {
+		t.Fatal("want error on unencodable type")
+	}
+}
+
 func TestSign1_UnencodableUnprotectedHeader(t *testing.T) {
 	t.Parallel()
 	// Channel in the unprotected map slips past the empty-protected

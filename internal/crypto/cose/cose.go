@@ -187,6 +187,17 @@ func encodeProtectedHeader(m map[int]any) ([]byte, error) {
 	return detMarshal(m)
 }
 
+// MarshalDeterministic exposes the same core-deterministic CBOR
+// encoder Sign1 uses internally. Callers who need to build the
+// `payload` bytes (e.g. the attestation service CBOR-encoding its
+// AttestationPayload struct before handing it to Sign1) should
+// route through here so the encoder choice stays centralized — if
+// a future RFC update shifts the deterministic profile, one edit
+// here covers every signed object.
+func MarshalDeterministic(v any) ([]byte, error) {
+	return detMarshal(v)
+}
+
 // detMarshal encodes with CBOR core-deterministic options (RFC 8949
 // §4.2): integer keys sorted by value, no indefinite lengths,
 // smallest integer representations. Same encoder previously inlined
