@@ -188,6 +188,48 @@ func TestReceipt_ExtractPayload(t *testing.T) {
 	}
 }
 
+func TestReceipt_ExtractInclusionProof(t *testing.T) {
+	t.Parallel()
+	km := newTestKM(t)
+	gen, _ := receipt.NewKeyManagerGenerator(context.Background(), km, "receipt-k", "ans-test")
+	// Build a small multi-leaf proof so Path is non-empty and the
+	// extractor actually has something to decode beyond the trivial
+	// single-leaf case.
+	sibling := sha256LeafHash([]byte("other-leaf"))
+	leaf := sha256LeafHash(fixedEventBytes)
+	root := sha256NodeHash(leaf[:], sibling[:])
+	proof := &receipt.InclusionProof{
+		TreeSize:  2,
+		LeafIndex: 0,
+		Path:      [][]byte{sibling[:]},
+		RootHash:  root[:],
+	}
+	coseBytes, err := gen.GenerateReceipt(context.Background(), proof, fixedEventBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, err := receipt.ExtractInclusionProof(coseBytes)
+	if err != nil {
+		t.Fatalf("ExtractInclusionProof: %v", err)
+	}
+	if view.TreeSize != 2 || view.LeafIndex != 0 {
+		t.Errorf("view tree_size=%d leaf_index=%d, want 2/0", view.TreeSize, view.LeafIndex)
+	}
+	if len(view.Path) != 1 || string(view.Path[0]) != string(sibling[:]) {
+		t.Errorf("path mismatch: %v", view.Path)
+	}
+	if string(view.RootHash) != string(root[:]) {
+		t.Errorf("root hash mismatch")
+	}
+}
+
+func TestReceipt_ExtractInclusionProof_BadInput(t *testing.T) {
+	t.Parallel()
+	if _, err := receipt.ExtractInclusionProof([]byte{0xFF, 0xFF}); err == nil {
+		t.Fatal("want error on garbage CBOR")
+	}
+}
+
 func TestReceipt_Generate_RejectsNonP256(t *testing.T) {
 	t.Parallel()
 	// P-384 key — ES256 is fixed in COSE; anything else should be

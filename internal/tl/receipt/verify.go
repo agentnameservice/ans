@@ -230,6 +230,44 @@ type extractedProof struct {
 	RootHash  []byte
 }
 
+// InclusionProofView is the public projection of the receipt's
+// embedded RFC 9162 inclusion proof. Returned by ExtractInclusionProof
+// so consumers outside this package — notably the RA's tlclient,
+// which needs the tree-size + leaf hash to bind a receipt into a
+// signed agent attestation — don't have to re-implement CBOR
+// COSE_Sign1 parsing.
+type InclusionProofView struct {
+	TreeSize  uint64
+	LeafIndex uint64
+	Path      [][]byte
+	RootHash  []byte
+}
+
+// ExtractInclusionProof parses a SCITT COSE_Sign1 receipt and
+// returns the inclusion proof embedded in its unprotected VDP
+// header. Errors propagate from the COSE parser (invalid CBOR,
+// wrong tag) and from the VDP decoder (missing fields, wrong
+// types).
+//
+// Does NOT verify the signature — that's the caller's job via
+// receipt.Verify. ExtractInclusionProof is purely structural.
+func ExtractInclusionProof(receiptBytes []byte) (*InclusionProofView, error) {
+	parsed, err := parseCOSESign1(receiptBytes)
+	if err != nil {
+		return nil, err
+	}
+	p, err := extractInclusionProof(parsed.unprotected)
+	if err != nil {
+		return nil, err
+	}
+	return &InclusionProofView{
+		TreeSize:  p.TreeSize,
+		LeafIndex: p.LeafIndex,
+		Path:      p.Path,
+		RootHash:  p.RootHash,
+	}, nil
+}
+
 func extractInclusionProof(unprotected map[int]any) (*extractedProof, error) {
 	vdpRaw, ok := unprotected[labelVDP]
 	if !ok {
