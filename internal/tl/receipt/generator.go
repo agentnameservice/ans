@@ -3,14 +3,12 @@ package receipt
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"time"
 
-	"github.com/fxamacker/cbor/v2"
-
 	anscrypto "github.com/godaddy/ans/internal/crypto"
+	"github.com/godaddy/ans/internal/crypto/cose"
 	"github.com/godaddy/ans/internal/port"
 )
 
@@ -36,10 +34,11 @@ type Generator interface {
 }
 
 // KeyManagerGenerator implements Generator using port.KeyManager for
-// signing. The KeyManager returns ASN.1 DER for ECDSA; we convert to
-// IEEE P1363 at the COSE boundary per RFC 8152 §8.1.
+// signing. The actual COSE_Sign1 envelope is built by
+// internal/crypto/cose; this type owns the receipt-specific header
+// composition (alg, kid, VDS identifier, CWT claims, VDP).
 type KeyManagerGenerator struct {
-	km      port.KeyManager
+	signer  *cose.KeyManagerSigner
 	keyID   string
 	pub     *ecdsa.PublicKey
 	keyHash []byte // 4-byte SPKI opaque key hash — goes into COSE `kid`
@@ -86,9 +85,13 @@ func NewKeyManagerGenerator(ctx context.Context, km port.KeyManager, keyID, issu
 	if err != nil {
 		return nil, fmt.Errorf("receipt: key hash: %w", err)
 	}
+	signer, err := cose.NewKeyManagerSigner(km, keyID)
+	if err != nil {
+		return nil, fmt.Errorf("receipt: build cose signer: %w", err)
+	}
 
 	g := &KeyManagerGenerator{
-		km:      km,
+		signer:  signer,
 		keyID:   keyID,
 		pub:     ecPub,
 		keyHash: kh,
@@ -108,17 +111,15 @@ func (g *KeyManagerGenerator) PublicKey() *ecdsa.PublicKey { return g.pub }
 // `keyHash`). Useful for logging and diagnostics.
 func (g *KeyManagerGenerator) KeyID() string { return g.keyID }
 
-// GenerateReceipt assembles the COSE_Sign1 structure and signs it.
+// GenerateReceipt composes the SCITT-specific protected + unprotected
+// headers and delegates the COSE_Sign1 envelope assembly to
+// internal/crypto/cose.
 //
-// Layout (matches the reference TL's receipt byte layout):
+// Header content (unchanged from the reference TL):
 //
-//	protected := CBOR-encode of:
-//	  { 1: -7, 4: keyHash, 395: 1, 15: { 1: issuer, 6: now.Unix() } }
+//	protected   := { 1: -7, 4: keyHash, 395: 1, 15: { 1: issuer, 6: now.Unix() } }
 //	unprotected := { 396: { -1: treeSize, -2: leafIndex, -3: path, -4: rootHash } }
-//	payload := eventBytes (attached)
-//	sig_structure := [ "Signature1", protected, external_aad=bstr(0), payload ]
-//	sig := P1363(ECDSA-P256(SHA-256(sig_structure)))
-//	COSE_Sign1 := CBOR tag 18 wrapping [ protected, unprotected, payload, sig ]
+//	payload     := eventBytes (attached)
 func (g *KeyManagerGenerator) GenerateReceipt(ctx context.Context, proof *InclusionProof, eventBytes []byte) ([]byte, error) {
 	if proof == nil {
 		return nil, errors.New("receipt: proof required")
@@ -127,10 +128,6 @@ func (g *KeyManagerGenerator) GenerateReceipt(ctx context.Context, proof *Inclus
 		return nil, errors.New("receipt: eventBytes required (detached payloads not supported)")
 	}
 
-	// --- Protected header ---
-	// Order doesn't matter for CBOR canonical encoding (integer keys
-	// sort by value) — CoreDetEncOptions below ensures deterministic
-	// output.
 	protectedMap := map[int]any{
 		labelAlg: algES256,
 		labelKID: g.keyHash,
@@ -140,65 +137,13 @@ func (g *KeyManagerGenerator) GenerateReceipt(ctx context.Context, proof *Inclus
 			cwtIat: g.nowFunc().Unix(),
 		},
 	}
-	protectedBytes, err := detMarshal(protectedMap)
-	if err != nil {
-		return nil, fmt.Errorf("receipt: encode protected header: %w", err)
-	}
-
-	// --- Unprotected header: the VDP (Verifiable Data Structure Proof) ---
-	vdp := map[int]any{
-		inclusionProofTreeSize:  proof.TreeSize,
-		inclusionProofLeafIndex: proof.LeafIndex,
-		inclusionProofHashPath:  proof.Path,
-		inclusionProofRootHash:  proof.RootHash,
-	}
 	unprotectedMap := map[int]any{
-		labelVDP: vdp,
+		labelVDP: map[int]any{
+			inclusionProofTreeSize:  proof.TreeSize,
+			inclusionProofLeafIndex: proof.LeafIndex,
+			inclusionProofHashPath:  proof.Path,
+			inclusionProofRootHash:  proof.RootHash,
+		},
 	}
-
-	// --- Sig_structure (RFC 8152 §4.4) ---
-	sigStructure := []any{
-		"Signature1",
-		protectedBytes,
-		[]byte{},   // external_aad
-		eventBytes, // attached payload
-	}
-	sigStructureBytes, err := detMarshal(sigStructure)
-	if err != nil {
-		return nil, fmt.Errorf("receipt: encode Sig_structure: %w", err)
-	}
-
-	// --- Sign ---
-	digest := sha256.Sum256(sigStructureBytes)
-	derSig, err := g.km.Sign(ctx, g.keyID, digest[:])
-	if err != nil {
-		return nil, fmt.Errorf("receipt: sign: %w", err)
-	}
-	p1363Sig, err := anscrypto.DERToP1363(derSig, 32) // P-256 → 32-byte coord size
-	if err != nil {
-		return nil, fmt.Errorf("receipt: DER→P1363: %w", err)
-	}
-
-	// --- Assemble COSE_Sign1 as tag 18 ---
-	coseArray := []any{
-		protectedBytes,
-		unprotectedMap,
-		eventBytes,
-		p1363Sig,
-	}
-	tagged := cbor.Tag{Number: 18, Content: coseArray}
-	return detMarshal(tagged)
-}
-
-// detMarshal encodes with CBOR core-deterministic options (integer
-// keys sorted by value, no indefinite lengths, smallest integer
-// representations). This is what makes the receipt bytes reproducible
-// — two calls with the same inputs produce the same bytes, which is
-// how golden fixtures pin the wire format.
-func detMarshal(v any) ([]byte, error) {
-	em, err := cbor.CoreDetEncOptions().EncMode()
-	if err != nil {
-		return nil, err
-	}
-	return em.Marshal(v)
+	return cose.Sign1(ctx, g.signer, protectedMap, unprotectedMap, eventBytes)
 }
