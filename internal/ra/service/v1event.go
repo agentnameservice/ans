@@ -265,7 +265,7 @@ func (s *RegistrationService) buildAgentRevokedV1Event(
 	// sees the full record set (including per-endpoint metadata
 	// records). If it didn't, we'd get back an empty list and the
 	// revoke envelope would ship with no DNS tear-down guidance.
-	expected := domain.ComputeRequiredDNSRecords(reg)
+	expected := domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL)
 	dnsMap := make(map[string]string, len(expected))
 	for _, r := range expected {
 		dnsMap[r.Name] = r.Value
