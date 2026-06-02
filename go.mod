@@ -6,7 +6,7 @@ require (
 	github.com/coreos/go-oidc/v3 v3.18.0
 	github.com/cyberphone/json-canonicalization v0.0.0-20241213102144-19d51d7fe467
 	github.com/fxamacker/cbor/v2 v2.9.2
-	github.com/go-chi/chi/v5 v5.2.5
+	github.com/go-chi/chi/v5 v5.3.0
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/google/uuid v1.6.0
 	github.com/jmoiron/sqlx v1.4.0
