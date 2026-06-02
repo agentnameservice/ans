@@ -216,6 +216,42 @@ func TestMiddleware_Integration(t *testing.T) {
 	}
 }
 
+// TestMiddleware_AnonymousPathSuffix bypasses auth for paths whose
+// suffix matches — used by the attestation route, which is
+// parameterized (/v2/ans/agents/{id}/attestation) so a prefix match
+// would over-grant onto the owner-scoped siblings.
+func TestMiddleware_AnonymousPathSuffix(t *testing.T) {
+	t.Parallel()
+	p := auth.NewStaticProvider("my-api-key",
+		auth.WithAnonymousPathSuffix("/attestation"),
+	)
+	var ran bool
+	h := p.Middleware()(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		ran = true
+		w.WriteHeader(http.StatusOK)
+	}))
+
+	// Attestation path matches suffix — should pass through with no auth.
+	req := httptest.NewRequest(http.MethodGet,
+		"/v2/ans/agents/11111111-2222-3333-4444-555555555555/attestation", nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || !ran {
+		t.Errorf("attestation path: status=%d, ran=%v; want 200/true", rec.Code, ran)
+	}
+
+	// Sibling owner-scoped path must NOT match the /attestation suffix
+	// and must require auth.
+	ran = false
+	req = httptest.NewRequest(http.MethodGet,
+		"/v2/ans/agents/11111111-2222-3333-4444-555555555555", nil)
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code == http.StatusOK || ran {
+		t.Errorf("sibling path leaked: status=%d, ran=%v; want non-200/false", rec.Code, ran)
+	}
+}
+
 // TestMiddleware_AnonymousPath bypasses auth for configured prefixes.
 func TestMiddleware_AnonymousPath(t *testing.T) {
 	t.Parallel()

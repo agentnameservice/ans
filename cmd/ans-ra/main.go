@@ -413,6 +413,8 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithAnonymousPath("/v2/admin/health"),
 			auth.WithAnonymousPath("/v2/admin/ready"),
 			auth.WithAnonymousPath("/docs"),
+			// Per spec, the bundled attestation is anonymous-readable.
+			auth.WithAnonymousPathSuffix("/attestation"),
 		), nil
 	case "oidc":
 		return auth.NewOIDCProvider(
@@ -423,6 +425,7 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithOIDCAnonymousPath("/v2/admin/health"),
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
 			auth.WithOIDCAnonymousPath("/docs"),
+			auth.WithOIDCAnonymousPathSuffix("/attestation"),
 			// Empty AdminGroups means no OIDC user is admin —
 			// preserves prior behaviour for operators who haven't
 			// opted in. Spreading nil/empty into a variadic is the

@@ -26,10 +26,11 @@ import (
 //
 // Tokens are not cached; go-oidc caches the JWKS internally.
 type OIDCProvider struct {
-	verifier       *oidc.IDTokenVerifier
-	expectedAud    string
-	anonymousPaths []string
-	adminGroups    []string // groups granting admin privileges (optional)
+	verifier          *oidc.IDTokenVerifier
+	expectedAud       string
+	anonymousPaths    []string
+	anonymousSuffixes []string
+	adminGroups       []string // groups granting admin privileges (optional)
 }
 
 // OIDCOption configures an OIDCProvider.
@@ -38,6 +39,16 @@ type OIDCOption func(*OIDCProvider)
 // WithOIDCAnonymousPath makes a path prefix unauthenticated.
 func WithOIDCAnonymousPath(prefix string) OIDCOption {
 	return func(p *OIDCProvider) { p.anonymousPaths = append(p.anonymousPaths, prefix) }
+}
+
+// WithOIDCAnonymousPathSuffix makes every URL-path ending with
+// `suffix` unauthenticated. Mirrors WithAnonymousPathSuffix on the
+// static provider — needed for parameterized anonymous routes like
+// /v2/ans/agents/{agentId}/attestation.
+func WithOIDCAnonymousPathSuffix(suffix string) OIDCOption {
+	return func(p *OIDCProvider) {
+		p.anonymousSuffixes = append(p.anonymousSuffixes, suffix)
+	}
 }
 
 // WithAdminGroups lists group values that should be treated as admin.
@@ -131,6 +142,11 @@ func (p *OIDCProvider) Middleware() func(http.Handler) http.Handler {
 func (p *OIDCProvider) isAnonymousPath(path string) bool {
 	for _, prefix := range p.anonymousPaths {
 		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range p.anonymousSuffixes {
+		if strings.HasSuffix(path, suffix) {
 			return true
 		}
 	}
