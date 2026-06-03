@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.5](https://github.com/godaddy/ans/compare/v0.1.4...v0.1.5) (2026-06-03)
+
+
+### Features
+
+* **ra:** make identityCsrPEM optional on agent registration ([#33](https://github.com/godaddy/ans/issues/33)) ([f4e0619](https://github.com/godaddy/ans/commit/f4e0619782ac145ea4feae123b7fd5490f3fc09a))
+
 ## [0.1.4](https://github.com/godaddy/ans/compare/v0.1.3...v0.1.4) (2026-05-28)
 
 
