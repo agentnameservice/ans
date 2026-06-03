@@ -45,9 +45,8 @@ func TestNewRegistration_Valid(t *testing.T) {
 	assert.IsType(t, AgentRegisteredEvent{}, reg.PendingEvents[0])
 }
 
-// TestNewRegistration_NilIdentityCSR_Allowed is a RED gauge for AC-1 of
-// the optional-identity-CSR feature: registering without an identity CSR
-// must be allowed and must leave IdentityCSR nil.
+// TestNewRegistration_NilIdentityCSR_Allowed verifies that registering
+// without an identity CSR is allowed and leaves IdentityCSR nil.
 func TestNewRegistration_NilIdentityCSR_Allowed(t *testing.T) {
 	ansName, err := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
 	require.NoError(t, err)

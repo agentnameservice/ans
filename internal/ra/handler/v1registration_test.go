@@ -227,11 +227,11 @@ func TestV1Register_BothOrNeither_422(t *testing.T) {
 	}
 }
 
-// TestV1Register_NoIdentityCSR_ReachesActive covers V1 parity for the
-// optional identity-CSR feature: a V1 registration that omits
-// `identityCsrPEM` (server CSR still present) is accepted with 202 and
-// drives through verify-acme → verify-dns to ACTIVE. `identityCsrPEM` is
-// optional on both lanes; the agent simply gets no identity certificate.
+// TestV1Register_NoIdentityCSR_ReachesActive covers the V1 lane: a
+// registration that omits `identityCsrPEM` (server CSR still present) is
+// accepted with 202 and drives through verify-acme → verify-dns to
+// ACTIVE. `identityCsrPEM` is optional on both lanes; the agent simply
+// gets no identity certificate.
 func TestV1Register_NoIdentityCSR_ReachesActive(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)

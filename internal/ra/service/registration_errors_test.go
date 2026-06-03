@@ -195,9 +195,8 @@ func TestRegisterAgent_NoIdentityCSR_Succeeds(t *testing.T) {
 }
 
 // TestRegisterAgent_WithIdentityCSR_Unchanged is a regression pin: when
-// identityCsrPEM IS supplied, behavior is exactly as before the optional
-// path was introduced — a pending identity CSR row is created. Guards
-// against an over-broad edit that drops the supplied-CSR case.
+// identityCsrPEM IS supplied, a pending identity CSR row is created.
+// Guards against an over-broad edit that drops the supplied-CSR case.
 func TestRegisterAgent_WithIdentityCSR_Unchanged(t *testing.T) {
 	t.Parallel()
 	fx := newRegFixture(t)
