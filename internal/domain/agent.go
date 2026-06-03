@@ -144,9 +144,6 @@ func NewRegistration(
 	if len(endpoints) == 0 {
 		return nil, NewValidationError("MISSING_ENDPOINTS", "at least one endpoint is required")
 	}
-	if identityCSR == nil {
-		return nil, NewValidationError("MISSING_IDENTITY_CSR", "identityCsrPEM is required")
-	}
 
 	// Validate endpoints against the agent host.
 	eps := AgentEndpoints{AgentID: agentID, Endpoints: endpoints}

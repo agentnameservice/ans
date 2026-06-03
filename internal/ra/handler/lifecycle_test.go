@@ -304,6 +304,84 @@ func TestSubmitIdentityCSR_RejectedOnNonActiveAgent(t *testing.T) {
 	}
 }
 
+// registerAgentNoIdentityCSR is the no-identity-CSR analogue of
+// registerAgent: it POSTs a V2 registration that omits identityCsrPEM
+// (server CSR still supplied) and returns the new agentId.
+func (f *handlerFixture) registerAgentNoIdentityCSR(t *testing.T, ownerID, host, version string) string {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "No identity CSR",
+		"version":          version,
+		"agentHost":        host,
+		"endpoints": []map[string]any{
+			{"agentUrl": "https://" + host + "/mcp", "protocol": "MCP", "transports": []string{"SSE"}},
+		},
+		// identityCsrPEM intentionally omitted.
+		"serverCsrPEM": newTestServerCSR(t, host),
+	})
+	rec := f.request(t, http.MethodPost, "/v2/ans/agents", bytes.NewReader(body), f.asOwner(ownerID))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("register %s without identity CSR: status=%d body=%s", host, rec.Code, rec.Body)
+	}
+	var resp struct {
+		AgentID string `json:"agentId"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse register response: %v", err)
+	}
+	if resp.AgentID == "" {
+		t.Fatal("register returned empty agentId")
+	}
+	if resp.Status != "PENDING_VALIDATION" {
+		t.Fatalf("status: got %q want PENDING_VALIDATION", resp.Status)
+	}
+	return resp.AgentID
+}
+
+// TestRegister_NoIdentityCSR_Accepted covers the V2 optional
+// identity-CSR path at the HTTP layer: a registration omitting
+// identityCsrPEM is accepted with 202 + PENDING_VALIDATION (asserted in
+// the helper). The agent simply gets no identity certificate.
+func TestRegister_NoIdentityCSR_Accepted(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	if id := fx.registerAgentNoIdentityCSR(t, "alice", "no-id-csr.example.com", "1.0.0"); id == "" {
+		t.Fatal("expected a non-empty agentId")
+	}
+}
+
+// TestSubmitIdentityCSR_NoIdentityCSR_Rejected covers the no-add-later
+// guard at the HTTP layer: an ACTIVE agent that registered without an
+// identity CSR cannot obtain one via POST .../certificates/identity. It
+// must register a new version instead — the route returns 409 with code
+// IDENTITY_CSR_NOT_PERMITTED.
+func TestSubmitIdentityCSR_NoIdentityCSR_Rejected(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	host := "no-add-later.example.com"
+	agentID := fx.registerAgentNoIdentityCSR(t, "alice", host, "1.0.0")
+	fx.activateAgent(t, "alice", agentID)
+
+	csrPEM := newTestCSR(t, "ans://v1.0.0."+host)
+	body, _ := json.Marshal(map[string]any{"csrPEM": csrPEM})
+	rec := fx.request(t, http.MethodPost,
+		"/v2/ans/agents/"+agentID+"/certificates/identity",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("want 409, got %d body=%s", rec.Code, rec.Body)
+	}
+	var prob struct {
+		Code string `json:"code"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &prob); err != nil {
+		t.Fatalf("parse problem details: %v", err)
+	}
+	if prob.Code != "IDENTITY_CSR_NOT_PERMITTED" {
+		t.Fatalf("code: got %q want IDENTITY_CSR_NOT_PERMITTED", prob.Code)
+	}
+}
+
 func TestSubmitServerCSR_AcceptsRegardlessOfStatus(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
