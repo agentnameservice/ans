@@ -312,3 +312,141 @@ func TestV1VerifyACME_UnknownAgent(t *testing.T) {
 		t.Fatalf("unknown agent should not succeed; got %d body=%s", rec.Code, rec.Body)
 	}
 }
+
+// ----- optional `version` field on registration -----
+//
+// When `version` is omitted from a registration body the RA defaults
+// it to 1.0.0; an explicit empty string (or any malformed value) is
+// rejected as 422 MALFORMED_SEMVER. Both lanes share the behaviour.
+
+func TestRegister_OmittedVersionDefaultsTo100(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	const host = "omitted-version.example.com"
+
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "X",
+		"agentHost":        host,
+		"endpoints":        []map[string]any{{"agentUrl": "https://omitted-version.example.com", "protocol": "MCP", "transports": []string{"SSE"}}},
+		"serverCsrPEM":     newTestServerCSR(t, host),
+	})
+
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202; body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		AgentID string `json:"agentId"`
+		Status  string `json:"status"`
+		AnsName string `json:"ansName"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("parse 202: %v", err)
+	}
+	if resp.Status != "PENDING_VALIDATION" {
+		t.Errorf("status: got %q want PENDING_VALIDATION", resp.Status)
+	}
+	if want := "ans://v1.0.0." + host; resp.AnsName != want {
+		t.Errorf("ansName: got %q want %q", resp.AnsName, want)
+	}
+
+	// The default propagates to the read model.
+	det := fx.request(t, http.MethodGet, "/v2/ans/agents/"+resp.AgentID, nil, fx.asOwner("alice"))
+	if det.Code != http.StatusOK {
+		t.Fatalf("detail status: got %d want 200; body=%s", det.Code, det.Body)
+	}
+	var detail struct {
+		Version string `json:"version"`
+		AnsName string `json:"ansName"`
+	}
+	if err := json.Unmarshal(det.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("parse detail: %v", err)
+	}
+	if detail.Version != "1.0.0" {
+		t.Errorf("detail version: got %q want 1.0.0", detail.Version)
+	}
+}
+
+func TestRegister_EmptyStringVersionRejected(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "X",
+		"version":          "",
+		"agentHost":        "empty-version.example.com",
+		"endpoints":        []map[string]any{{"agentUrl": "https://empty-version.example.com", "protocol": "MCP", "transports": []string{"SSE"}}},
+		"serverCsrPEM":     newTestServerCSR(t, "empty-version.example.com"),
+	})
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf(`version "" status: got %d want 422; body=%s`, rec.Code, rec.Body)
+	}
+}
+
+func TestRegister_SuppliedVersionPreserved(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "X",
+		"version":          "2.5.1",
+		"agentHost":        "supplied-version.example.com",
+		"endpoints":        []map[string]any{{"agentUrl": "https://supplied-version.example.com", "protocol": "MCP", "transports": []string{"SSE"}}},
+		"serverCsrPEM":     newTestServerCSR(t, "supplied-version.example.com"),
+	})
+
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202; body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		AnsName string `json:"ansName"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if want := "ans://v2.5.1.supplied-version.example.com"; resp.AnsName != want {
+		t.Errorf("ansName: got %q want %q", resp.AnsName, want)
+	}
+}
+
+func TestV1Register_OmittedVersionDefaultsTo100(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "X",
+		"agentHost":        "omitted-version.example.com",
+		"endpoints":        []map[string]any{{"agentUrl": "https://omitted-version.example.com", "protocol": "MCP", "transports": []string{"SSE"}}},
+		"serverCsrPEM":     newTestServerCSR(t, "omitted-version.example.com"),
+	})
+
+	rec := fx.request(t, http.MethodPost, "/v1/agents/register",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status: got %d want 202; body=%s", rec.Code, rec.Body)
+	}
+	var resp struct {
+		AnsName string `json:"ansName"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
+	if want := "ans://v1.0.0.omitted-version.example.com"; resp.AnsName != want {
+		t.Errorf("ansName: got %q want %q", resp.AnsName, want)
+	}
+}
+
+func TestV1Register_EmptyStringVersionRejected(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "X",
+		"version":          "",
+		"agentHost":        "empty-version.example.com",
+		"endpoints":        []map[string]any{{"agentUrl": "https://empty-version.example.com", "protocol": "MCP", "transports": []string{"SSE"}}},
+		"serverCsrPEM":     newTestServerCSR(t, "empty-version.example.com"),
+	})
+	rec := fx.request(t, http.MethodPost, "/v1/agents/register",
+		bytes.NewReader(body), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf(`version "" status: got %d want 422; body=%s`, rec.Code, rec.Body)
+	}
+}

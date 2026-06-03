@@ -67,7 +67,7 @@ func NewV1RegistrationHandler(svc *service.RegistrationService) *V1RegistrationH
 type v1RegistrationRequest struct {
 	AgentDisplayName          string          `json:"agentDisplayName"`
 	AgentDescription          string          `json:"agentDescription,omitempty"`
-	Version                   string          `json:"version"`
+	Version                   *string         `json:"version"`
 	AgentHost                 string          `json:"agentHost"`
 	Endpoints                 []v1EndpointDTO `json:"endpoints"`
 	ServerCSRPEM              string          `json:"serverCsrPEM,omitempty"`
@@ -190,7 +190,7 @@ func (h *V1RegistrationHandler) Register(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	semver, err := domain.ParseSemVer(req.Version)
+	semver, err := domain.ResolveVersion(req.Version)
 	if err != nil {
 		WriteError(w, err)
 		return

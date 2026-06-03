@@ -32,7 +32,7 @@ func NewRegistrationHandler(svc *service.RegistrationService) *RegistrationHandl
 type registrationRequest struct {
 	AgentDisplayName          string        `json:"agentDisplayName"`
 	AgentDescription          string        `json:"agentDescription,omitempty"`
-	Version                   string        `json:"version"`
+	Version                   *string       `json:"version"`
 	AgentHost                 string        `json:"agentHost"`
 	Endpoints                 []endpointDTO `json:"endpoints"`
 	IdentityCSRPEM            string        `json:"identityCsrPEM"`
@@ -125,8 +125,8 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse version + host into an AnsName.
-	semver, err := domain.ParseSemVer(req.Version)
+	// Resolve version (absent → 1.0.0 default) + host into an AnsName.
+	semver, err := domain.ResolveVersion(req.Version)
 	if err != nil {
 		WriteError(w, err)
 		return

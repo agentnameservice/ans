@@ -1048,6 +1048,11 @@ components:
           type: string
           pattern: '^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$'
           example: 1.2.0
+          description: >-
+            Optional. A supplied value is validated against the
+            MAJOR.MINOR.PATCH pattern. When omitted, the agent's version
+            defaults to 1.0.0. An explicit empty string is rejected as
+            malformed — omit the field to take the default.
         agentHost:
           type: string
           maxLength: 253
@@ -1072,7 +1077,6 @@ components:
             must register a new version instead.
       required:
         - agentDisplayName
-        - version
         - agentHost
         - endpoints
 

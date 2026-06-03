@@ -70,6 +70,31 @@ func TestParseSemVer(t *testing.T) {
 	}
 }
 
+func TestResolveVersion(t *testing.T) {
+	strPtr := func(s string) *string { return &s }
+
+	t.Run("nil pointer defaults to 1.0.0", func(t *testing.T) {
+		got, err := ResolveVersion(nil)
+		require.NoError(t, err)
+		assert.True(t, got.Equal(mustSemVer(1, 0, 0)))
+	})
+
+	t.Run("valid value is parsed and preserved", func(t *testing.T) {
+		got, err := ResolveVersion(strPtr("2.3.4"))
+		require.NoError(t, err)
+		assert.True(t, got.Equal(mustSemVer(2, 3, 4)))
+	})
+
+	t.Run("empty and malformed values are rejected as MALFORMED_SEMVER", func(t *testing.T) {
+		for _, raw := range []string{"", "1.2", "abc", "v1.0.0", "1.0.0-rc1", " 1.0.0"} {
+			_, err := ResolveVersion(strPtr(raw))
+			var de *Error
+			require.ErrorAs(t, err, &de, "input %q", raw)
+			assert.Equal(t, "MALFORMED_SEMVER", de.Code, "input %q", raw)
+		}
+	})
+}
+
 func TestSemVer_String(t *testing.T) {
 	v, _ := NewSemVer(1, 2, 3)
 	assert.Equal(t, "1.2.3", v.String())

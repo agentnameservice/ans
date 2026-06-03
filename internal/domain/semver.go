@@ -9,6 +9,23 @@ import (
 
 var semverPattern = regexp.MustCompile(`^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$`)
 
+// DefaultVersion is the semver assigned when a registration request
+// omits the `version` field entirely. See ResolveVersion.
+func DefaultVersion() SimplifiedSemVer { return SimplifiedSemVer{major: 1, minor: 0, patch: 0} }
+
+// ResolveVersion maps an optional wire version to a domain semver.
+//
+// A non-nil pointer — including one addressing the empty string — is parsed
+// strictly via ParseSemVer, so an empty or malformed value is rejected
+// with a MALFORMED_SEMVER validation error. This is what distinguishes
+// an omitted field (default) from an explicit empty string (malformed).
+func ResolveVersion(raw *string) (SimplifiedSemVer, error) {
+	if raw == nil {
+		return DefaultVersion(), nil
+	}
+	return ParseSemVer(*raw)
+}
+
 // SimplifiedSemVer represents a simplified semantic version (major.minor.patch).
 // All components must be non-negative integers.
 type SimplifiedSemVer struct {
