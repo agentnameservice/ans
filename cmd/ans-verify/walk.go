@@ -226,12 +226,37 @@ func walkProviderAgents(
 					recordErr(wrapped)
 					continue
 				}
+				// Tile-size guard: a full tile MUST be EntryBundleWidth
+				// entries; a partial tile MUST be exactly `partial`. A
+				// hostile or buggy TL serving a truncated or oversized
+				// bundle would otherwise slip through silently — the
+				// checkpoint signature only binds the tree shape, not
+				// the bytes of any individual tile. Fail closed.
+				wantLen := uint64(layout.EntryBundleWidth)
+				if partial != 0 {
+					wantLen = uint64(partial)
+				}
+				if uint64(len(entries)) != wantLen {
+					wrapped := fmt.Errorf("%s: bundle has %d entries, want %d", path, len(entries), wantLen)
+					results[tileIdx] = tileResult{err: wrapped}
+					recordErr(wrapped)
+					continue
+				}
 				results[tileIdx] = tileResult{entries: entries}
 			}
 		}()
 	}
+	// Producer: stop enqueueing on cancel so a failure in one worker
+	// doesn't force the producer to push N more indices into the
+	// channel before close(jobs) unblocks. Workers still drain any
+	// already-queued indices via their wctx.Err() check.
+producer:
 	for tileIdx := range nTiles {
-		jobs <- tileIdx
+		select {
+		case jobs <- tileIdx:
+		case <-wctx.Done():
+			break producer
+		}
 	}
 	close(jobs)
 	wg.Wait()
@@ -611,7 +636,16 @@ func httpGetBytes(ctx context.Context, client *http.Client, url string) ([]byte,
 // from index 0..treeSize, decoding each leaf envelope and printing
 // the ones whose agent.host falls under -provider.
 func listMain(args []string) {
-	fs := flag.NewFlagSet("list", flag.ExitOnError)
+	// ContinueOnError lets us print a consistent custom usage and
+	// exit with code 1 on parse failure. flag.ExitOnError calls
+	// os.Exit(2) internally before Parse returns, so the err-check
+	// below would never fire.
+	fs := flag.NewFlagSet("list", flag.ContinueOnError)
+	fs.Usage = func() {
+		fmt.Fprintln(os.Stderr,
+			"usage: ans-verify list -provider <host> [-url <tl>] [-live=false] [-verify] [-concurrency N]")
+		fs.PrintDefaults()
+	}
 	var (
 		baseURL     string
 		provider    string
@@ -630,12 +664,11 @@ func listMain(args []string) {
 	fs.IntVar(&concurrency, "concurrency", 8,
 		"Number of parallel HTTP workers (1-64)")
 	if err := fs.Parse(args); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// fs.Usage already printed (Parse calls it on error).
 		os.Exit(1)
 	}
 	if provider == "" {
-		fmt.Fprintln(os.Stderr, "usage: ans-verify list -provider <host> [-url <tl>] [-live=false] [-verify] [-concurrency N]")
-		fs.PrintDefaults()
+		fs.Usage()
 		os.Exit(1)
 	}
 	baseURL = strings.TrimRight(baseURL, "/")

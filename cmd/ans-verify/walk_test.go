@@ -592,16 +592,25 @@ func TestWalkProviderAgents_ExternalContextCancel(t *testing.T) {
 
 func TestWalkProviderAgents_FetchErrorReportsTriggeringTile(t *testing.T) {
 	t.Parallel()
-	// Tile 5 500s, all others return valid (empty) bundles. The
-	// walker should surface the tile-5 error, not whichever
-	// lower-indexed tile happened to complete first.
+	// Tile 5 500s; tiles 0-4 return valid full-width bundles of stub
+	// envelopes that won't match the provider filter. The walker
+	// should surface the tile-5 error, not whichever lower-indexed
+	// tile happened to complete first.
+	full := make([][]byte, 256)
+	for i := range full {
+		full[i] = makeEnvelope(
+			fmt.Sprintf("ans://v1.stub%d.example.org", i),
+			fmt.Sprintf("stub%d.example.org", i),
+			"AGENT_REGISTERED",
+		)
+	}
+	fullBundle := encodeEntryBundle(full)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(r.URL.Path, "tile/entries/005") {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		// Empty bundle = zero leaves; the walker is fine with that.
-		_, _ = w.Write([]byte{})
+		_, _ = w.Write(fullBundle)
 	}))
 	t.Cleanup(srv.Close)
 	// 6 tiles' worth of leaves so tile 5 exists.
@@ -612,6 +621,52 @@ func TestWalkProviderAgents_FetchErrorReportsTriggeringTile(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "005") {
 		t.Errorf("err = %v, want one mentioning tile 005", err)
+	}
+}
+
+func TestWalkProviderAgents_RejectsWrongTileSize(t *testing.T) {
+	t.Parallel()
+	// Tile claims to be a full (256-leaf) tile but the server returns
+	// only 3 leaves. The size guard MUST reject — otherwise a hostile
+	// TL can hide entries by serving truncated bundles.
+	short := encodeEntryBundle([][]byte{
+		makeEnvelope("ans://v1.a.x", "a.x", "AGENT_REGISTERED"),
+		makeEnvelope("ans://v1.b.x", "b.x", "AGENT_REGISTERED"),
+		makeEnvelope("ans://v1.c.x", "c.x", "AGENT_REGISTERED"),
+	})
+	srv := tileServer(t, map[string][]byte{
+		"tile/entries/000": short, // path says full tile (no .p/N suffix)
+	})
+	_, err := walkProviderAgents(context.Background(), srv.Client(),
+		srv.URL, "x", 256, 1)
+	if err == nil {
+		t.Fatal("want size-mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "want 256") {
+		t.Errorf("err = %v, want one mentioning expected size 256", err)
+	}
+}
+
+func TestWalkProviderAgents_RejectsOversizedTile(t *testing.T) {
+	t.Parallel()
+	// Partial tile claims width 1 but the server returns 2 leaves.
+	// A hostile TL injecting extra leaves into a partial tile would
+	// otherwise slip through the checkpoint-signature check (the
+	// checkpoint binds tree shape, not tile contents).
+	over := encodeEntryBundle([][]byte{
+		makeEnvelope("ans://v1.a.x", "a.x", "AGENT_REGISTERED"),
+		makeEnvelope("ans://v1.b.x", "b.x", "AGENT_REGISTERED"),
+	})
+	srv := tileServer(t, map[string][]byte{
+		"tile/entries/000.p/1": over, // path says partial=1
+	})
+	_, err := walkProviderAgents(context.Background(), srv.Client(),
+		srv.URL, "x", 1, 1)
+	if err == nil {
+		t.Fatal("want size-mismatch error, got nil")
+	}
+	if !strings.Contains(err.Error(), "want 1") {
+		t.Errorf("err = %v, want one mentioning expected size 1", err)
 	}
 }
 
