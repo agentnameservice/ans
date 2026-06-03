@@ -156,24 +156,27 @@ func (s *RegistrationService) SubmitIdentityCSR(ctx context.Context, agentID, cs
 		return "", err
 	}
 
+	if reg.Status != domain.StatusActive {
+		return "", domain.NewInvalidStateError(
+			"AGENT_NOT_ACTIVE",
+			fmt.Sprintf("Agent must be ACTIVE to submit identity CSR. Current status: %s", reg.Status),
+		)
+	}
+
 	// No-add-later guard: an agent that registered without an identity
 	// CSR can never obtain one via rotation — it must register a new
 	// version instead. Identity-bearing agents have a signed identity
 	// certificate by the time they reach ACTIVE (issued at verify-acme);
-	// non identity-bearing agents never do. We gate only ACTIVE agents so a pending
-	// identity-bearing agent still gets the AGENT_NOT_ACTIVE signal from
-	// the aggregate's own status check below.
-	if reg.Status == domain.StatusActive {
-		idCerts, cerr := s.certs.FindIdentityCertificatesByAgent(ctx, agentID)
-		if cerr != nil {
-			return "", cerr
-		}
-		if len(idCerts) == 0 {
-			return "", domain.NewConflictError(
-				"IDENTITY_CSR_NOT_PERMITTED",
-				"agent was registered without an identity CSR; register a new version to obtain an identity certificate",
-			)
-		}
+	// non identity-bearing agents never do.
+	idCerts, cerr := s.certs.FindIdentityCertificatesByAgent(ctx, agentID)
+	if cerr != nil {
+		return "", cerr
+	}
+	if len(idCerts) == 0 {
+		return "", domain.NewConflictError(
+			"IDENTITY_CSR_NOT_PERMITTED",
+			"agent was registered without an identity CSR; register a new version to obtain an identity certificate",
+		)
 	}
 
 	if err := s.validator.ValidateIdentityCSR(ctx, csrPEM, reg.AnsName.String()); err != nil {

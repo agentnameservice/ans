@@ -52,8 +52,9 @@ func TestVerifyACME_NoIdentityCSR_ReachesActiveNoCert(t *testing.T) {
 }
 
 // TestVerifyDNS_NoIdentityCSR_V2EventEmptyIdentityCerts pins the V2 wire
-// shape for a no-identity-CSR agent: the emitted V2 event carries empty
-// attestations.identityCerts[].
+// shape for a no-identity-CSR agent: the emitted V2 event attests no
+// identity certs. Because identityCerts is tagged omitempty, the field
+// is absent on the wire (not an empty array) when there are none.
 func TestVerifyDNS_NoIdentityCSR_V2EventEmptyIdentityCerts(t *testing.T) {
 	t.Parallel()
 	fx := newRegFixture(t)
@@ -89,7 +90,7 @@ func TestVerifyDNS_NoIdentityCSR_V2EventEmptyIdentityCerts(t *testing.T) {
 			t.Fatalf("unmarshal inner V2 event: %v", err)
 		}
 		if ev.Attestations != nil && len(ev.Attestations.IdentityCerts) != 0 {
-			t.Fatalf("V2 event %q must carry empty identityCerts; got %d",
+			t.Fatalf("V2 event %q must attest no identityCerts (field absent or empty); got %d",
 				ev.EventType, len(ev.Attestations.IdentityCerts))
 		}
 	}
@@ -97,8 +98,9 @@ func TestVerifyDNS_NoIdentityCSR_V2EventEmptyIdentityCerts(t *testing.T) {
 
 // TestVerifyDNS_NoIdentityCSR_V1EventEmptyIdentityCert pins the V1 wire
 // shape for a no-identity-CSR agent: the emitted V1 AGENT_REGISTERED
-// event carries an empty identityCert singleton AND empty
-// validIdentityCerts[].
+// event attests no identity certs. Both identityCert (singleton) and
+// validIdentityCerts are tagged omitempty, so each field is absent on
+// the wire (not a null singleton or empty array) when there are none.
 func TestVerifyDNS_NoIdentityCSR_V1EventEmptyIdentityCert(t *testing.T) {
 	t.Parallel()
 	fx := newRegFixture(t)
@@ -146,10 +148,10 @@ func TestVerifyDNS_NoIdentityCSR_V1EventEmptyIdentityCert(t *testing.T) {
 		}
 		if ev.Attestations != nil {
 			if ev.Attestations.IdentityCert != nil {
-				t.Fatalf("V1 event must have empty identityCert singleton; got %+v", ev.Attestations.IdentityCert)
+				t.Fatalf("V1 event must attest no identityCert (field absent or null); got %+v", ev.Attestations.IdentityCert)
 			}
 			if len(ev.Attestations.ValidIdentityCerts) != 0 {
-				t.Fatalf("V1 event must have empty validIdentityCerts; got %d", len(ev.Attestations.ValidIdentityCerts))
+				t.Fatalf("V1 event must attest no validIdentityCerts (field absent or empty); got %d", len(ev.Attestations.ValidIdentityCerts))
 			}
 		}
 	}
