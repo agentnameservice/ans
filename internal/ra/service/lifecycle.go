@@ -155,6 +155,27 @@ func (s *RegistrationService) SubmitIdentityCSR(ctx context.Context, agentID, cs
 	if err != nil {
 		return "", err
 	}
+
+	// No-add-later guard: an agent that registered without an identity
+	// CSR can never obtain one via rotation — it must register a new
+	// version instead. Identity-bearing agents have a signed identity
+	// certificate by the time they reach ACTIVE (issued at verify-acme);
+	// non identity-bearing agents never do. We gate only ACTIVE agents so a pending
+	// identity-bearing agent still gets the AGENT_NOT_ACTIVE signal from
+	// the aggregate's own status check below.
+	if reg.Status == domain.StatusActive {
+		idCerts, cerr := s.certs.FindIdentityCertificatesByAgent(ctx, agentID)
+		if cerr != nil {
+			return "", cerr
+		}
+		if len(idCerts) == 0 {
+			return "", domain.NewConflictError(
+				"IDENTITY_CSR_NOT_PERMITTED",
+				"agent was registered without an identity CSR; register a new version to obtain an identity certificate",
+			)
+		}
+	}
+
 	if err := s.validator.ValidateIdentityCSR(ctx, csrPEM, reg.AnsName.String()); err != nil {
 		return "", domain.NewValidationError("INVALID_IDENTITY_CSR", err.Error())
 	}
@@ -301,37 +322,43 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 		}
 	}
 
-	// 2. Sign the identity CSR. Issuance + signing are CPU-bound and
-	//    do not touch the DB; we run them outside the tx so the
-	//    SQLite write lock isn't held during work that doesn't need
-	//    it. Same pattern below for the server CSR path.
+	// 2. Sign the identity CSR (when the agent registered with one).
+	//    Issuance + signing are CPU-bound and do not touch the DB; we
+	//    run them outside the tx so the SQLite write lock isn't held
+	//    during work that doesn't need it. Same pattern below for the
+	//    server CSR path.
+	//
+	//    A nil pending identity CSR is NOT an error: an agent may
+	//    register without an identity CSR (identityCsrPEM optional), in
+	//    which case there is no identity certificate to issue and we
+	//    leave signedID/storedID nil so the tx below skips persisting
+	//    them. The agent still advances to PENDING_DNS / ACTIVE.
 	identityCSR, err := s.certs.FindLatestPendingCSRByType(ctx, agentID, domain.CSRTypeIdentity)
 	if err != nil {
 		return nil, err
 	}
-	if identityCSR == nil {
-		return nil, domain.NewInvalidStateError(
-			"MISSING_IDENTITY_CSR",
-			"no pending identity CSR for agent — aggregate in inconsistent state",
-		)
-	}
-	issuedID, err := s.identityCA.IssueIdentityCertificate(ctx, identityCSR.CSRContent, reg.AnsName.String())
-	if err != nil {
-		return nil, domain.NewInternalError("CERT_ISSUE_FAILED", "failed to issue identity cert", err)
-	}
-	signedID, err := identityCSR.MarkSigned(now)
-	if err != nil {
-		return nil, err
-	}
-	reg.IdentityCSR = &signedID
-	storedID := &domain.StoredCertificate{
-		CSRID:               identityCSR.CSRID,
-		CertificateType:     domain.CertTypeIdentity,
-		CertificatePEM:      issuedID.CertPEM,
-		ChainPEM:            issuedID.ChainPEM,
-		Status:              domain.CertStatusValid,
-		IssueTimestamp:      issuedID.IssuedAt,
-		ExpirationTimestamp: issuedID.ExpiresAt,
+	var signedID *domain.AgentCSR
+	var storedID *domain.StoredCertificate
+	if identityCSR != nil {
+		issuedID, err := s.identityCA.IssueIdentityCertificate(ctx, identityCSR.CSRContent, reg.AnsName.String())
+		if err != nil {
+			return nil, domain.NewInternalError("CERT_ISSUE_FAILED", "failed to issue identity cert", err)
+		}
+		signed, err := identityCSR.MarkSigned(now)
+		if err != nil {
+			return nil, err
+		}
+		reg.IdentityCSR = &signed
+		signedID = &signed
+		storedID = &domain.StoredCertificate{
+			CSRID:               identityCSR.CSRID,
+			CertificateType:     domain.CertTypeIdentity,
+			CertificatePEM:      issuedID.CertPEM,
+			ChainPEM:            issuedID.ChainPEM,
+			Status:              domain.CertStatusValid,
+			IssueTimestamp:      issuedID.IssuedAt,
+			ExpirationTimestamp: issuedID.ExpiresAt,
+		}
 	}
 
 	// 3. CSR-path server cert: same shape — sign + validate up
@@ -361,13 +388,16 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 	//    Pre-tx, agent.Save committed first and a downstream failure
 	//    left a PENDING_DNS agent with no associated cert rows.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
-		// SaveCSR upserts on csr_id so the same row flips
-		// PENDING → SIGNED.
-		if err := s.certs.SaveCSR(txCtx, reg.AgentID, &signedID); err != nil {
-			return err
-		}
-		if err := s.certs.SaveIdentityCertificate(txCtx, reg.AgentID, storedID); err != nil {
-			return err
+		// Identity cert: persisted only when the agent registered with
+		// an identity CSR. SaveCSR upserts on csr_id so the same row
+		// flips PENDING → SIGNED.
+		if signedID != nil {
+			if err := s.certs.SaveCSR(txCtx, reg.AgentID, signedID); err != nil {
+				return err
+			}
+			if err := s.certs.SaveIdentityCertificate(txCtx, reg.AgentID, storedID); err != nil {
+				return err
+			}
 		}
 		if byocCert != nil {
 			if err := s.byoc.Save(txCtx, reg.AgentID, byocCert); err != nil {

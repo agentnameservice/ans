@@ -45,6 +45,30 @@ func TestNewRegistration_Valid(t *testing.T) {
 	assert.IsType(t, AgentRegisteredEvent{}, reg.PendingEvents[0])
 }
 
+// TestNewRegistration_NilIdentityCSR_Allowed is a RED gauge for AC-1 of
+// the optional-identity-CSR feature: registering without an identity CSR
+// must be allowed and must leave IdentityCSR nil.
+func TestNewRegistration_NilIdentityCSR_Allowed(t *testing.T) {
+	ansName, err := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	require.NoError(t, err)
+	endpoints := []AgentEndpoint{
+		{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
+	}
+	cert := &ByocServerCertificate{
+		SubjectCommonName:  "agent.example.com",
+		ValidFromTimestamp: time.Now().Add(-time.Hour),
+		ValidToTimestamp:   time.Now().Add(24 * time.Hour),
+	}
+
+	reg, err := NewRegistration(
+		"agent-uuid", "owner-1", ansName, "My Agent", "desc",
+		endpoints, cert, nil, time.Now(),
+	)
+	require.NoError(t, err, "nil identity CSR must be allowed")
+	require.NotNil(t, reg)
+	assert.Nil(t, reg.IdentityCSR, "registration must have nil IdentityCSR")
+}
+
 func TestNewRegistration_Validations(t *testing.T) {
 	validName, _ := NewAnsName(mustSemVer(1, 0, 0), "a.b.com")
 	validCSR := NewIdentityCSR("c", "x", time.Now())
@@ -68,7 +92,6 @@ func TestNewRegistration_Validations(t *testing.T) {
 		{"display name too long", "a", "o", validName, strings.Repeat("x", 65), "", validEndpoints, nil, &validCSR, "DISPLAY_NAME_TOO_LONG"},
 		{"description too long", "a", "o", validName, "", strings.Repeat("x", 151), validEndpoints, nil, &validCSR, "DESCRIPTION_TOO_LONG"},
 		{"no endpoints", "a", "o", validName, "", "", nil, nil, &validCSR, "MISSING_ENDPOINTS"},
-		{"missing csr", "a", "o", validName, "", "", validEndpoints, nil, nil, "MISSING_IDENTITY_CSR"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -51,8 +51,11 @@ type RegisterRequest struct {
 	DisplayName string
 	Description string
 	Endpoints   []domain.AgentEndpoint
-	// IdentityCSRPEM is always required — the identity cert is
-	// ALWAYS issued by the RA (never BYOC).
+	// IdentityCSRPEM is optional. When supplied, the RA issues an
+	// identity certificate from it at verify-acme (the identity cert
+	// is never BYOC). When empty, the agent registers without an
+	// identity certificate and can never add one later — it must
+	// register a new version instead.
 	IdentityCSRPEM string
 	// The server certificate can arrive in two shapes. Exactly one
 	// must be set (both set or neither set → 422):
@@ -306,20 +309,24 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		pendingServerCSR = &srvCSR
 	}
 
-	// Validate identity CSR shape. Signing is deferred to
-	// verify-acme; the CSR row stays PENDING until then.
-	if err := s.validator.ValidateIdentityCSR(ctx, req.IdentityCSRPEM, req.AnsName.String()); err != nil {
-		return nil, domain.NewValidationError("INVALID_IDENTITY_CSR", err.Error())
+	// Validate identity CSR shape (optional). When supplied, signing is
+	// deferred to verify-acme and the CSR row stays PENDING until then.
+	// When omitted, the agent registers without an identity certificate.
+	var identityCSR *domain.AgentCSR
+	if req.IdentityCSRPEM != "" {
+		if err := s.validator.ValidateIdentityCSR(ctx, req.IdentityCSRPEM, req.AnsName.String()); err != nil {
+			return nil, domain.NewValidationError("INVALID_IDENTITY_CSR", err.Error())
+		}
+		csr := domain.NewIdentityCSR(uuid.NewString(), req.IdentityCSRPEM, now)
+		identityCSR = &csr
 	}
 
 	// Build aggregates.
 	agentID := uuid.NewString()
-	csrID := uuid.NewString()
-	csr := domain.NewIdentityCSR(csrID, req.IdentityCSRPEM, now)
 
 	reg, err := domain.NewRegistration(
 		agentID, req.OwnerID, req.AnsName, req.DisplayName, req.Description,
-		req.Endpoints, byocCert, &csr, now,
+		req.Endpoints, byocCert, identityCSR, now,
 	)
 	if err != nil {
 		return nil, err
@@ -357,8 +364,10 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		}); err != nil {
 			return err
 		}
-		if err := s.certs.SaveCSR(txCtx, reg.AgentID, reg.IdentityCSR); err != nil {
-			return err
+		if reg.IdentityCSR != nil {
+			if err := s.certs.SaveCSR(txCtx, reg.AgentID, reg.IdentityCSR); err != nil {
+				return err
+			}
 		}
 		if reg.ServerCSR != nil {
 			if err := s.certs.SaveCSR(txCtx, reg.AgentID, reg.ServerCSR); err != nil {

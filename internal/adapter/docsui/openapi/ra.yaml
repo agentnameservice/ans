@@ -1065,12 +1065,16 @@ components:
           type: string
         identityCsrPEM:
           type: string
+          description: >-
+            Optional. When supplied, the RA issues an identity certificate
+            from this CSR at verify-acme. When omitted, the agent registers
+            without an identity certificate and cannot add one later — it
+            must register a new version instead.
       required:
         - agentDisplayName
         - version
         - agentHost
         - endpoints
-        - identityCsrPEM
 
     AgentRevocationRequest:
       type: object

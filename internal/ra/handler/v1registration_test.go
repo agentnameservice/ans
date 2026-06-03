@@ -227,25 +227,57 @@ func TestV1Register_BothOrNeither_422(t *testing.T) {
 	}
 }
 
-// TestV1Register_MissingIdentityCSR_422 confirms the handler rejects
-// requests without `identityCsrPEM` (required field per the
-// reference V1 API spec).
-func TestV1Register_MissingIdentityCSR_422(t *testing.T) {
+// TestV1Register_NoIdentityCSR_ReachesActive covers V1 parity for the
+// optional identity-CSR feature: a V1 registration that omits
+// `identityCsrPEM` (server CSR still present) is accepted with 202 and
+// drives through verify-acme → verify-dns to ACTIVE. `identityCsrPEM` is
+// optional on both lanes; the agent simply gets no identity certificate.
+func TestV1Register_NoIdentityCSR_ReachesActive(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
+	host := "no-id-csr.example.com"
 	reqBody, _ := json.Marshal(map[string]any{
-		"agentDisplayName": "No CSR",
+		"agentDisplayName": "No identity CSR",
 		"version":          "1.0.0",
-		"agentHost":        "agent.example.com",
+		"agentHost":        host,
 		"endpoints": []map[string]any{
-			{"agentUrl": "https://agent.example.com/mcp", "protocol": "MCP"},
+			{"agentUrl": "https://" + host + "/mcp", "protocol": "MCP"},
 		},
-		// identityCsrPEM intentionally omitted.
+		// identityCsrPEM intentionally omitted; server CSR still supplied.
+		"serverCsrPEM": newTestServerCSR(t, host),
 	})
 	rec := fx.request(t, http.MethodPost, "/v1/agents/register",
 		bytes.NewReader(reqBody), fx.asOwner("alice"))
-	if rec.Code != http.StatusUnprocessableEntity {
-		t.Fatalf("status: got %d want 422; body=%s", rec.Code, rec.Body)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("register without identity CSR: got %d want 202; body=%s", rec.Code, rec.Body)
+	}
+	var reg struct {
+		AgentID string `json:"agentId"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &reg); err != nil {
+		t.Fatalf("parse register response: %v", err)
+	}
+
+	// Drive the V1 lifecycle to ACTIVE.
+	if rec := fx.request(t, http.MethodPost, "/v1/agents/"+reg.AgentID+"/verify-acme", nil, fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-acme: got %d body=%s", rec.Code, rec.Body)
+	}
+	if rec := fx.request(t, http.MethodPost, "/v1/agents/"+reg.AgentID+"/verify-dns", nil, fx.asOwner("alice")); rec.Code != http.StatusAccepted {
+		t.Fatalf("verify-dns: got %d body=%s", rec.Code, rec.Body)
+	}
+
+	rec = fx.request(t, http.MethodGet, "/v1/agents/"+reg.AgentID, nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: got %d body=%s", rec.Code, rec.Body)
+	}
+	var detail struct {
+		AgentStatus string `json:"agentStatus"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatalf("parse detail: %v", err)
+	}
+	if detail.AgentStatus != "ACTIVE" {
+		t.Fatalf("agentStatus: got %q want ACTIVE", detail.AgentStatus)
 	}
 }
 
