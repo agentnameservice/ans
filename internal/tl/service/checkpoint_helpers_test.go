@@ -2,7 +2,6 @@ package service
 
 import (
 	"encoding/base64"
-	"encoding/binary"
 	"strings"
 	"testing"
 )
@@ -36,13 +35,14 @@ func TestTreeHeight(t *testing.T) {
 
 func TestSplitNoteBody_SingleSumdbSig(t *testing.T) {
 	t.Parallel()
-	// Construct a sumdb-note-style body.
-	// 4 keyhash bytes + 64-byte-ish ed25519 sig.
-	sigBytes := make([]byte, 4+64)
-	binary.BigEndian.PutUint32(sigBytes[:4], 0xdeadbeef)
-	// Fill the signature with some bytes — not validated here.
-	for i := 4; i < len(sigBytes); i++ {
-		sigBytes[i] = byte(i)
+	// Construct a sumdb-note-style body: 4 keyhash bytes followed by
+	// an ASN.1 DER ECDSA signature-shaped blob. The signature is not
+	// cryptographically validated in this parser test.
+	sigBytes := []byte{
+		0xde, 0xad, 0xbe, 0xef,
+		0x30, 0x06,
+		0x02, 0x01, 0x01,
+		0x02, 0x01, 0x02,
 	}
 	b64Sig := base64.StdEncoding.EncodeToString(sigBytes)
 	note := "ans-demo\n5\nhashhex\n\n\u2014 ans-demo " + b64Sig + "\n"
