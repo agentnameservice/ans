@@ -127,9 +127,8 @@ func TestNewJWSCheckpointSigner_NonECDSAKey(t *testing.T) {
 
 // ----- VerifyC2SPECDSA negative paths -----
 
-// VerifyC2SPECDSA's three reject branches: nil pubkey, empty
-// signature, and failure to split the P1363 signature into r/s
-// scalars. Each returns false instead of an error.
+// VerifyC2SPECDSA's malformed-input branches return false instead of
+// an error.
 func TestVerifyC2SPECDSA_NilPubKey(t *testing.T) {
 	if logstore.VerifyC2SPECDSA(nil, []byte("body"), []byte{0x01, 0x02}) {
 		t.Error("expected false for nil public key")
@@ -145,7 +144,8 @@ func TestVerifyC2SPECDSA_EmptySig(t *testing.T) {
 
 func TestVerifyC2SPECDSA_MalformedSig(t *testing.T) {
 	pub, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	// 5-byte sig isn't a valid P1363 signature (need 64 bytes for P-256).
+	// 5 bytes is neither a valid DER signature nor a legacy P-256
+	// P1363 signature.
 	if logstore.VerifyC2SPECDSA(&pub.PublicKey, []byte("body"), []byte{1, 2, 3, 4, 5}) {
 		t.Error("expected false for malformed signature")
 	}

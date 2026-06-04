@@ -89,7 +89,7 @@ type CheckpointView struct {
 type CheckpointSignatureView struct {
 	SignerName    string
 	SignatureType string      // "C2SP" (sumdb note) or "JWS" (additional signer)
-	Algorithm     string      // "ED25519" for C2SP, "ES256" for JWS
+	Algorithm     string      // "ES256" for the single ECDSA checkpoint signing key
 	KeyHash       string      // 4-byte hex, matches the keyhash in /root-keys
 	RawSignature  string      // base64-encoded raw signature bytes
 	JwsSignature  string      // full compact-JWS "header.payload.signature"
@@ -205,7 +205,7 @@ func (s *CheckpointService) viewFromRecord(rec *sqlitetl.CheckpointRecord) *Chec
 // amortized at page-render time.
 //
 // For the primary (sumdb-note) signer: verify the signature block
-// against the configured ed25519 verifier over the checkpoint body.
+// against the configured ECDSA verifier over the checkpoint body.
 //
 // Signature classification labels — match the reference TL wire and
 // the production /v1/log/checkpoint response. Lowercase by design.
@@ -235,8 +235,10 @@ func (s *CheckpointService) enrichSignatures(body string, sigs []CheckpointSigna
 
 // enrichC2SPSignature verifies a raw C2SP ECDSA signature against the
 // configured signing key. The signature line's base64 body is
-// `<keyhash:4><ecdsa-p1363-sig>`; we hand the signature bytes to
-// logstore.VerifyC2SPECDSA which re-hashes the checkpoint body.
+// `<keyhash:4><ecdsa-der-sig>` for current checkpoints; legacy local
+// dev checkpoints may still carry P1363 bytes. We hand the signature
+// bytes to logstore.VerifyC2SPECDSA which re-hashes the checkpoint
+// body and handles both encodings.
 func (s *CheckpointService) enrichC2SPSignature(body string, sv *CheckpointSignatureView) {
 	if s.signingKey == nil {
 		return
@@ -319,7 +321,7 @@ func treeHeight(size uint64) int {
 //
 // This doesn't re-verify anything — it just decomposes the stored
 // text into fields the REST response wants. Consumers that need
-// cryptographic verification should use the ed25519 verifier served
+// cryptographic verification should use the ECDSA verifier served
 // from /root-keys.
 func splitNoteBody(raw, origin string) (string, []CheckpointSignatureView) {
 	// The sumdb-note separator per golang.org/x/mod/sumdb/note is
@@ -389,8 +391,8 @@ func keyhashFromSumdbSig(b64 string) string {
 //
 // Detection: after the 4-byte keyhash prefix, a JWS starts with the
 // base64 of `{"alg":` — which in URL-safe base64 is `eyJhbGciOi`.
-// The primary C2SP signature is raw P1363 ECDSA (64 bytes), so that
-// prefix will not appear. Misclassification risk is ~1 in 2^80.
+// The primary C2SP signature is ASN.1 DER ECDSA, so that JWS prefix
+// will not appear. Misclassification risk is ~1 in 2^80.
 //
 // Labels match the reference TL production wire: lowercase
 // "c2sp" / "jws".

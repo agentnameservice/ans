@@ -23,12 +23,12 @@ import (
 // return, base64-encodes the combined blob, and writes it as the
 // `— <origin> <base64>` signature line.
 //
-// Sign(msg) returns a raw ECDSA signature in IEEE P1363 form over
+// Sign(msg) returns an ASN.1 DER ECDSA signature over
 // SHA-256(msg). The wire shape on the checkpoint note is therefore:
 //
-//	<keyhash:4> || <ecdsa-p1363-sig>
+//	<keyhash:4> || <ecdsa-der-sig>
 //
-// which is exactly what the reference TL's sigstore.Signer emits.
+// which is exactly what the production TL emits.
 //
 // Mirrors the reference's sigstore.LoadSigner /
 // `merkle.TesseraJWSSigner`'s primary signer, minus the KMS
@@ -86,34 +86,39 @@ func (s *C2SPECDSASigner) Name() string { return s.origin }
 // signature line agrees with the one advertised on /root-keys.
 func (s *C2SPECDSASigner) KeyHash() uint32 { return s.keyhash }
 
-// Sign implements note.Signer. Returns raw ECDSA P1363 signature
+// Sign implements note.Signer. Returns ASN.1 DER ECDSA signature
 // bytes over SHA-256(msg) — no JWS framing, no extra envelope. The
-// verifier recomputes SHA-256 over the same body bytes and verifies
-// against the key advertised at /root-keys.
+// note package prepends the 4-byte keyhash before writing the
+// checkpoint signature line. The verifier recomputes SHA-256 over
+// the same body bytes and verifies against the key advertised at
+// /root-keys.
 func (s *C2SPECDSASigner) Sign(msg []byte) ([]byte, error) {
 	digest := sha256.Sum256(msg)
 	rawSig, err := s.km.Sign(context.Background(), s.keyID, digest[:])
 	if err != nil {
 		return nil, fmt.Errorf("logstore: c2sp sign: %w", err)
 	}
-	// KeyManager returns ASN.1 DER; C2SP wants IEEE P1363 (r||s).
-	// P-256 coordinates are 32 bytes.
-	coordBytes := (s.pub.Curve.Params().BitSize + 7) / 8
-	p1363, err := anscrypto.DERToP1363(rawSig, coordBytes)
-	if err != nil {
-		return nil, fmt.Errorf("logstore: c2sp sig format: %w", err)
-	}
-	return p1363, nil
+	return rawSig, nil
 }
 
-// VerifyC2SPECDSA verifies a raw ECDSA P1363 signature over SHA-256
-// of the given checkpoint body. Used by the checkpoint-read path to
-// set `valid` on C2SP signature entries.
+// VerifyC2SPECDSA verifies an ASN.1 DER ECDSA signature over
+// SHA-256 of the given checkpoint body. Used by the checkpoint-read
+// path to set `valid` on C2SP signature entries.
+//
+// Legacy local-dev checkpoints were emitted as IEEE P1363 r||s
+// signatures, so verification accepts that form as a compatibility
+// fallback. New checkpoint signatures should be DER.
 func VerifyC2SPECDSA(pub *ecdsa.PublicKey, body, sig []byte) bool {
-	if pub == nil || len(sig) == 0 {
+	if pub == nil || pub.Curve == nil || len(sig) == 0 {
 		return false
 	}
 	digest := sha256.Sum256(body)
+	if ecdsa.VerifyASN1(pub, digest[:], sig) {
+		return true
+	}
+	if len(sig) != 2*anscrypto.CoordinateBytes(pub) {
+		return false
+	}
 	r, s, err := anscrypto.P1363ToScalars(sig)
 	if err != nil {
 		return false
