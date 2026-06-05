@@ -17,9 +17,9 @@ import (
 //     COSE (RFC 8152), and WebCrypto.
 //
 // Interop between these two worlds is the whole reason this file
-// exists. The reference TL converts at the KMS boundary; we do the
-// same at the KeyManager boundary so the rest of our code works in
-// JWS-native P1363 form.
+// exists. Callers that emit JWS or COSE convert DER signatures at
+// the KeyManager boundary so those wire formats stay in their
+// required P1363 form.
 
 // ErrInvalidP1363Length is returned when a P1363 signature is not
 // exactly 2*coordinateSize bytes.
