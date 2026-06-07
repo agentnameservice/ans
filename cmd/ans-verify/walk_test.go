@@ -7,6 +7,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
@@ -691,6 +692,12 @@ func TestMakeReceiptVerifier_NoKeys(t *testing.T) {
 // C2SPECDSASigner constructs the signature line (keyhash:4 || sig),
 // so verifyCheckpointNote exercises the same wire shape it does in
 // production.
+//
+// Signature format: ASN.1 DER ECDSA per godaddy/ans PR #38 (the
+// previous implementation emitted IEEE P1363 r||s, which the spec
+// — api-spec-tl-v2.yaml § CheckpointSignature.rawSignature — never
+// matched). VerifyC2SPECDSA still accepts P1363 as a legacy
+// fallback, but tests should pin the production format.
 func signTestCheckpoint(t *testing.T, priv *ecdsa.PrivateKey, origin string, size uint64, rootHash []byte) []byte {
 	t.Helper()
 	body := []byte(fmt.Sprintf("%s\n%d\n%s\n",
@@ -700,12 +707,10 @@ func signTestCheckpoint(t *testing.T, priv *ecdsa.PrivateKey, origin string, siz
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	// IEEE P1363 r||s, 32 bytes each on P-256.
-	const coord = 32
-	sig := make([]byte, 2*coord)
-	rBytes, sBytes := r.Bytes(), s.Bytes()
-	copy(sig[coord-len(rBytes):coord], rBytes)
-	copy(sig[2*coord-len(sBytes):], sBytes)
+	sig, err := asn1.Marshal(struct{ R, S *big.Int }{r, s})
+	if err != nil {
+		t.Fatalf("DER marshal: %v", err)
+	}
 
 	khex, err := keyHashHex(&priv.PublicKey)
 	if err != nil {
