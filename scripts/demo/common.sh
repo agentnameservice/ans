@@ -317,6 +317,29 @@ poll_tl_audit() {
   fail "TL not ready for $agent_id in ${timeout}s (records=${count:-0}, with merkle proof=${withproof:-0}; want $expected of each)"
 }
 
+# poll_tl_identity_audit IDENTITY_ID EXPECTED_COUNT [TIMEOUT_SECONDS]
+#
+# Sibling of poll_tl_audit for the identity stream: polls
+# /v1/identities/{identityId}/audit until it shows at least
+# EXPECTED_COUNT events with Merkle proofs.
+poll_tl_identity_audit() {
+  local identity_id="$1" expected="$2" timeout="${3:-30}"
+  local i=0 count withproof
+  while [ "$i" -lt "$timeout" ]; do
+    local resp
+    resp=$(curl -sSf -H "Authorization: Bearer $TL_API_KEY" \
+      "$TL_URL/v1/identities/$identity_id/audit" 2>/dev/null || true)
+    count=$(printf '%s' "$resp" | jq -r '(.records | length) // 0')
+    withproof=$(printf '%s' "$resp" | jq -r '[.records[]? | select(.merkleProof)] | length // 0')
+    if [ "${count:-0}" -ge "$expected" ] && [ "${withproof:-0}" -ge "$expected" ]; then
+      return 0
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  fail "TL not ready for identity $identity_id in ${timeout}s (records=${count:-0}, with merkle proof=${withproof:-0}; want $expected of each)"
+}
+
 # wait_ready URL [TIMEOUT_SECONDS]
 #
 # Polls URL once a second until it returns 200, or TIMEOUT expires.

@@ -25,6 +25,29 @@ dns:
   type: noop
   # server: "127.0.0.1:15353"
 
+identity:
+  # Verified identities — the "who" behind agents, proven through a
+  # challenge-bound key proof and sealed on their own TL stream.
+  # The did:web resolver mirrors the DNS verifier's noop/real split:
+  #   "noop" — no I/O; the DID document is synthesized from the keys
+  #            embedded in the submitted proofs' `jwk` headers.
+  #            Signature verification still genuinely runs; only the
+  #            "does the live did.json list this key" binding is
+  #            waived. Quickstart only — NOT for production.
+  #   "web"  — hardened HTTPS fetch of the DID document: WebPKI
+  #            validation, SSRF dialer guards, 5s timeout, bounded
+  #            same-site redirects.
+  # did:key identities never resolve anything — the key decodes from
+  # the identifier itself, so they work fully in both modes.
+  resolver:
+    type: noop
+  # challenge-ttl bounds the verify-control nonce (default 1h; 5m is
+  # the recommended floor for high-assurance deployments).
+  challenge-ttl: 1h
+  # register-rate-limit caps per-owner register/rotate calls per
+  # minute (each can trigger an outbound did:web fetch).
+  register-rate-limit: 10
+
 keys:
   type: file
   file:
