@@ -50,6 +50,16 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch: `ans-verify list ...` enumerates agents
+	// under a provider via tile-walk. Any other first-arg form falls
+	// through to the original single-agent verify path so existing
+	// invocations (`ans-verify <uuid>` or `ans-verify -agent <uuid>`)
+	// keep working unchanged.
+	if len(os.Args) > 1 && os.Args[1] == "list" {
+		listMain(os.Args[2:])
+		return
+	}
+
 	var (
 		baseURL   string
 		agentID   string
