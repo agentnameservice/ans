@@ -43,6 +43,14 @@ type TransparencyLog struct {
 	SchemaVersion string       `json:"schemaVersion,omitempty"`
 	Signature     string       `json:"signature,omitempty"`
 	Status        BadgeStatus  `json:"status,omitempty"`
+
+	// Identities is the computed read-time join of the agent's
+	// currently-linked verified identities — populated on the agent
+	// badge only (never on audit entries, never sealed). The handler
+	// composes it from the IdentityBadgeService so this service stays
+	// single-purpose. Covered by the TL's response signature, not by
+	// any seal: link facts live on the identity stream.
+	Identities []*LinkedIdentityView `json:"identities,omitempty"`
 }
 
 // BadgeService computes the badge from the latest mirrored event

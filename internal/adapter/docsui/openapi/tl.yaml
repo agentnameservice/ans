@@ -260,6 +260,255 @@ paths:
                 $ref: '#/components/schemas/Problem'
 
   # ──────────────────────────────────────────────────────────────
+  # Verified identities — the "who" behind agents
+  #
+  # There is ONE transparency log — a single Merkle tree. Identity
+  # events append to the same tree as agent events; the "identity
+  # stream" is a read index over that single log keyed by
+  # identityId, exactly as the agent surface is a read index keyed
+  # by ansId. Tiles/checkpoints/receipts/witnesses are unchanged.
+  #
+  # Placement rule: every IDENTITY_* event — proofs, rotations,
+  # revocations, AND links — is indexed under the identity stream.
+  # An identity operation never modifies an agent's event or audit
+  # history; the agent-side views below are read-time joins through
+  # the link events' agent index.
+  # ──────────────────────────────────────────────────────────────
+  /v1/internal/identities/event:
+    post:
+      tags: [Transparency Log]
+      summary: Append a signed identity event to the log
+      description: |
+        The identity-family ingest lane. Identical wire contract to
+        `/v1/internal/agents/event` — JCS-canonicalized inner event
+        body + detached-JWS `X-Signature`, same producer-key trust
+        store, same dedup — with the identity payload schema (keyed
+        by `identityId`, closed `IDENTITY_*` eventType enum). The
+        closed enums are the cross-lane guard: an `AGENT_*` body on
+        this route (or an `IDENTITY_*` body on an agent route) fails
+        validation with 422 `INVALID_EVENT`.
+      operationId: appendIdentityEvent
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          description: |
+            Detached JWS compact serialization over the raw request
+            body — same discipline as the agent lanes.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: JCS-canonicalized inner identity event (≤ 256 KiB).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityProducerEvent'
+      responses:
+        '200':
+          description: Event logged (or duplicate echoed — idempotent retries).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppendResponse'
+        '413':
+          description: Request body exceeds 256 KiB.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Body fails validation — same codes as the agent lanes,
+            including `INVALID_EVENT` for cross-lane posts.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/identities/{identityId}:
+    get:
+      tags: [Transparency Log]
+      summary: Identity badge
+      description: |
+        The latest sealed identity event + inclusion proof + computed
+        status (`VERIFIED` | `REVOKED`). The proof events seal every
+        proven key self-verifyingly: any third party reads the key
+        out of the sealed verbatim `verificationMethod`, verifies the
+        sealed `signedProof` against it, and confirms the payload
+        binds this identityId — offline, without trusting the RA.
+      operationId: getIdentityBadge
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      responses:
+        '200':
+          description: Identity badge retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransparencyLog'
+        '404':
+          description: No events for this identity.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/identities/{identityId}/audit:
+    get:
+      tags: [Transparency Log]
+      summary: Paginated audit history for an identity
+      description: |
+        The identity's full event chain — IDENTITY_VERIFIED, links,
+        rotations, revocation — in the exact same audit envelope as
+        the agent audit. This unbroken chain is the continuity
+        thread: when an agent's domain is lost, the identity stream
+        survives and links to the successor.
+      operationId: getIdentityAudit
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Audit records, newest-first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransparencyLogAudit'
+
+  /v1/identities/{identityId}/receipt:
+    get:
+      tags: [Transparency Log]
+      summary: SCITT receipt for the identity's latest event
+      description: |
+        COSE_Sign1 receipt (CBOR tag 18) for the identity's latest
+        sealed leaf — same machinery, media type, and 503 retry
+        semantics as the agent receipt.
+      operationId: getIdentityReceipt
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      responses:
+        '200':
+          description: Binary COSE_Sign1 receipt.
+          content:
+            application/scitt-receipt+cose:
+              schema:
+                type: string
+                format: binary
+        '404':
+          description: No events for this identity.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '503':
+          description: |
+            Leaf committed but no signed checkpoint covers it yet;
+            retry after the `Retry-After` delay.
+          headers:
+            Retry-After:
+              schema: { type: integer }
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/identities/{identityId}/agents:
+    get:
+      tags: [Transparency Log]
+      summary: Agents currently linked to the identity (reverse join)
+      description: |
+        Computed at query time from the link events' agent index:
+        every agent whose latest link/unlink fact naming it is
+        LINKED, each decorated with its own computed badge status so
+        a reader checks both ends of the link in one response.
+      operationId: getIdentityAgents
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      responses:
+        '200':
+          description: Currently-linked agents.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents]
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LinkedAgentView'
+        '404':
+          description: No events for this identity.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /v1/agents/{agentId}/identities:
+    get:
+      tags: [Transparency Log]
+      summary: Identities currently linked to the agent (computed)
+      description: |
+        The same entries as the agent badge's `identities[]` field,
+        served alone. Computed at read time — link live ∧ identity
+        stream state — never stored on, or sealed into, the agent.
+      operationId: getAgentIdentities
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: Currently-linked identities.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [identities]
+                properties:
+                  identities:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/LinkedIdentityView'
+
+  /v1/agents/{agentId}/identities/history:
+    get:
+      tags: [Transparency Log]
+      summary: Link/unlink events that ever named this agent
+      description: |
+        Past and present associations, in the STANDARD audit envelope
+        (each record a TransparencyLog) — no bespoke format. Filtered
+        through the link events' agent index; the records themselves
+        live on the identity streams. The agent's own `/audit` stays
+        purely AGENT_*. This endpoint is a droppable convenience: the
+        same view derives from the identity audits or the raw entry
+        tiles.
+      operationId: getAgentIdentityHistory
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
+      responses:
+        '200':
+          description: Link events naming this agent, newest-first.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TransparencyLogAudit'
+
+  # ──────────────────────────────────────────────────────────────
   # Log static artefacts + verifier keys (public under public-read)
   # ──────────────────────────────────────────────────────────────
   /root-keys:
@@ -689,6 +938,14 @@ components:
         type: string
         format: uuid
 
+    IdentityIdPath:
+      name: identityId
+      in: path
+      required: true
+      description: Immutable identity UUIDv7 — the identity stream key.
+      schema:
+        type: string
+
   schemas:
     # ── Ingest ─────────────────────────────────────────────────
     ProducerEvent:
@@ -763,7 +1020,22 @@ components:
         signature:     { type: string, description: "TL attestation (detached JWS)" }
         status:
           type: string
-          enum: [ACTIVE, REVOKED, DEPRECATED]
+          description: |
+            Read-time computed status. Agent badges derive ACTIVE /
+            REVOKED / DEPRECATED / EXPIRED / WARNING from the latest
+            event + attested cert expiry; identity badges derive
+            VERIFIED / REVOKED from the identity stream.
+          enum: [ACTIVE, REVOKED, DEPRECATED, EXPIRED, WARNING, VERIFIED]
+        identities:
+          type: array
+          description: |
+            Agent badges only — the COMPUTED read-time join of the
+            agent's currently-linked verified identities. Covered by
+            the TL's response signature, never by any seal; identity
+            rotation/revocation is visible here immediately with
+            zero agent-stream writes.
+          items:
+            $ref: '#/components/schemas/LinkedIdentityView'
 
     TransparencyLogAudit:
       type: object
@@ -788,6 +1060,133 @@ components:
             type: string
             description: "standard base64 of each sibling hash in order"
         treeVersion: { type: integer }
+
+    # ── Verified identities ────────────────────────────────────
+    IdentityProducerEvent:
+      type: object
+      description: |
+        The canonical inner identity event the RA POSTs to the
+        identity ingest lane. Sealed shapes are append-only-forever;
+        the five eventType tokens and these fields are the contract.
+        JCS-canonicalized when signed, same as the agent lanes.
+
+        Per-type required fields: proofs (IDENTITY_VERIFIED /
+        IDENTITY_UPDATED) carry non-empty `keys[]`, `verifiedAt`, and
+        `providerId`; IDENTITY_REVOKED carries `revokedAt`; the link
+        events carry non-empty `ansIds[]` (the whole batch in ONE
+        event) and are the only types allowed to name agents.
+      required: [identityId, kind, value, eventType, timestamp]
+      properties:
+        identityId: { type: string, description: "UUIDv7 — the identity stream key" }
+        kind:
+          type: string
+          enum: ['did:web', 'did:key', 'lei']
+        value:      { type: string, example: "did:web:identity.acme-corp.com" }
+        providerId: { type: string, description: "The owning principal — the WHO's owner" }
+        proofMethod:
+          type: string
+          enum: [did-web-sig, did-key-sig, lei-vlei-acdc]
+        eventType:
+          type: string
+          enum: [IDENTITY_VERIFIED, IDENTITY_UPDATED, IDENTITY_REVOKED, IDENTITY_LINKED, IDENTITY_UNLINKED]
+        keys:
+          type: array
+          description: |
+            The proven key set — sealed self-verifyingly: each entry
+            quotes the DID document's verification method VERBATIM
+            alongside the registrant's signed proof.
+          items:
+            $ref: '#/components/schemas/ProvenKey'
+        ansIds:
+          type: array
+          description: Linked agents' ids (IDENTITY_LINKED / IDENTITY_UNLINKED only)
+          items: { type: string }
+        previousValue: { type: string, description: "Pre-rotation identifier (IDENTITY_UPDATED)" }
+        verifiedAt:    { type: string, format: date-time }
+        revokedAt:     { type: string, format: date-time }
+        raId:          { type: string, example: "ans-ra-local" }
+        timestamp:     { type: string, format: date-time }
+
+    ProvenKey:
+      type: object
+      description: |
+        One key the registrant proved possession of, sealed
+        self-verifyingly: any third party reads the key material out
+        of `verificationMethod`, verifies `signedProof` against it,
+        then confirms the payload decodes to an IdentityProofInput
+        binding this identityId + identifier + purpose — offline,
+        without trusting the RA.
+
+        `verificationMethod` is quoted EXACTLY as the DID document
+        served it — `id`, `type`, `controller`, and the key material
+        in whichever representation the document used
+        (`publicKeyJwk`, or `publicKeyMultibase` for Multikey
+        documents) — member-for-member, values untouched. Nothing
+        derived, re-encoded, or normalized enters a seal; the event
+        envelope is JCS-canonicalized for signing like every event,
+        and JCS preserves member values exactly, so the quoted
+        material survives intact. Thumbprints are compute-at-read
+        conveniences (anyone can derive RFC 7638 from the sealed
+        source) and are never part of the sealed contract.
+
+        The postponed `lei` kind is the one deliberate exception:
+        it will seal the subject AID + a key thumbprint only — there
+        is no document to quote, the ACDC is PII, and KERI's KEL is
+        already the authoritative key history. Seal verbatim what
+        has no other tamper-evident home; commit minimally where one
+        exists.
+      required: [verificationMethod, signedProof]
+      properties:
+        verificationMethod:
+          type: object
+          description: The DID document's verification-method object, verbatim
+          example:
+            id: did:web:identity.acme-corp.com#key-1
+            type: JsonWebKey2020
+            controller: did:web:identity.acme-corp.com
+            publicKeyJwk: { kty: OKP, crv: Ed25519, x: "0-e2i2_..." }
+        signedProof:
+          type: string
+          description: The compact JWS over the served IdentityProofInput
+
+    LinkedIdentityView:
+      type: object
+      description: One computed identities[] entry on the agent badge.
+      required: [identityId, kind, value, identityStatus]
+      properties:
+        identityId:     { type: string }
+        kind:           { type: string, enum: ['did:web', 'did:key', 'lei'] }
+        value:          { type: string }
+        identityStatus:
+          type: string
+          enum: [VERIFIED, REVOKED]
+          description: Reflects the identity stream NOW
+        provenKeyIds:
+          type: array
+          description: |
+            Verification-method ids of the current proven key set
+            (post-rotation). The full verbatim methods live in the
+            sealed proof event.
+          items: { type: string }
+        linkedAt:  { type: string, format: date-time }
+        linkLogId:
+          type: string
+          description: The sealed IDENTITY_LINKED entry on the identity stream — fetch for link evidence
+        identityLogId:
+          type: string
+          description: Latest identity-stream entry — fetch for the identity evidence/history
+
+    LinkedAgentView:
+      type: object
+      description: One reverse-join entry (identity → agents).
+      required: [ansId]
+      properties:
+        ansId:       { type: string }
+        linkedAt:    { type: string, format: date-time }
+        agentStatus:
+          type: string
+          enum: [ACTIVE, REVOKED, DEPRECATED, EXPIRED, WARNING]
+          description: The linked agent's own computed badge status — a link is effective only while both ends are live
 
     # ── Admin: producer keys ───────────────────────────────────
     ProducerKeyRequest:

@@ -177,6 +177,7 @@ func run(cfgPath string) error {
 	// underlying Tessera reader gets torn down.
 	defer logSvc.Close()
 	badgeSvc := service.NewBadgeService(logSvc)
+	identityBadgeSvc := service.NewIdentityBadgeService(logSvc, badgeSvc)
 
 	// Receipt + status-token generators reuse the single signing
 	// key. Matches the reference TL's deployed topology: one KMS key
@@ -253,7 +254,7 @@ func run(cfgPath string) error {
 	}
 
 	h := handler.NewHandlers(
-		logSvc, badgeSvc, receiptSvc, statusTokenSvc,
+		logSvc, badgeSvc, identityBadgeSvc, receiptSvc, statusTokenSvc,
 		checkpointSvc, schemaSvc, rootKeysBody,
 	)
 	h.Mount(r, lg.DataDir())

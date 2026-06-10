@@ -46,12 +46,13 @@ import (
 
 // Handlers groups the TL HTTP handlers.
 type Handlers struct {
-	log         *service.LogService
-	badge       *service.BadgeService
-	receipt     *service.ReceiptService
-	statusToken *service.StatusTokenService // nil if status tokens are disabled
-	checkpoint  *service.CheckpointService
-	schema      *service.SchemaService
+	log           *service.LogService
+	badge         *service.BadgeService
+	identityBadge *service.IdentityBadgeService
+	receipt       *service.ReceiptService
+	statusToken   *service.StatusTokenService // nil if status tokens are disabled
+	checkpoint    *service.CheckpointService
+	schema        *service.SchemaService
 	// rootKeysBody is the pre-rendered text/plain body for the
 	// /root-keys endpoint — one verification-line per
 	// active TL verifier, in the order the operator wired them.
@@ -72,6 +73,7 @@ type Handlers struct {
 func NewHandlers(
 	log *service.LogService,
 	badge *service.BadgeService,
+	identityBadge *service.IdentityBadgeService,
 	receipt *service.ReceiptService,
 	statusToken *service.StatusTokenService,
 	checkpoint *service.CheckpointService,
@@ -79,13 +81,14 @@ func NewHandlers(
 	rootKeysBody []byte,
 ) *Handlers {
 	return &Handlers{
-		log:          log,
-		badge:        badge,
-		receipt:      receipt,
-		statusToken:  statusToken,
-		checkpoint:   checkpoint,
-		schema:       schema,
-		rootKeysBody: rootKeysBody,
+		log:           log,
+		badge:         badge,
+		identityBadge: identityBadge,
+		receipt:       receipt,
+		statusToken:   statusToken,
+		checkpoint:    checkpoint,
+		schema:        schema,
+		rootKeysBody:  rootKeysBody,
 	}
 }
 
@@ -105,11 +108,32 @@ func (h *Handlers) Mount(r chi.Router, tileRoot string) {
 	r.Post("/v1/internal/agents/event", h.AppendEventV1)
 	r.Post("/v2/internal/agents/event", h.AppendEventV2)
 
+	// Identity ingest — the IDENTITY_* event family rides the same
+	// producer-signature lane into the same Merkle tree; the
+	// dedicated route exists because the payload schema differs
+	// (keyed by identityId) and the closed enums are the cross-lane
+	// guard.
+	r.Post("/v1/internal/identities/event", h.AppendEventIdentity)
+
 	// Agent-scoped reads. Reference swagger §78-308.
 	r.Get("/v1/agents/{agentId}", h.GetBadge)
 	r.Get("/v1/agents/{agentId}/audit", h.GetAudit)
 	r.Get("/v1/agents/{agentId}/receipt", h.GetReceipt)
 	r.Get("/v1/agents/{agentId}/status-token", h.GetStatusToken)
+
+	// Agent-side computed identity views — read-time joins through
+	// the link events' agent index. Never stored on the agent; the
+	// agent's own audit stays purely AGENT_*.
+	r.Get("/v1/agents/{agentId}/identities", h.GetAgentIdentities)
+	r.Get("/v1/agents/{agentId}/identities/history", h.GetAgentIdentityHistory)
+
+	// Identity-stream reads — same response shapes as the agent
+	// reads (badge / audit envelope / COSE receipt), keyed by
+	// identityId, plus the reverse join to currently-linked agents.
+	r.Get("/v1/identities/{identityId}", h.GetIdentityBadge)
+	r.Get("/v1/identities/{identityId}/audit", h.GetIdentityAudit)
+	r.Get("/v1/identities/{identityId}/receipt", h.GetIdentityReceipt)
+	r.Get("/v1/identities/{identityId}/agents", h.GetIdentityAgents)
 
 	// Log metadata (JSON variants). Reference swagger §310-461.
 	r.Get("/v1/log/checkpoint", h.GetCheckpointJSON)
@@ -164,6 +188,15 @@ func (h *Handlers) AppendEventV2(w http.ResponseWriter, r *http.Request) {
 	h.appendEvent(w, r, h.log.AppendV2)
 }
 
+// AppendEventIdentity is the identity-family ingest entrypoint —
+// POST /v1/internal/identities/event. Same contract as the agent
+// lanes (raw inner-event body + X-Signature detached JWS, 256 KiB
+// cap); the identity codec enforces the IDENTITY_* enum and the
+// identityId keyspace.
+func (h *Handlers) AppendEventIdentity(w http.ResponseWriter, r *http.Request) {
+	h.appendEvent(w, r, h.log.AppendIdentity)
+}
+
 // appendEvent is the shared body-read / response-shape glue; the
 // passed-in `appendFn` picks which LogService path runs.
 func (h *Handlers) appendEvent(
@@ -212,7 +245,11 @@ func (h *Handlers) appendEvent(
 // GetBadge handles GET /v1/agents/{agentId}. Returns the
 // reference-shaped TransparencyLog JSON: merkleProof, payload (the
 // V1 envelope's payload piece), schemaVersion, signature (TL
-// attestation), status.
+// attestation), status — plus the computed identities[] join (the
+// agent's currently-linked verified identities, decorated with each
+// identity's current stream state). The join is read-time: rotation
+// and revocation on the identity stream are visible here immediately
+// with zero agent-stream writes.
 func (h *Handlers) GetBadge(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	if agentID == "" {
@@ -224,7 +261,141 @@ func (h *Handlers) GetBadge(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if h.identityBadge != nil {
+		identities, jerr := h.identityBadge.LinkedIdentitiesForAgent(r.Context(), agentID)
+		if jerr != nil {
+			writeError(w, jerr)
+			return
+		}
+		tl.Identities = identities
+	}
 	writeJSON(w, http.StatusOK, tl)
+}
+
+// GetAgentIdentities handles GET /v1/agents/{agentId}/identities —
+// the computed list of identities currently linked to the agent.
+// Identical entries to the badge's identities[] field, served alone
+// for callers who don't need the full badge.
+func (h *Handlers) GetAgentIdentities(w http.ResponseWriter, r *http.Request) {
+	agentID := chi.URLParam(r, "agentId")
+	if agentID == "" {
+		writeError(w, domain.NewValidationError("MISSING_AGENT_ID", "agentId is required"))
+		return
+	}
+	identities, err := h.identityBadge.LinkedIdentitiesForAgent(r.Context(), agentID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"identities": identities})
+}
+
+// GetAgentIdentityHistory handles
+// GET /v1/agents/{agentId}/identities/history — the link/unlink
+// events that ever named this agent, in the standard audit envelope
+// (each record a TransparencyLog), filtered through the agent index.
+// Past and present associations fall out of reading those events;
+// current state is the computed identities[] join.
+func (h *Handlers) GetAgentIdentityHistory(w http.ResponseWriter, r *http.Request) {
+	agentID := chi.URLParam(r, "agentId")
+	if agentID == "" {
+		writeError(w, domain.NewValidationError("MISSING_AGENT_ID", "agentId is required"))
+		return
+	}
+	limit, offset := parsePagination(r)
+	records, err := h.identityBadge.LinkHistoryForAgent(r.Context(), agentID, limit, offset)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": records})
+}
+
+// GetIdentityBadge handles GET /v1/identities/{identityId} — the
+// identity badge: latest sealed identity event + inclusion proof +
+// computed status (VERIFIED | REVOKED).
+func (h *Handlers) GetIdentityBadge(w http.ResponseWriter, r *http.Request) {
+	identityID := chi.URLParam(r, "identityId")
+	if identityID == "" {
+		writeError(w, domain.NewValidationError("MISSING_IDENTITY_ID", "identityId is required"))
+		return
+	}
+	tl, err := h.identityBadge.Get(r.Context(), identityID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, tl)
+}
+
+// GetIdentityAudit handles GET /v1/identities/{identityId}/audit —
+// the identity's full event chain in the same audit envelope as the
+// agent audit ({ records: [TransparencyLog, ...] }).
+func (h *Handlers) GetIdentityAudit(w http.ResponseWriter, r *http.Request) {
+	identityID := chi.URLParam(r, "identityId")
+	if identityID == "" {
+		writeError(w, domain.NewValidationError("MISSING_IDENTITY_ID", "identityId is required"))
+		return
+	}
+	limit, offset := parsePagination(r)
+	records, err := h.identityBadge.Audit(r.Context(), identityID, limit, offset)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"records": records})
+}
+
+// GetIdentityReceipt handles GET /v1/identities/{identityId}/receipt
+// — a SCITT COSE_Sign1 receipt for the identity's latest sealed
+// event. Same machinery, content type, and 503 retry semantics as
+// the agent receipt.
+func (h *Handlers) GetIdentityReceipt(w http.ResponseWriter, r *http.Request) {
+	identityID := chi.URLParam(r, "identityId")
+	if identityID == "" {
+		writeError(w, domain.NewValidationError("MISSING_IDENTITY_ID", "identityId is required"))
+		return
+	}
+	rec, err := h.receipt.ForIdentity(r.Context(), identityID)
+	if err != nil {
+		if errors.Is(err, service.ErrLeafNotYetCovered) {
+			w.Header().Set("Retry-After", "2")
+			writeJSON(w, http.StatusServiceUnavailable, problem{
+				Type:   "about:blank",
+				Title:  "Receipt Not Yet Available",
+				Status: http.StatusServiceUnavailable,
+				Code:   "TL_LEAF_UNCOMMITTED",
+				Detail: "leaf committed but no signed checkpoint yet covers it; retry after the Retry-After delay",
+			})
+			return
+		}
+		writeError(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", rec.ContentType)
+	w.Header().Set("Content-Length", strconv.Itoa(len(rec.Bytes)))
+	w.WriteHeader(http.StatusOK)
+	// nosemgrep: go.lang.security.audit.xss.no-direct-write-to-responsewriter.no-direct-write-to-responsewriter
+	// Binary COSE_Sign1 receipt (application/scitt-receipt+cose); not HTML, no user-controlled input.
+	_, _ = w.Write(rec.Bytes) //nolint:gosec // G705: binary receipt body, no XSS surface
+}
+
+// GetIdentityAgents handles GET /v1/identities/{identityId}/agents —
+// the reverse join: the agents this identity currently links to,
+// each decorated with its own computed badge status so a reader
+// checks both ends of the link in one response.
+func (h *Handlers) GetIdentityAgents(w http.ResponseWriter, r *http.Request) {
+	identityID := chi.URLParam(r, "identityId")
+	if identityID == "" {
+		writeError(w, domain.NewValidationError("MISSING_IDENTITY_ID", "identityId is required"))
+		return
+	}
+	agents, err := h.identityBadge.LinkedAgentsForIdentity(r.Context(), identityID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
 }
 
 // GetAudit handles GET /v1/agents/{agentId}/audit. Matches the
