@@ -47,10 +47,11 @@ func WithIdentity(ctx context.Context, id *port.Identity) context.Context {
 //
 // Do not use StaticProvider in production. Use OIDCProvider instead.
 type StaticProvider struct {
-	apiKey         string
-	apiSecret      string   // optional; enables the sso-key format when set
-	anonymousPaths []string // paths under which auth is not required
-	subject        string   // synthetic subject reported on success
+	apiKey            string
+	apiSecret         string   // optional; enables the sso-key format when set
+	anonymousPaths    []string // path prefixes under which auth is not required
+	anonymousSuffixes []string // path suffixes under which auth is not required
+	subject           string   // synthetic subject reported on success
 }
 
 // StaticOption configures a StaticProvider.
@@ -62,6 +63,17 @@ type StaticOption func(*StaticProvider)
 func WithAnonymousPath(prefix string) StaticOption {
 	return func(p *StaticProvider) {
 		p.anonymousPaths = append(p.anonymousPaths, prefix)
+	}
+}
+
+// WithAnonymousPathSuffix marks every URL-path ending with `suffix`
+// as unauthenticated. Use when the anonymous path is parameterized
+// (e.g. /v2/ans/agents/{agentId}/attestation) and a prefix match
+// would over-grant — anonymous read on the attestation endpoint
+// must not bleed into the owner-scoped sibling routes.
+func WithAnonymousPathSuffix(suffix string) StaticOption {
+	return func(p *StaticProvider) {
+		p.anonymousSuffixes = append(p.anonymousSuffixes, suffix)
 	}
 }
 
@@ -218,6 +230,11 @@ func (p *StaticProvider) Middleware() func(http.Handler) http.Handler {
 func (p *StaticProvider) isAnonymousPath(path string) bool {
 	for _, prefix := range p.anonymousPaths {
 		if strings.HasPrefix(path, prefix) {
+			return true
+		}
+	}
+	for _, suffix := range p.anonymousSuffixes {
+		if strings.HasSuffix(path, suffix) {
 			return true
 		}
 	}

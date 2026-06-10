@@ -13,9 +13,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -34,6 +36,8 @@ import (
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	"github.com/godaddy/ans/internal/adapter/tlclient"
 	"github.com/godaddy/ans/internal/config"
+	anscrypto "github.com/godaddy/ans/internal/crypto"
+	"github.com/godaddy/ans/internal/crypto/cose"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/handler"
 	ramiddleware "github.com/godaddy/ans/internal/ra/middleware"
@@ -226,6 +230,43 @@ func run(cfgPath string) error {
 	r.With(writeOwnership).Delete("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.CancelServerCertRenewal)
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/server/renewal/verify-acme", lifeH.VerifyRenewalACME)
 
+	// GET /v2/ans/agents/{agentId}/attestation — bundled signed
+	// attestation, anonymous read (no readOwnership middleware).
+	// Spec § /ans/agents/{agentId}/attestation: the attestation IS
+	// the document a third-party verifier fetches, so requiring
+	// ownership would defeat the purpose.
+	attClient := tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout)
+	attIssuer := cfg.Attestation.IssuerURL
+	if attIssuer == "" {
+		// Local-dev default: derive from listen address. Production
+		// configs MUST set attestation.issuer-url to the public origin
+		// — verifiers see this value byte-for-byte in the COSE iss.
+		attIssuer = "http://" + net.JoinHostPort(cfg.Server.Host, strconv.Itoa(cfg.Server.Port))
+	}
+	attKeyHash, err := anscrypto.SPKIKeyHash4(signerPub)
+	if err != nil {
+		return fmt.Errorf("compute signer keyhash: %w", err)
+	}
+	attSigner, err := cose.NewKeyManagerSigner(km, signerKeyID)
+	if err != nil {
+		return fmt.Errorf("build attestation signer: %w", err)
+	}
+	attSvc, err := service.NewAttestationService(agents, certsStore, byoc, attClient,
+		service.AttestationServiceConfig{
+			Issuer:      attIssuer,
+			TLLogURL:    cfg.TLClient.PublicBaseURL,
+			KeyHash:     attKeyHash,
+			Signer:      attSigner,
+			TTL:         cfg.Attestation.TTL,
+			TrustScheme: cfg.Attestation.TrustScheme,
+		})
+	if err != nil {
+		return fmt.Errorf("build attestation service: %w", err)
+	}
+	attH := handler.NewAttestationHandler(attSvc)
+	r.Get("/v2/ans/agents/{agentId}/attestation", attH.Get)
+	logger.Info().Str("issuer", attIssuer).Msg("attestation endpoint enabled")
+
 	// V1 RA surface — byte-for-byte parity with the reference V1 API
 	// spec. Shares the same RegistrationService as the V2 routes;
 	// only the DTO marshalling + TL-emit schema version differ. See
@@ -372,6 +413,8 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithAnonymousPath("/v2/admin/health"),
 			auth.WithAnonymousPath("/v2/admin/ready"),
 			auth.WithAnonymousPath("/docs"),
+			// Per spec, the bundled attestation is anonymous-readable.
+			auth.WithAnonymousPathSuffix("/attestation"),
 		), nil
 	case "oidc":
 		return auth.NewOIDCProvider(
@@ -382,6 +425,7 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithOIDCAnonymousPath("/v2/admin/health"),
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
 			auth.WithOIDCAnonymousPath("/docs"),
+			auth.WithOIDCAnonymousPathSuffix("/attestation"),
 			// Empty AdminGroups means no OIDC user is admin —
 			// preserves prior behaviour for operators who haven't
 			// opted in. Spreading nil/empty into a variadic is the

@@ -50,6 +50,17 @@ import (
 )
 
 func main() {
+	// Subcommand dispatch:
+	//   ans-verify attest [flags] <agent-id>  — verify the bundled
+	//     attestation from GET /v2/ans/agents/{id}/attestation against
+	//     the RA's producer pubkey AND the embedded SCITT receipt
+	//     against the TL's /root-keys.
+	// Otherwise the original single-agent receipt-verify flow runs.
+	if len(os.Args) > 1 && os.Args[1] == "attest" {
+		attestMain(os.Args[2:])
+		return
+	}
+
 	var (
 		baseURL   string
 		agentID   string

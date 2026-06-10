@@ -190,15 +190,39 @@ type Log struct {
 
 // RAConfig is the full configuration for ans-ra.
 type RAConfig struct {
-	Server   Server    `koanf:"server"`
-	Auth     Auth      `koanf:"auth"`
-	CA       CA        `koanf:"ca"`
-	DNS      DNS       `koanf:"dns"`
-	Keys     Keys      `koanf:"keys"`
-	Store    Store     `koanf:"store"`
-	TLClient TLClient  `koanf:"tl-client"`
-	Signer   SignerCfg `koanf:"signer"`
-	Log      Log       `koanf:"log"`
+	Server      Server         `koanf:"server"`
+	Auth        Auth           `koanf:"auth"`
+	CA          CA             `koanf:"ca"`
+	DNS         DNS            `koanf:"dns"`
+	Keys        Keys           `koanf:"keys"`
+	Store       Store          `koanf:"store"`
+	TLClient    TLClient       `koanf:"tl-client"`
+	Signer      SignerCfg      `koanf:"signer"`
+	Attestation AttestationCfg `koanf:"attestation"`
+	Log         Log            `koanf:"log"`
+}
+
+// AttestationCfg holds settings for the
+// GET /v2/ans/agents/{agentId}/attestation endpoint.
+type AttestationCfg struct {
+	// IssuerURL is the RA's externally-reachable base URL. Written
+	// into the attestation payload's `iss` field and the COSE
+	// protected header's CWT issuer claim. When empty, the RA
+	// derives a default from Server.{Host,Port} ("http://<host>:<port>")
+	// — fine for local dev, but operators MUST set this in production
+	// to the publicly-visible URL clients hit.
+	IssuerURL string `koanf:"issuer-url"`
+	// TTL is the attestation lifetime stamped onto each `exp` claim.
+	// Defaults to 1h (matches the Cache-Control: max-age=3600 the
+	// handler emits). Set lower if your verifier population needs
+	// tighter revocation propagation; raising it past the HTTP cache
+	// max-age would let CDNs serve attestations after their crypto
+	// expiry, which we never want.
+	TTL time.Duration `koanf:"ttl"`
+	// TrustScheme is an optional TRAIN trust-scheme DNS name written
+	// into the attestation payload. Omitted from the wire when empty
+	// (the only optional top-level field in the payload).
+	TrustScheme string `koanf:"trust-scheme"`
 }
 
 // SignerCfg names the KeyManager-managed key the RA uses to sign
