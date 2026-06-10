@@ -2,6 +2,7 @@ package port
 
 import (
 	"context"
+	"time"
 
 	"github.com/godaddy/ans/internal/domain"
 )
@@ -147,4 +148,63 @@ type ByocCertificateStore interface {
 	Save(ctx context.Context, agentID string, cert *domain.ByocServerCertificate) error
 	FindByAgentID(ctx context.Context, agentID string) ([]*domain.ByocServerCertificate, error)
 	FindLatestValidByAgentID(ctx context.Context, agentID string) (*domain.ByocServerCertificate, error)
+}
+
+// IdentityStore persists VerifiedIdentity aggregates (the "who" —
+// owned by a providerId, independent of any agent).
+type IdentityStore interface {
+	// Save upserts the aggregate. The storage layer enforces the two
+	// uniqueness rules with partial indexes: one live (non-REVOKED)
+	// row per (provider, kind, value), and one VERIFIED row per
+	// (kind, value) across all owners — first to prove wins; a save
+	// that loses the race maps to a conflict error.
+	Save(ctx context.Context, identity *domain.VerifiedIdentity) error
+
+	// FindByID returns the identity with the given identityId.
+	FindByID(ctx context.Context, identityID string) (*domain.VerifiedIdentity, error)
+
+	// FindLive returns the owner's non-REVOKED row for (kind, value),
+	// or a not-found error. Drives the idempotent re-add: a re-POST
+	// of the same value while PENDING_CONTROL returns the same
+	// identity with a fresh challenge.
+	FindLive(ctx context.Context, providerID string, kind domain.IdentifierKind, value string) (*domain.VerifiedIdentity, error)
+
+	// ExistsVerified reports whether ANY owner holds a VERIFIED row
+	// for (kind, value) — early duplicate feedback at register time.
+	// The authoritative guard is the proven-uniqueness index at
+	// verify time.
+	ExistsVerified(ctx context.Context, kind domain.IdentifierKind, value string) (bool, error)
+
+	// ListByOwner returns every identity owned by the principal,
+	// newest first.
+	ListByOwner(ctx context.Context, providerID string) ([]*domain.VerifiedIdentity, error)
+
+	// ConsumeChallenge atomically consumes the live challenge nonce:
+	// a conditional update that succeeds only while the stored nonce
+	// matches, is unconsumed, and is unexpired. Exactly one of two
+	// concurrent verify-control calls can win (the TOCTOU guard);
+	// the loser receives an invalid-state error. MUST be called
+	// inside the verify-control success transaction.
+	ConsumeChallenge(ctx context.Context, identityID, nonce string, now time.Time) error
+}
+
+// IdentityLinkStore persists identity↔agent link rows. Rows are
+// read-side caches of the sealed IDENTITY_LINKED / IDENTITY_UNLINKED
+// events; UNLINKED rows are history and never block re-linking.
+type IdentityLinkStore interface {
+	// Link upserts a live link for the pair. Returns true when a new
+	// link was created, false when the pair was already live
+	// (idempotent — an already-linked agent in a batch is not an
+	// error, and is excluded from the sealed batch event).
+	Link(ctx context.Context, identityID, agentID string, now time.Time) (bool, error)
+
+	// Unlink flips the live link to UNLINKED. Not-found error when no
+	// live link exists.
+	Unlink(ctx context.Context, identityID, agentID string, now time.Time) error
+
+	// ListLiveByIdentity returns the identity's live links.
+	ListLiveByIdentity(ctx context.Context, identityID string) ([]*domain.IdentityLink, error)
+
+	// ListLiveByAgent returns the agent's live links.
+	ListLiveByAgent(ctx context.Context, agentID string) ([]*domain.IdentityLink, error)
 }

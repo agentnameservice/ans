@@ -57,14 +57,20 @@ type AppendResult struct {
 // versions error rather than defaulting silently, because a wrong
 // lane means the TL will reject the body with a 422 that looks like
 // a signature failure — very hard to debug.
+//
+// "IDENTITY" is the third lane: the IDENTITY_* event family, keyed
+// by identityId, riding the same producer-signature discipline into
+// the same Merkle tree via its own ingest route.
 func ingestPathForVersion(schemaVersion string) (string, error) {
 	switch schemaVersion {
 	case "V1":
 		return "/v1/internal/agents/event", nil
 	case "V2":
 		return "/v2/internal/agents/event", nil
+	case "IDENTITY":
+		return "/v1/internal/identities/event", nil
 	default:
-		return "", fmt.Errorf("tlclient: unknown schemaVersion %q (want V1 or V2)", schemaVersion)
+		return "", fmt.Errorf("tlclient: unknown schemaVersion %q (want V1, V2, or IDENTITY)", schemaVersion)
 	}
 }
 

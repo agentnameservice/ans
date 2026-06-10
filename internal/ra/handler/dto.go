@@ -85,6 +85,38 @@ type agentDetails struct {
 	LastRenewalTimestamp  string                       `json:"lastRenewalTimestamp,omitempty"`
 	RegistrationPending   *registrationPendingResponse `json:"registrationPending,omitempty"`
 	Links                 []linkDTO                    `json:"links"`
+	// Identities is the additive computed view of the verified
+	// identities currently linked to this agent (design §5.4) —
+	// computed from the link rows at read time, never stored on the
+	// registration.
+	Identities []linkedIdentityDTO `json:"identities,omitempty"`
+}
+
+// linkedIdentityDTO is one computed identities[] entry.
+type linkedIdentityDTO struct {
+	IdentityID     string `json:"identityId"`
+	Kind           string `json:"kind"`
+	Value          string `json:"value"`
+	IdentityStatus string `json:"identityStatus"`
+	LinkedAt       string `json:"linkedAt,omitempty"`
+}
+
+// mapLinkedIdentities converts the service summaries to wire DTOs.
+func mapLinkedIdentities(in []service.LinkedIdentitySummary) []linkedIdentityDTO {
+	out := make([]linkedIdentityDTO, 0, len(in))
+	for _, s := range in {
+		dto := linkedIdentityDTO{
+			IdentityID:     s.IdentityID,
+			Kind:           string(s.Kind),
+			Value:          s.Value,
+			IdentityStatus: string(s.IdentityStatus),
+		}
+		if !s.LinkedAt.IsZero() {
+			dto.LinkedAt = s.LinkedAt.UTC().Format("2006-01-02T15:04:05Z07:00")
+		}
+		out = append(out, dto)
+	}
+	return out
 }
 
 func mapAgentDetails(res *service.DetailResult, r *http.Request, tlPublicBaseURL string) agentDetails {

@@ -20,6 +20,11 @@ func defaultRAConfig() *RAConfig {
 			},
 		},
 		DNS: DNS{Type: "noop"},
+		Identity: Identity{
+			Resolver:          IdentityResolver{Type: "noop"},
+			ChallengeTTL:      time.Hour,
+			RegisterRateLimit: 10,
+		},
 		Keys: Keys{
 			Type: "file",
 			File: &KeysFile{Path: "./data/ra/keys"},

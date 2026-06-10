@@ -3,6 +3,7 @@ package crypto
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -22,6 +23,7 @@ import (
 const (
 	AlgES256 = "ES256" // ECDSA P-256 + SHA-256 (primary)
 	AlgRS256 = "RS256" // RSA PKCS#1v1.5 + SHA-256 (interop only)
+	AlgEdDSA = "EdDSA" // Ed25519 over the raw signing input (identity proofs)
 )
 
 // Sentinel errors.
@@ -62,6 +64,12 @@ type JWSProtectedHeader struct {
 	// The TL uses this together with Kid to look up the producer key
 	// when verifying.
 	RAID string `json:"raid,omitempty"`
+	// Jwk optionally embeds the signer's public key (RFC 7515 §4.1.3).
+	// Identity control proofs set it so the noop DID resolver can
+	// synthesize a document from the submitted proofs; the web
+	// resolver ignores it — the authoritatively resolved document is
+	// always the key source. Never set on producer/TL signatures.
+	Jwk json.RawMessage `json:"jwk,omitempty"`
 }
 
 // SignDetachedJWS produces a detached JWS — compact-serialization
@@ -314,7 +322,8 @@ func VerifyStandardJWSWithPublicKey(pub any, jwsCompact string) (*JWSProtectedHe
 	if err != nil {
 		return nil, fmt.Errorf("%w: decode signature: %w", ErrJWSVerify, err)
 	}
-	digest := sha256.Sum256([]byte(encodedHeader + "." + encodedPayload))
+	signingInput := encodedHeader + "." + encodedPayload
+	digest := sha256.Sum256([]byte(signingInput))
 	switch key := pub.(type) {
 	case *ecdsa.PublicKey:
 		r, s, err := P1363ToScalars(sig)
@@ -328,10 +337,34 @@ func VerifyStandardJWSWithPublicKey(pub any, jwsCompact string) (*JWSProtectedHe
 		if err := rsaVerifyPKCS1v15(key, digest[:], sig); err != nil {
 			return nil, fmt.Errorf("%w: %w", ErrJWSVerify, err)
 		}
+	case ed25519.PublicKey:
+		// EdDSA signs the raw signing input — no prehash (RFC 8037 §3.1).
+		if !ed25519.Verify(key, []byte(signingInput), sig) {
+			return nil, fmt.Errorf("%w: ed25519 signature mismatch", ErrJWSVerify)
+		}
 	default:
 		return nil, fmt.Errorf("%w: unsupported public key type %T", ErrJWSVerify, pub)
 	}
 	return header, nil
+}
+
+// DecodeStandardJWS splits a standard (non-detached) compact JWS and
+// returns its decoded protected header plus the raw base64url payload
+// segment, without verifying anything. The identity verify-control
+// path uses it to (a) read kid/alg/jwk for key selection and (b)
+// enforce payload-equality against the served signingInput BEFORE any
+// signature verification — clients sign the served bytes verbatim and
+// never canonicalize.
+func DecodeStandardJWS(jwsCompact string) (*JWSProtectedHeader, string, error) {
+	encodedHeader, encodedPayload, _, err := splitStandardJWS(jwsCompact)
+	if err != nil {
+		return nil, "", fmt.Errorf("%w: %w", ErrJWSDecode, err)
+	}
+	header, err := decodeHeader(encodedHeader)
+	if err != nil {
+		return nil, "", err
+	}
+	return header, encodedPayload, nil
 }
 
 // splitStandardJWS parses the "header.payload.signature" compact form
@@ -458,6 +491,11 @@ func verifyWithPublicKey(pub any, alg, encodedHeader, encodedSig string, payload
 		if err := rsaVerifyPKCS1v15(key, digest[:], sig); err != nil {
 			return fmt.Errorf("%w: %w", ErrJWSVerify, err)
 		}
+	case ed25519.PublicKey:
+		// EdDSA signs the raw signing input — no prehash (RFC 8037 §3.1).
+		if !ed25519.Verify(key, []byte(signingInput), sig) {
+			return fmt.Errorf("%w: ed25519 signature mismatch", ErrJWSVerify)
+		}
 	default:
 		return fmt.Errorf("%w: unsupported public key type %T", ErrJWSVerify, pub)
 	}
@@ -491,6 +529,8 @@ func algForPublicKey(pub any) (string, error) {
 		return AlgES256, nil
 	case *rsa.PublicKey:
 		return AlgRS256, nil
+	case ed25519.PublicKey:
+		return AlgEdDSA, nil
 	default:
 		return "", fmt.Errorf("jws: unsupported public key type %T", pub)
 	}
@@ -508,6 +548,11 @@ func checkAlgMatchesKey(alg string, pub any) error {
 			return fmt.Errorf("jws: alg RS256 requires RSA key, got %T", pub)
 		}
 		return nil
+	case AlgEdDSA:
+		if _, ok := pub.(ed25519.PublicKey); !ok {
+			return fmt.Errorf("jws: alg EdDSA requires Ed25519 key, got %T", pub)
+		}
+		return nil
 	default:
 		return fmt.Errorf("jws: unsupported algorithm %q", alg)
 	}
@@ -519,6 +564,8 @@ func joseAlgorithm(alg string) (jose.SignatureAlgorithm, error) {
 		return jose.ES256, nil
 	case AlgRS256:
 		return jose.RS256, nil
+	case AlgEdDSA:
+		return jose.EdDSA, nil
 	default:
 		return "", fmt.Errorf("jws: unsupported algorithm %q", alg)
 	}
