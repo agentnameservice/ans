@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -207,6 +208,22 @@ func validateURL(rawURL, fieldName string) error {
 			"INVALID_ENDPOINT",
 			fmt.Sprintf("%s is not a valid URL: %q", fieldName, rawURL),
 		)
+	}
+	// url.Parse accepts any positive integer port string. An
+	// out-of-range port (0, 99999, or a 64-bit overflow value) would
+	// flow into the SVCB `port=` SvcParam and the TLSA owner name
+	// (`_<port>._tcp.`), producing a record set no DNS provider will
+	// accept — the operator would strand their own agent in
+	// PENDING_DNS with an unexplainable verify-dns mismatch. Reject it
+	// loudly here at the registration boundary instead.
+	if p := parsed.Port(); p != "" {
+		n, perr := strconv.Atoi(p)
+		if perr != nil || n < 1 || n > 65535 {
+			return NewValidationError(
+				"INVALID_ENDPOINT",
+				fmt.Sprintf("%s port %q is outside the valid range 1-65535", fieldName, p),
+			)
+		}
 	}
 	return nil
 }

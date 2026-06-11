@@ -7,7 +7,7 @@ import (
 	"github.com/godaddy/ans/internal/port"
 )
 
-// TXTStyle implements port.DiscoveryStyle for the original `_ans` TXT
+// TXTProfile implements port.ProfileEmitter for the original `_ans` TXT
 // shape (ANS_TXT). It emits one TXT row per protocol endpoint at
 // `_ans.<fqdn>` plus an HTTPS RR at the bare FQDN (when at least one
 // endpoint is present), plus the ANS-family trust records.
@@ -24,28 +24,28 @@ import (
 // Required=false because operators on CNAME-fronted apex zones cannot
 // publish this record at the same name (CNAME at @ blocks HTTPS RR
 // per RFC 1034 §3.6.2); the spec does not block them on its absence.
-type TXTStyle struct {
+type TXTProfile struct {
 	// tlPublicBaseURL feeds the family `_ans-badge` url= via BadgeRecord
 	// (empty falls the badge back to the agent's own endpoint URL). Set
-	// once by NewTXTStyle; styles are immutable after wiring, so Records
+	// once by NewTXTProfile; profiles are immutable after wiring, so Records
 	// stays a pure function of reg.
 	tlPublicBaseURL string
 }
 
-// NewTXTStyle builds an ANS_TXT style whose family `_ans-badge` record
+// NewTXTProfile builds an ANS_TXT profile whose family `_ans-badge` record
 // points at the transparency log at tlPublicBaseURL. Empty tlPublicBaseURL
 // falls the badge back to the agent's own endpoint URL.
-func NewTXTStyle(tlPublicBaseURL string) TXTStyle {
-	return TXTStyle{tlPublicBaseURL: tlPublicBaseURL}
+func NewTXTProfile(tlPublicBaseURL string) TXTProfile {
+	return TXTProfile{tlPublicBaseURL: tlPublicBaseURL}
 }
 
 // ID returns ANS_TXT.
-func (TXTStyle) ID() domain.DNSRecordStyle { return domain.DNSRecordStyleTXT }
+func (TXTProfile) ID() domain.DiscoveryProfile { return domain.DiscoveryProfileANSTXT }
 
 // Records returns the `_ans` TXT rows (one per endpoint) plus the
 // HTTPS RR (when at least one endpoint exists) plus the family trust
 // records.
-func (s TXTStyle) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord {
+func (s TXTProfile) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord {
 	fqdn := reg.FQDN()
 	version := reg.AnsName.Version().String()
 	var records []domain.ExpectedDNSRecord
@@ -76,4 +76,4 @@ func (s TXTStyle) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRec
 	return records
 }
 
-var _ port.DiscoveryStyle = TXTStyle{}
+var _ port.ProfileEmitter = TXTProfile{}

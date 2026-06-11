@@ -10,11 +10,11 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
-func TestTXTStyle_ID(t *testing.T) {
-	assert.Equal(t, domain.DNSRecordStyleTXT, TXTStyle{}.ID())
+func TestTXTProfile_ID(t *testing.T) {
+	assert.Equal(t, domain.DiscoveryProfileANSTXT, TXTProfile{}.ID())
 }
 
-func TestTXTStyle_Records(t *testing.T) {
+func TestTXTProfile_Records(t *testing.T) {
 	tests := []struct {
 		name        string
 		eps         []domain.AgentEndpoint
@@ -65,7 +65,7 @@ func TestTXTStyle_Records(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := mustReg(t, "agent.example.com", tc.eps, nil)
-			records := TXTStyle{}.Records(reg)
+			records := TXTProfile{}.Records(reg)
 
 			var txtRows int
 			var httpsRows int
@@ -104,15 +104,15 @@ func TestTXTStyle_Records(t *testing.T) {
 	}
 }
 
-// TestTXTStyle_RecordsIncludesFamilyTrustRecords pins that TXTStyle is
-// self-contained in the same way as SVCBStyle: it emits the family
+// TestTXTProfile_RecordsIncludesFamilyTrustRecords pins that TXTProfile is
+// self-contained in the same way as SVCBProfile: it emits the family
 // badge and TLSA records.
-func TestTXTStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
+func TestTXTProfile_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		&domain.ByocServerCertificate{Fingerprint: "deadbeef"})
 
-	records := TXTStyle{}.Records(reg)
+	records := TXTProfile{}.Records(reg)
 
 	var sawBadge, sawTLSA bool
 	for _, r := range records {
@@ -127,23 +127,23 @@ func TestTXTStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	assert.True(t, sawTLSA)
 }
 
-// TestTXTStyle_NoEndpointsSkipsAllFamilyAndDiscoveryRecords pins the
+// TestTXTProfile_NoEndpointsSkipsAllFamilyAndDiscoveryRecords pins the
 // existing-behavior contract that an empty endpoint list produces an
 // empty record set when ServerCert is also nil. Zero endpoints + nil
 // cert means there's nothing meaningful to publish.
-func TestTXTStyle_NoEndpointsSkipsAllFamilyAndDiscoveryRecords(t *testing.T) {
+func TestTXTProfile_NoEndpointsSkipsAllFamilyAndDiscoveryRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com", nil, nil)
-	records := TXTStyle{}.Records(reg)
+	records := TXTProfile{}.Records(reg)
 	require.Empty(t, records)
 }
 
-// TestTXTStyle_ZeroEndpointsWithCertOnlyEmitsTLSA pins that even with
+// TestTXTProfile_ZeroEndpointsWithCertOnlyEmitsTLSA pins that even with
 // zero endpoints, a registration that has a server cert still gets the
 // TLSA record. (The badge requires endpoints; TLSA does not.)
-func TestTXTStyle_ZeroEndpointsWithCertOnlyEmitsTLSA(t *testing.T) {
+func TestTXTProfile_ZeroEndpointsWithCertOnlyEmitsTLSA(t *testing.T) {
 	reg := mustReg(t, "agent.example.com", nil,
 		&domain.ByocServerCertificate{Fingerprint: "abcd"})
-	records := TXTStyle{}.Records(reg)
+	records := TXTProfile{}.Records(reg)
 	require.Len(t, records, 1)
 	assert.Equal(t, domain.DNSRecordTLSA, records[0].Type)
 }

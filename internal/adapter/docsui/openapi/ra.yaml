@@ -1023,22 +1023,48 @@ components:
       type: string
       enum: [A2A, MCP, HTTP-API]
 
-    DNSRecordStyle:
+    DiscoveryProfile:
       type: string
       enum: [ANS_SVCB, ANS_TXT]
       description: |
         Names one DNS record family the RA can emit for an agent
-        registration. Used as the element type of dnsRecordStyles[].
+        registration. Used as the element type of discoveryProfiles[].
+        Each value provisions a complete record set, not a single
+        record — the bullets below enumerate exactly what an operator
+        must publish for that profile.
 
-        - ANS_SVCB: Consolidated Approach SVCB rows at the bare FQDN
-          per RFC 9460. One row per protocol carrying alpn, port, wk,
-          and (when the endpoint has a metadataHash) card-sha256
-          SvcParams. The recommended default for new integrations.
-        - ANS_TXT: original `_ans` TXT shape (one row per protocol),
-          supported indefinitely for operators with existing zone-edit
-          tooling that targets `_ans.{fqdn}`. Emits an HTTPS RR at
-          the bare FQDN alongside, since `_ans` TXT carries no
-          connection hints.
+        - ANS_SVCB: the Consolidated Approach (RFC 9460), recommended
+          default for new integrations. Provisions:
+            1. One SVCB row per protocol endpoint at the bare FQDN
+               (ServiceMode `1 .`), carrying `alpn` (the protocol
+               token: a2a / mcp / http-api), `port` (the endpoint's
+               TLS port), `key65280` (the well-known path suffix, e.g.
+               agent-card.json for A2A; omitted for protocols with no
+               metadata-file convention), and `key65281` (the
+               base64url capability digest, present only when the
+               endpoint declared a metaDataHash). `key65280` and
+               `key65281` are the RFC 9460 §14.3.1 Private Use
+               presentation of the draft `wk` / `cap-sha256` SvcParams,
+               which have no IANA code point yet; the named forms are
+               unpublishable (strict RFC 9460 parsers reject them), so
+               the keyNNNNN forms are what reaches DNS. They switch
+               back to named forms if/when IANA registers the keys.
+            2. One `_ans-badge` TXT at `_ans-badge.{fqdn}` (the
+               transparency-log discovery hint).
+            3. One TLSA per distinct TLS port at `_<port>._tcp.{fqdn}`
+               binding the server certificate (DANE-EE, full cert,
+               SHA-256), emitted only when a server certificate exists.
+        - ANS_TXT: original `_ans` TXT shape (one row per protocol at
+          `_ans.{fqdn}`), supported indefinitely for operators with
+          existing zone-edit tooling that targets `_ans.{fqdn}`. Emits
+          an HTTPS RR at the bare FQDN alongside carrying only
+          `alpn=h2` (an IANA-registered SvcParam — no keyNNNNN form is
+          needed here; the asymmetry with ANS_SVCB is intentional),
+          since `_ans` TXT carries no connection hints. The HTTPS RR is
+          best-effort: operators on CNAME-fronted apexes cannot publish
+          a record at that name (RFC 1034 §3.6.2) and verification does
+          not require it. Provisions the same `_ans-badge` TXT and
+          per-port TLSA records as ANS_SVCB.
 
     RevocationReason:
       type: string
@@ -1082,33 +1108,42 @@ components:
           type: string
         identityCsrPEM:
           type: string
-        dnsRecordStyles:
+        discoveryProfiles:
           type: array
           items:
-            $ref: '#/components/schemas/DNSRecordStyle'
+            $ref: '#/components/schemas/DiscoveryProfile'
           uniqueItems: true
           minItems: 1
           description: |
-            Set of DNS record families the RA emits in the 202 register
-            response's dnsRecords[] and in the AGENT_REGISTERED TL
-            event's attestations.dnsRecordsProvisioned[]. Not echoed on
-            GET /v2/ans/agents/{agentId}.
+            Set of DNS record families the RA tells the operator to
+            publish and emits in the AGENT_REGISTERED TL event's
+            attestations.dnsRecordsProvisioned[]. The computed records
+            surface to the client on GET /v2/ans/agents/{agentId} as
+            registrationPending.dnsRecords[] once the agent reaches
+            PENDING_DNS — not on the 202 register response, which
+            returns only the ACME challenge (production records are
+            deferred until verify-acme proves domain control and issues
+            the certificates the TLSA binding depends on).
 
             Each value names one record family; an operator publishing
             the union (Consolidated Approach SVCB plus the original
-            `_ans` TXT shape) sends both. Order is not significant and
-            duplicates are rejected (`uniqueItems: true`).
+            `_ans` TXT shape) sends both. Order is not significant.
 
-            Omitted/missing normalizes to ["ANS_SVCB"] server-side
-            (the recommended default per RFC 9460). An explicit empty
-            array is rejected (`minItems: 1`).
+            Omitted normalizes to ["ANS_SVCB"] server-side (the
+            recommended default per RFC 9460). The `minItems`/
+            `uniqueItems` schema constraints are the canonical client
+            contract — validate before sending. A non-conformant
+            request (an explicit empty array, or duplicate values) is
+            handled defensively rather than rejected: empty is treated
+            as omitted and duplicates are ignored, but conformant
+            clients never send either.
           example: ["ANS_SVCB"]
       required:
         - agentDisplayName
-        - version
         - agentHost
         - endpoints
         - identityCsrPEM
+        - version
 
     AgentRevocationRequest:
       type: object
@@ -1618,5 +1653,10 @@ components:
                 $ref: '#/components/schemas/DnsRecord'
               found:
                 type: string
+                description: |
+                  The live record value observed when a record exists
+                  but does not match the required value.
               expected:
                 type: string
+                description: |
+                  The required value; equals record.value.

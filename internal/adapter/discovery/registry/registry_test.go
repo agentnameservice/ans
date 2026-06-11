@@ -10,71 +10,71 @@ import (
 	"github.com/godaddy/ans/internal/port"
 )
 
-// fakeStyle is a minimal port.DiscoveryStyle test double. ID() is the
+// fakeProfile is a minimal port.ProfileEmitter test double. ID() is the
 // only behavior the registry inspects; Records() returns nil so the
 // fake stays cheap to instantiate in tables.
-type fakeStyle struct{ id domain.DNSRecordStyle }
+type fakeProfile struct{ id domain.DiscoveryProfile }
 
-func (f fakeStyle) ID() domain.DNSRecordStyle { return f.id }
-func (f fakeStyle) Records(*domain.AgentRegistration) []domain.ExpectedDNSRecord {
+func (f fakeProfile) ID() domain.DiscoveryProfile { return f.id }
+func (f fakeProfile) Records(*domain.AgentRegistration) []domain.ExpectedDNSRecord {
 	return nil
 }
 
 func TestNew(t *testing.T) {
 	tests := []struct {
 		name      string
-		styles    []port.DiscoveryStyle
+		profiles  []port.ProfileEmitter
 		wantErr   string // substring; empty means success expected
-		wantOrder []domain.DNSRecordStyle
+		wantOrder []domain.DiscoveryProfile
 	}{
 		{
 			name:      "empty_registry_constructs",
-			styles:    nil,
-			wantOrder: []domain.DNSRecordStyle{},
+			profiles:  nil,
+			wantOrder: []domain.DiscoveryProfile{},
 		},
 		{
-			name:      "single_valid_style",
-			styles:    []port.DiscoveryStyle{fakeStyle{id: domain.DNSRecordStyleSVCB}},
-			wantOrder: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			name:      "single_valid_profile",
+			profiles:  []port.ProfileEmitter{fakeProfile{id: domain.DiscoveryProfileANSSVCB}},
+			wantOrder: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 		},
 		{
-			name: "two_valid_styles_preserve_argument_order",
-			styles: []port.DiscoveryStyle{
-				fakeStyle{id: domain.DNSRecordStyleTXT},
-				fakeStyle{id: domain.DNSRecordStyleSVCB},
+			name: "two_valid_profiles_preserve_argument_order",
+			profiles: []port.ProfileEmitter{
+				fakeProfile{id: domain.DiscoveryProfileANSTXT},
+				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
 			},
-			wantOrder: []domain.DNSRecordStyle{
-				domain.DNSRecordStyleTXT,
-				domain.DNSRecordStyleSVCB,
+			wantOrder: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSTXT,
+				domain.DiscoveryProfileANSSVCB,
 			},
 		},
 		{
 			name: "duplicate_id_rejected",
-			styles: []port.DiscoveryStyle{
-				fakeStyle{id: domain.DNSRecordStyleSVCB},
-				fakeStyle{id: domain.DNSRecordStyleSVCB},
+			profiles: []port.ProfileEmitter{
+				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
 			},
-			wantErr: "duplicate style ID",
+			wantErr: "duplicate profile ID",
 		},
 		{
 			name: "invalid_id_rejected",
-			styles: []port.DiscoveryStyle{
-				fakeStyle{id: domain.DNSRecordStyle("NOT_A_STYLE")},
+			profiles: []port.ProfileEmitter{
+				fakeProfile{id: domain.DiscoveryProfile("NOT_A_STYLE")},
 			},
-			wantErr: "is not a valid DNSRecordStyle",
+			wantErr: "is not a valid DiscoveryProfile",
 		},
 		{
 			name: "invalid_id_rejected_after_valid_one",
-			styles: []port.DiscoveryStyle{
-				fakeStyle{id: domain.DNSRecordStyleSVCB},
-				fakeStyle{id: domain.DNSRecordStyle("")},
+			profiles: []port.ProfileEmitter{
+				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+				fakeProfile{id: domain.DiscoveryProfile("")},
 			},
-			wantErr: "is not a valid DNSRecordStyle",
+			wantErr: "is not a valid DiscoveryProfile",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r, err := New(tc.styles...)
+			r, err := New(tc.profiles...)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -89,21 +89,21 @@ func TestNew(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
-	svcb := fakeStyle{id: domain.DNSRecordStyleSVCB}
-	txt := fakeStyle{id: domain.DNSRecordStyleTXT}
+	svcb := fakeProfile{id: domain.DiscoveryProfileANSSVCB}
+	txt := fakeProfile{id: domain.DiscoveryProfileANSTXT}
 	r, err := New(svcb, txt)
 	require.NoError(t, err)
 
 	tests := []struct {
 		name    string
-		id      domain.DNSRecordStyle
+		id      domain.DiscoveryProfile
 		wantHit bool
-		wantID  domain.DNSRecordStyle
+		wantID  domain.DiscoveryProfile
 	}{
-		{name: "hit_svcb", id: domain.DNSRecordStyleSVCB, wantHit: true, wantID: domain.DNSRecordStyleSVCB},
-		{name: "hit_txt", id: domain.DNSRecordStyleTXT, wantHit: true, wantID: domain.DNSRecordStyleTXT},
-		{name: "miss_unknown_style", id: domain.DNSRecordStyle("UNKNOWN_FAMILY"), wantHit: false},
-		{name: "miss_empty_id", id: domain.DNSRecordStyle(""), wantHit: false},
+		{name: "hit_svcb", id: domain.DiscoveryProfileANSSVCB, wantHit: true, wantID: domain.DiscoveryProfileANSSVCB},
+		{name: "hit_txt", id: domain.DiscoveryProfileANSTXT, wantHit: true, wantID: domain.DiscoveryProfileANSTXT},
+		{name: "miss_unknown_style", id: domain.DiscoveryProfile("UNKNOWN_FAMILY"), wantHit: false},
+		{name: "miss_empty_id", id: domain.DiscoveryProfile(""), wantHit: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -124,18 +124,18 @@ func TestGet(t *testing.T) {
 // concurrent readers can safely iterate without coordination.
 func TestIDs_ReturnsCopy(t *testing.T) {
 	r, err := New(
-		fakeStyle{id: domain.DNSRecordStyleTXT},
-		fakeStyle{id: domain.DNSRecordStyleSVCB},
+		fakeProfile{id: domain.DiscoveryProfileANSTXT},
+		fakeProfile{id: domain.DiscoveryProfileANSSVCB},
 	)
 	require.NoError(t, err)
 
 	first := r.IDs()
-	first[0] = domain.DNSRecordStyle("MUTATED")
+	first[0] = domain.DiscoveryProfile("MUTATED")
 
 	second := r.IDs()
-	assert.Equal(t, []domain.DNSRecordStyle{
-		domain.DNSRecordStyleTXT,
-		domain.DNSRecordStyleSVCB,
+	assert.Equal(t, []domain.DiscoveryProfile{
+		domain.DiscoveryProfileANSTXT,
+		domain.DiscoveryProfileANSSVCB,
 	}, second, "mutating one IDs() result must not affect a subsequent call")
 }
 
@@ -144,15 +144,15 @@ func TestIDs_ReturnsCopy(t *testing.T) {
 // the registry must materialize order from the order slice, not the map.
 func TestIDs_StableAcrossCalls(t *testing.T) {
 	r, err := New(
-		fakeStyle{id: domain.DNSRecordStyleTXT},
-		fakeStyle{id: domain.DNSRecordStyleSVCB},
+		fakeProfile{id: domain.DiscoveryProfileANSTXT},
+		fakeProfile{id: domain.DiscoveryProfileANSSVCB},
 	)
 	require.NoError(t, err)
 
 	for range 100 {
-		assert.Equal(t, []domain.DNSRecordStyle{
-			domain.DNSRecordStyleTXT,
-			domain.DNSRecordStyleSVCB,
+		assert.Equal(t, []domain.DiscoveryProfile{
+			domain.DiscoveryProfileANSTXT,
+			domain.DiscoveryProfileANSSVCB,
 		}, r.IDs())
 	}
 }

@@ -254,17 +254,19 @@ func TestLookupVerifier_HTTPSMatch(t *testing.T) {
 
 // TestLookupVerifier_SVCB exercises the Consolidated Approach SVCB
 // verifier across match, missing, and shape-mismatch paths. The match
-// case tests the same presentation form the RA's
-// ComputeRequiredDNSRecords emits (see internal/domain/dnsrecords.go).
+// case tests the same presentation form the RA's profile emitters
+// produce (SVCBProfile in internal/adapter/discovery/ans/svcb.go,
+// composed by the service walker in internal/ra/service/dnsrecords.go).
 //
-// Restricted to IANA-registered SvcParamKeys (alpn + port) because the
-// miekg/dns zone-file parser used by the test fixture rejects symbolic
-// names for the still-provisional Consolidated Approach SvcParams
-// (`wk`, `card-sha256`, etc.). Until those keys are IANA-registered
-// per RFC 9460 §6, the verifier-side test exercises the dispatch and
-// matching path with registered keys; the unregistered keys are
-// unit-tested at the adapter layer
-// (internal/adapter/discovery/ans/svcb_test.go).
+// This is the Fix A acceptance gate: the RA emits the draft `wk`/
+// `cap-sha256` params in RFC 9460 §14.3.1 Private Use keyNNNNN form
+// (key65280 / key65281) precisely because the named forms are
+// unparseable. These cases drive live key65280/key65281 records
+// through the in-process miekg/dns server — the same parser ans-dns
+// and real resolvers use — and prove formatHTTPSValue renders them
+// byte-identically to what parseSVCBValue expects, so the adapter's
+// emitted value round-trips through a real DNS answer without any
+// verifier-side normalization.
 func TestLookupVerifier_SVCB(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -329,6 +331,48 @@ func TestLookupVerifier_SVCB(t *testing.T) {
 			found:     false,
 			why:       "subset match requires every expected SvcParam present in the live record",
 		},
+		{
+			// Fix A acceptance gate, exact match. A live record carrying
+			// the keyNNNNN Private Use params the RA emits (key65280 =
+			// well-known suffix, key65281 = capability digest) parses
+			// through the miekg/dns zone fixture and matches the expected
+			// value verbatim. The named forms (`wk=`/`cap-sha256=`) would
+			// fail dns.NewRR here — that they parse at all proves the
+			// publishability the no-migration argument rests on.
+			name:      "key65280-and-key65281-exact-match",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 key65280=agent-card.json key65281=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443 key65280=agent-card.json key65281=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc`,
+			found:     true,
+			why:       "live keyNNNNN record must round-trip byte-symmetrically and match the RA's emitted value",
+		},
+		{
+			// Coexistence (RFC 9460 §8): a live record carrying our
+			// key65280 plus an extra SvcParam from a coexisting spec must
+			// still match — the subset matcher tolerates the extra param.
+			name:      "key65280-coexists-with-extra-svcparam",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 key65280=agent-card.json key65282=somethingelse`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443 key65280=agent-card.json`,
+			found:     true,
+			why:       "subset match: live record carries an extra keyNNNNN param, expected params still satisfied",
+		},
+		{
+			// Collision: another experiment squats key65280 with a
+			// different value. The subset matcher requires equal values,
+			// so this is a clean not-found (false negative — denial of
+			// verification), never a false accept. This bounds the
+			// Private Use collision risk the svcb.go doc describes.
+			name:      "key65280-value-collision-is-clean-not-found",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 key65280=someone-elses-value`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443 key65280=agent-card.json`,
+			found:     false,
+			why:       "a colliding key65280 with a different value must fail the value-equality check, not falsely match",
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -381,9 +425,10 @@ func TestLookupVerifier_HTTPS_DNSSECFlagPropagates(t *testing.T) {
 
 // TestLookupVerifier_SVCB_DNSSECFlagPropagates is the SVCB-side
 // counterpart to the HTTPS test above. SVCB rows carry per-protocol
-// service-binding parameters and the security-bearing card-sha256
-// SvcParam (when the endpoint has a MetadataHash), so the AD bit is
-// load-bearing for the lifecycle SVCB_DNSSEC_MISMATCH rule.
+// service-binding parameters and the security-bearing capability
+// digest (the draft cap-sha256 param, key65281 on the wire) when the
+// endpoint has a MetadataHash, so the AD bit is load-bearing for the
+// lifecycle SVCB_DNSSEC_MISMATCH rule.
 func TestLookupVerifier_SVCB_DNSSECFlagPropagates(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t)

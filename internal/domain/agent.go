@@ -103,13 +103,13 @@ type AgentRegistration struct {
 	// deviation.
 	ACMEChallenge ACMEChallenge `json:"acmeChallenge,omitzero"`
 
-	// DNSRecordStyles is the set of DNS record families the RA emits
+	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// for this registration. Each value names one family — typically
 	// {ANS_SVCB} (Consolidated Approach), {ANS_TXT} (original `_ans`
 	// TXT shape), or the {ANS_SVCB, ANS_TXT} transition union. Empty
-	// at the domain layer is treated as DefaultDNSRecordStyles() by
-	// ComputeRequiredDNSRecords.
-	DNSRecordStyles []DNSRecordStyle `json:"dnsRecordStyles,omitempty"`
+	// at the domain layer is treated as DefaultDiscoveryProfiles() by
+	// the service-layer record walker (internal/ra/service/dnsrecords.go).
+	DiscoveryProfiles []DiscoveryProfile `json:"discoveryProfiles,omitempty"`
 
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.

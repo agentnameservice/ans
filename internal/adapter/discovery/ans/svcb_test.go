@@ -23,16 +23,20 @@ func mustReg(t *testing.T, host string, eps []domain.AgentEndpoint, cert *domain
 	}
 }
 
-func TestSVCBStyle_ID(t *testing.T) {
-	assert.Equal(t, domain.DNSRecordStyleSVCB, SVCBStyle{}.ID())
+func TestSVCBProfile_ID(t *testing.T) {
+	assert.Equal(t, domain.DiscoveryProfileANSSVCB, SVCBProfile{}.ID())
 }
 
-// TestSVCBStyle_Records walks the SvcParam composition rules (alpn /
-// port / wk / card-sha256) the consolidated-draft fixes, plus the
-// always-Required default the service walker post-processes.
-func TestSVCBStyle_Records(t *testing.T) {
+// TestSVCBProfile_Records walks the SvcParam composition rules (alpn /
+// port / key65280 / key65281) the consolidated-draft fixes, plus the
+// always-Required default the service walker post-processes. The
+// well-known suffix and capability digest ride in RFC 9460 §14.3.1
+// Private Use keyNNNNN SvcParams (key65280 / key65281), not the named
+// forms `wk=` / `card-sha256=` — those have no IANA code point and the
+// miekg/dns zone parser rejects them.
+func TestSVCBProfile_Records(t *testing.T) {
 	const sampleMetadataHash = "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
-	const wantSampleCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
+	const wantSampleCapBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
 
 	tests := []struct {
 		name        string
@@ -40,8 +44,8 @@ func TestSVCBStyle_Records(t *testing.T) {
 		wantCount   int // svcb rows expected
 		wantPort    string
 		wantAlpn    string
-		wantWk      string // empty means MUST NOT appear
-		wantCard    string // empty means MUST NOT appear
+		wantWk      string // empty means MUST NOT appear (well-known suffix in key65280)
+		wantCap     string // empty means MUST NOT appear (capability digest in key65281)
 		wantNotPort string // value MUST NOT contain this string (e.g. wrong default)
 	}{
 		{
@@ -52,7 +56,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantCount: 1,
 			wantPort:  "port=443",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "wk=agent-card.json",
+			wantWk:    "key65280=agent-card.json",
 		},
 		{
 			name: "mcp_emits_mcp_json_well_known",
@@ -62,7 +66,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantCount: 1,
 			wantPort:  "port=443",
 			wantAlpn:  "alpn=mcp",
-			wantWk:    "wk=mcp.json",
+			wantWk:    "key65280=mcp.json",
 		},
 		{
 			name: "http_api_omits_wk",
@@ -75,7 +79,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantWk:    "", // HTTP-API has no per-protocol metadata file
 		},
 		{
-			name: "card_sha256_present_when_endpoint_metadata_hash_set",
+			name: "cap_sha256_present_when_endpoint_metadata_hash_set",
 			eps: []domain.AgentEndpoint{
 				{
 					Protocol:     domain.ProtocolA2A,
@@ -86,8 +90,8 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantCount: 1,
 			wantPort:  "port=443",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "wk=agent-card.json",
-			wantCard:  "card-sha256=" + wantSampleCardBase64,
+			wantWk:    "key65280=agent-card.json",
+			wantCap:   "key65281=" + wantSampleCapBase64,
 		},
 		{
 			name: "non_443_port_from_url_authority",
@@ -97,7 +101,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantCount:   1,
 			wantPort:    "port=8443",
 			wantAlpn:    "alpn=a2a",
-			wantWk:      "wk=agent-card.json",
+			wantWk:      "key65280=agent-card.json",
 			wantNotPort: "port=443",
 		},
 		{
@@ -108,14 +112,14 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantCount: 1,
 			wantPort:  "port=80",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "wk=agent-card.json",
+			wantWk:    "key65280=agent-card.json",
 		},
 		{
 			// First row asserted below; assertions on the A2A protocol's
-			// SvcParam composition (port, alpn, wk). The MCP row's wk=mcp.json
-			// is covered by the dedicated mcp test case above; here we only
-			// pin that the count is right and the row order tracks endpoint
-			// order.
+			// SvcParam composition (port, alpn, key65280). The MCP row's
+			// key65280=mcp.json is covered by the dedicated mcp test case
+			// above; here we only pin that the count is right and the row
+			// order tracks endpoint order.
 			name: "two_endpoints_emits_two_svcb_rows",
 			eps: []domain.AgentEndpoint{
 				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},
@@ -124,7 +128,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 			wantCount: 2,
 			wantPort:  "port=443",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "wk=agent-card.json",
+			wantWk:    "key65280=agent-card.json",
 		},
 		{
 			name:      "zero_endpoints_emits_no_svcb_rows",
@@ -136,7 +140,7 @@ func TestSVCBStyle_Records(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := mustReg(t, "agent.example.com", tc.eps, nil)
-			records := SVCBStyle{}.Records(reg)
+			records := SVCBProfile{}.Records(reg)
 
 			var svcbRows []domain.ExpectedDNSRecord
 			for _, r := range records {
@@ -168,28 +172,40 @@ func TestSVCBStyle_Records(t *testing.T) {
 			if tc.wantWk != "" {
 				assert.Contains(t, r.Value, tc.wantWk)
 			} else {
-				assert.NotContains(t, r.Value, "wk=", "wk= MUST be absent for protocols with no metadata file convention")
+				assert.NotContains(t, r.Value, "key65280=",
+					"key65280 (well-known suffix) MUST be absent for protocols with no metadata file convention")
 			}
-			if tc.wantCard != "" {
-				assert.Contains(t, r.Value, tc.wantCard)
+			if tc.wantCap != "" {
+				assert.Contains(t, r.Value, tc.wantCap)
 			} else {
-				assert.NotContains(t, r.Value, "card-sha256",
-					"card-sha256 MUST be absent when endpoint MetadataHash is empty")
+				assert.NotContains(t, r.Value, "key65281=",
+					"key65281 (capability digest) MUST be absent when endpoint MetadataHash is empty")
 			}
+			// Named-form regression guards: every SVCB value must use the
+			// keyNNNNN Private Use presentation, never the unpublishable
+			// named forms. miekg/dns rejects `wk=` / `card-sha256=` at the
+			// zone parser (proven empirically), so a backslide here strands
+			// agents in PENDING_DNS under the lookup verifier.
+			assert.NotContains(t, r.Value, "wk=",
+				"named `wk=` SvcParam MUST NOT appear; key65280 is the publishable form")
+			assert.NotContains(t, r.Value, "cap-sha256",
+				"named `cap-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
+			assert.NotContains(t, r.Value, "card-sha256",
+				"legacy `card-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
 		})
 	}
 }
 
-// TestSVCBStyle_RecordsIncludesFamilyTrustRecords pins that SVCBStyle
+// TestSVCBProfile_RecordsIncludesFamilyTrustRecords pins that SVCBProfile
 // is self-contained — it emits the family's badge and TLSA records too,
 // so registering ANS_SVCB alone produces a complete set without any
 // service-layer trust-record plumbing.
-func TestSVCBStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
+func TestSVCBProfile_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		&domain.ByocServerCertificate{Fingerprint: "deadbeef"})
 
-	records := SVCBStyle{}.Records(reg)
+	records := SVCBProfile{}.Records(reg)
 
 	var sawBadge, sawTLSA bool
 	for _, r := range records {
@@ -206,7 +222,7 @@ func TestSVCBStyle_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	assert.True(t, sawTLSA, "SVCB style must include the TLSA record when ServerCert is set")
 }
 
-func TestMetadataHashToCardSHA256(t *testing.T) {
+func TestMetadataHashToCapSHA256(t *testing.T) {
 	tests := []struct {
 		name string
 		in   string
@@ -229,7 +245,7 @@ func TestMetadataHashToCardSHA256(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, metadataHashToCardSHA256(tc.in))
+			assert.Equal(t, tc.want, metadataHashToCapSHA256(tc.in))
 		})
 	}
 }

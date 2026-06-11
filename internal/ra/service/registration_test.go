@@ -269,7 +269,7 @@ type regFixture struct {
 	identityCA   port.IdentityCertificateAuthority
 	serverCA     port.ServerCertificateAuthority
 	bus          port.EventBus
-	discoveryReg port.DiscoveryRegistry
+	discoveryReg port.ProfileRegistry
 	signerPubPEM string
 }
 
@@ -325,7 +325,7 @@ func newRegFixture(t *testing.T) *regFixture {
 		t.Fatal(err)
 	}
 
-	discoveryReg, err := service.NewDefaultDiscoveryRegistry("")
+	discoveryReg, err := service.NewDefaultProfileRegistry("")
 	if err != nil {
 		t.Fatal(err)
 	}

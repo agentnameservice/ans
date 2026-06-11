@@ -20,9 +20,9 @@ import (
 // newTestRegistry returns the bundled ANS-family registry every
 // service-level test uses. Mirrors cmd/ans-ra/main.go's wiring so
 // emission order in tests matches production.
-func newTestRegistry(t *testing.T) port.DiscoveryRegistry {
+func newTestRegistry(t *testing.T) port.ProfileRegistry {
 	t.Helper()
-	r, err := service.NewDefaultDiscoveryRegistry("")
+	r, err := service.NewDefaultProfileRegistry("")
 	require.NoError(t, err)
 	return r
 }
@@ -40,29 +40,29 @@ func newComputeOnlyService(t *testing.T) *service.RegistrationService {
 	)
 }
 
-func mustReg(t *testing.T, host string, version string, eps []domain.AgentEndpoint, cert *domain.ByocServerCertificate, styles []domain.DNSRecordStyle) *domain.AgentRegistration {
+func mustReg(t *testing.T, host string, version string, eps []domain.AgentEndpoint, cert *domain.ByocServerCertificate, profiles []domain.DiscoveryProfile) *domain.AgentRegistration {
 	t.Helper()
 	v, err := domain.ParseSemVer(version)
 	require.NoError(t, err)
 	ansName, err := domain.NewAnsName(v, host)
 	require.NoError(t, err)
 	return &domain.AgentRegistration{
-		AnsName:         ansName,
-		Endpoints:       eps,
-		ServerCert:      cert,
-		DNSRecordStyles: styles,
+		AnsName:           ansName,
+		Endpoints:         eps,
+		ServerCert:        cert,
+		DiscoveryProfiles: profiles,
 	}
 }
 
 // TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction pins the
-// end-to-end wiring: NewDefaultDiscoveryRegistry stamps the deployment TL
+// end-to-end wiring: NewDefaultProfileRegistry stamps the deployment TL
 // URL into the ANS styles, so the family `_ans-badge` record points at the
 // TL's per-agent endpoint rather than the agent's own host. The per-adapter
 // ansbadge_test covers BadgeRecord directly; this guards the
 // registry→style→walker path end to end — without the URL reaching the
 // styles, the badge silently regresses to the agent's endpoint URL.
 func TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction(t *testing.T) {
-	discoveryReg, err := service.NewDefaultDiscoveryRegistry("https://tl.example.org")
+	discoveryReg, err := service.NewDefaultProfileRegistry("https://tl.example.org")
 	require.NoError(t, err)
 	svc := service.NewRegistrationService(
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil,
@@ -71,7 +71,7 @@ func TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction(t *testing.T
 
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"}},
-		nil, []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB})
+		nil, []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB})
 	reg.AgentID = "test-agent-id"
 
 	records := svc.ComputeRequiredDNSRecords(reg)
@@ -96,11 +96,11 @@ func TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction(t *testing.T
 // testable across both adapters' output).
 func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 	const sampleMetadataHash = "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
-	const wantSampleCardBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
+	const wantSampleCapBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
 
 	tests := []struct {
 		name             string
-		styles           []domain.DNSRecordStyle
+		styles           []domain.DiscoveryProfile
 		protocol         domain.Protocol
 		agentURL         string
 		metadataHash     string // optional per-endpoint MetadataHash
@@ -109,12 +109,12 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 		wantSVCBRequired bool // applies only when wantSVCB is true
 		wantLegacyTXT    bool
 		wantSVCBPort     string // substring expected in SVCB value (e.g. "port=443")
-		wantSVCBWk       string // "" means SVCB MUST NOT contain "wk="
-		wantSVCBCard     string // "" means SVCB MUST NOT contain "card-sha256"
+		wantSVCBWk       string // "" means SVCB MUST NOT contain "key65280=" (well-known suffix)
+		wantSVCBCap      string // "" means SVCB MUST NOT contain "key65281=" (capability digest)
 	}{
 		{
 			name:          "ans_txt_only_emits_https_rr_no_svcb",
-			styles:        []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
+			styles:        []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
 			protocol:      domain.ProtocolA2A,
 			agentURL:      "https://agent.example.com",
 			wantHTTPS:     true,
@@ -122,17 +122,17 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 		},
 		{
 			name:             "ans_svcb_only_omits_https_rr",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com",
 			wantSVCB:         true,
 			wantSVCBRequired: true, // SVCB-sole: only PurposeDiscovery record, must be required
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "wk=agent-card.json",
+			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
 			name:          "union_emits_both_families",
-			styles:        []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT},
+			styles:        []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT},
 			protocol:      domain.ProtocolA2A,
 			agentURL:      "https://agent.example.com",
 			wantHTTPS:     true,
@@ -142,21 +142,21 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			// Required signal during the §4.4.2 transition; SVCB rides
 			// along as optional.
 			wantSVCBPort: "port=443",
-			wantSVCBWk:   "wk=agent-card.json",
+			wantSVCBWk:   "key65280=agent-card.json",
 		},
 		{
 			name:             "svcb_mcp_wk_mcp_json",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			protocol:         domain.ProtocolMCP,
 			agentURL:         "https://agent.example.com/mcp",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "wk=mcp.json",
+			wantSVCBWk:       "key65280=mcp.json",
 		},
 		{
 			name:             "svcb_http_api_omits_wk",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			protocol:         domain.ProtocolHTTPAPI,
 			agentURL:         "https://agent.example.com",
 			wantSVCB:         true,
@@ -164,36 +164,36 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			wantSVCBPort:     "port=443",
 		},
 		{
-			name:             "svcb_card_sha256_from_endpoint_metadata_hash",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			name:             "svcb_cap_sha256_from_endpoint_metadata_hash",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com",
 			metadataHash:     sampleMetadataHash,
 			wantSVCB:         true,
 			wantSVCBRequired: true,
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "wk=agent-card.json",
-			wantSVCBCard:     "card-sha256=" + wantSampleCardBase64,
+			wantSVCBWk:       "key65280=agent-card.json",
+			wantSVCBCap:      "key65281=" + wantSampleCapBase64,
 		},
 		{
 			name:             "svcb_non_443_port_from_url",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com:8443",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
 			wantSVCBPort:     "port=8443",
-			wantSVCBWk:       "wk=agent-card.json",
+			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
 			name:             "svcb_http_scheme_defaults_port_80",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "http://agent.example.com",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
 			wantSVCBPort:     "port=80",
-			wantSVCBWk:       "wk=agent-card.json",
+			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
 			name:             "empty_styles_coerces_to_default",
@@ -203,17 +203,17 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			wantSVCB:         true,
 			wantSVCBRequired: true, // default ({ANS_SVCB}) is SVCB-sole
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "wk=agent-card.json",
+			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
 			name:             "all_invalid_styles_falls_back_to_default",
-			styles:           []domain.DNSRecordStyle{domain.DNSRecordStyle("garbage"), domain.DNSRecordStyle("nonsense")},
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage"), domain.DiscoveryProfile("nonsense")},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com",
 			wantSVCB:         true,
 			wantSVCBRequired: true, // fallback default ({ANS_SVCB}) is SVCB-sole
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "wk=agent-card.json",
+			wantSVCBWk:       "key65280=agent-card.json",
 		},
 	}
 
@@ -259,17 +259,24 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 				assert.Contains(t, svcbValue, tc.wantSVCBPort,
 					"SVCB port SvcParam mismatch")
 				if tc.wantSVCBWk != "" {
-					assert.Contains(t, svcbValue, tc.wantSVCBWk, "SVCB wk SvcParam mismatch")
+					assert.Contains(t, svcbValue, tc.wantSVCBWk, "SVCB well-known (key65280) SvcParam mismatch")
 				} else {
-					assert.NotContains(t, svcbValue, "wk=",
-						"SVCB MUST NOT carry wk= when protocol has no metadata convention")
+					assert.NotContains(t, svcbValue, "key65280=",
+						"SVCB MUST NOT carry key65280 (well-known) when protocol has no metadata convention")
 				}
-				if tc.wantSVCBCard != "" {
-					assert.Contains(t, svcbValue, tc.wantSVCBCard, "SVCB card-sha256 SvcParam mismatch")
+				if tc.wantSVCBCap != "" {
+					assert.Contains(t, svcbValue, tc.wantSVCBCap, "SVCB capability digest (key65281) SvcParam mismatch")
 				} else {
-					assert.NotContains(t, svcbValue, "card-sha256",
-						"SVCB MUST NOT carry card-sha256 when endpoint MetadataHash is empty")
+					assert.NotContains(t, svcbValue, "key65281=",
+						"SVCB MUST NOT carry key65281 (capability digest) when endpoint MetadataHash is empty")
 				}
+				// Named-form regression guards across the integration path.
+				assert.NotContains(t, svcbValue, "wk=",
+					"named `wk=` SvcParam MUST NOT appear; key65280 is the publishable form")
+				assert.NotContains(t, svcbValue, "cap-sha256",
+					"named `cap-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
+				assert.NotContains(t, svcbValue, "card-sha256",
+					"legacy `card-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
 			}
 		})
 	}
@@ -285,7 +292,7 @@ func TestComputeRequiredDNSRecords_UnionDedupesFamilyTrustRecords(t *testing.T) 
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		&domain.ByocServerCertificate{Fingerprint: "abcdef"},
-		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -313,14 +320,14 @@ func TestComputeRequiredDNSRecords_NoEndpoints(t *testing.T) {
 	assert.Empty(t, records)
 }
 
-// TestNewRegistrationService_PanicsOnNilDiscoveryRegistry pins the
+// TestNewRegistrationService_PanicsOnNilProfileRegistry pins the
 // fail-loud invariant the constructor enforces. A missing registry
 // would silently emit zero `dnsRecordsProvisioned[]` and accept any
 // DNS state at verify-dns — trust-root corruption masquerading as
 // graceful degradation. Construction is process-start-time, not a
 // request path, so the panic does not violate the no-panics-in-
 // request-paths rule.
-func TestNewRegistrationService_PanicsOnNilDiscoveryRegistry(t *testing.T) {
+func TestNewRegistrationService_PanicsOnNilProfileRegistry(t *testing.T) {
 	defer func() {
 		r := recover()
 		require.NotNil(t, r, "constructor must panic when discoveryRegistry is nil")
@@ -334,16 +341,16 @@ func TestNewRegistrationService_PanicsOnNilDiscoveryRegistry(t *testing.T) {
 }
 
 // TestComputeRequiredDNSRecords_UnknownStyleSkipped pins that a
-// reg.DNSRecordStyles entry the registry doesn't have is silently
+// reg.DiscoveryProfiles entry the registry doesn't have is silently
 // skipped (with a WARN log; not asserted in this test). The remaining
-// valid styles still emit. If every entry is unknown, the walker
-// falls back to DefaultDNSRecordStyles.
+// valid profiles still emit. If every entry is unknown, the walker
+// falls back to DefaultDiscoveryProfiles.
 func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		nil,
-		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyle("UNKNOWN_FUTURE")})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfile("UNKNOWN_FUTURE")})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -364,11 +371,19 @@ func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 // SHA-256, signal a wire-shape regression, and break offline-verifier
 // hashes for in-flight agents at deploy time.
 //
-// The hex constant was captured against this exact input. Do NOT
-// regenerate without explicit approval — a change here is a
-// wire-format change, not a test fix.
+// The hex constant was REGENERATED for the keyNNNNN/selector-0 change:
+// the SVCB rows now carry `key65280=`/`key65281=` (Fix A — RFC 9460
+// §14.3.1 Private Use presentation of the draft wk/cap-sha256 params,
+// replacing the unpublishable named forms) and the TLSA row now carries
+// `3 0 1` over the full cert (Fix B2 — selector 0 matching what
+// CertificateFingerprint actually hashes). This is the intentional
+// canonical-bytes change of the PR. The slice ORDER and the 7-record
+// SHAPE are unchanged (both endpoints are https/443) — only the SVCB
+// SvcParam values and the TLSA value move the hash. A future drift that
+// is NOT one of those two value changes is a regression: investigate
+// before touching this constant.
 func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
-	const wantSHA256Hex = "ab1efc56fcc5dc088ff0f35d5ed1e0164b8ee70a11116e60f180a55fe794bf64"
+	const wantSHA256Hex = "0bc5f912c2a450dffd631b66d467ee6d5974e0cbea47e84fd676c6111387bda0"
 
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.2.3",
@@ -385,7 +400,7 @@ func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
 			},
 		},
 		&domain.ByocServerCertificate{Fingerprint: "deadbeefcafe1234"},
-		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -424,15 +439,15 @@ func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
 		"V2 union canonical-bytes SHA-256 drifted; investigate before changing the constant")
 }
 
-// TestNewDefaultDiscoveryRegistry pins the default-wiring contract:
+// TestNewDefaultProfileRegistry pins the default-wiring contract:
 // returns a registry containing both ANS-family styles in TXT-then-SVCB
 // insertion order. The order is the V2 canonical-bytes input.
-func TestNewDefaultDiscoveryRegistry(t *testing.T) {
-	r, err := service.NewDefaultDiscoveryRegistry("")
+func TestNewDefaultProfileRegistry(t *testing.T) {
+	r, err := service.NewDefaultProfileRegistry("")
 	require.NoError(t, err)
 
 	got := r.IDs()
-	want := []domain.DNSRecordStyle{domain.DNSRecordStyleTXT, domain.DNSRecordStyleSVCB}
+	want := []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT, domain.DiscoveryProfileANSSVCB}
 	assert.Equal(t, want, got, "default registry must wire TXT before SVCB to preserve V2 union canonical bytes")
 }
 
@@ -440,13 +455,13 @@ func TestNewDefaultDiscoveryRegistry(t *testing.T) {
 // pins that a non-default registry wiring (SVCB before TXT) actually
 // produces a different emission order — proving the walker honours
 // registry insertion order rather than user-supplied
-// reg.DNSRecordStyles order.
+// reg.DiscoveryProfiles order.
 func TestComputeRequiredDNSRecords_RegistryIterationOrderDeterminesEmission(t *testing.T) {
 	// Build a "production" service (default registry wiring: TXT, SVCB)
 	// and a custom one with SVCB before TXT.
 	defaultSvc := newComputeOnlyService(t)
 
-	customReg, err := registry.New(svcStub{id: domain.DNSRecordStyleSVCB, marker: "S"}, svcStub{id: domain.DNSRecordStyleTXT, marker: "T"})
+	customReg, err := registry.New(svcStub{id: domain.DiscoveryProfileANSSVCB, marker: "S"}, svcStub{id: domain.DiscoveryProfileANSTXT, marker: "T"})
 	require.NoError(t, err)
 	customSvc := service.NewRegistrationService(
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, customReg)
@@ -454,7 +469,7 @@ func TestComputeRequiredDNSRecords_RegistryIterationOrderDeterminesEmission(t *t
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		nil,
-		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB, domain.DNSRecordStyleTXT})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT})
 
 	defaultOut := defaultSvc.ComputeRequiredDNSRecords(reg)
 	customOut := customSvc.ComputeRequiredDNSRecords(reg)
@@ -472,14 +487,14 @@ func TestComputeRequiredDNSRecords_RegistryIterationOrderDeterminesEmission(t *t
 	assert.Empty(t, customOut, "stub registry produces no records; default fallback is gated by registry presence, not adapter output")
 }
 
-// svcStub is a minimal port.DiscoveryStyle for ordering tests; emits
+// svcStub is a minimal port.ProfileEmitter for ordering tests; emits
 // no records so the test asserts purely on walker behavior.
 type svcStub struct {
-	id     domain.DNSRecordStyle
+	id     domain.DiscoveryProfile
 	marker string
 }
 
-func (s svcStub) ID() domain.DNSRecordStyle { return s.id }
+func (s svcStub) ID() domain.DiscoveryProfile { return s.id }
 func (svcStub) Records(*domain.AgentRegistration) []domain.ExpectedDNSRecord {
 	return nil
 }
@@ -489,21 +504,21 @@ func (svcStub) Records(*domain.AgentRegistration) []domain.ExpectedDNSRecord {
 // defensive `if !ok { continue }` branch is the safety net for that
 // contract violation. The bundled registry maintains the contract by
 // construction, so this fake exercises a branch only a custom
-// port.DiscoveryRegistry implementation could ever reach.
+// port.ProfileRegistry implementation could ever reach.
 type inconsistentRegistry struct{}
 
-func (inconsistentRegistry) IDs() []domain.DNSRecordStyle {
-	return []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB}
+func (inconsistentRegistry) IDs() []domain.DiscoveryProfile {
+	return []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB}
 }
 
-func (inconsistentRegistry) Get(domain.DNSRecordStyle) (port.DiscoveryStyle, bool) {
+func (inconsistentRegistry) Get(domain.DiscoveryProfile) (port.ProfileEmitter, bool) {
 	return nil, false
 }
 
 // TestComputeRequiredDNSRecords_RegistryGetMissDoesNotPanic pins the
 // defensive branch the walker takes when registry.IDs() and Get fall
 // out of sync. The branch is unreachable in production wiring; it
-// exists so a future custom port.DiscoveryRegistry implementation
+// exists so a future custom port.ProfileRegistry implementation
 // (e.g. one that hot-reloads styles and races between IDs() and Get)
 // degrades to "skip the missing ID" instead of nil-dereferencing the
 // returned style.
@@ -514,7 +529,7 @@ func TestComputeRequiredDNSRecords_RegistryGetMissDoesNotPanic(t *testing.T) {
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		nil,
-		[]domain.DNSRecordStyle{domain.DNSRecordStyleSVCB})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB})
 
 	// IDs() returns SVCB; Get returns (nil, false). Walker must
 	// continue without dereferencing style. Result: empty record set

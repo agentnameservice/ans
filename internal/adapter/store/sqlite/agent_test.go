@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -89,6 +90,65 @@ func TestAgentStore_Save_NilAgent(t *testing.T) {
 	store := NewAgentStore(newTestDB(t))
 	if err := store.Save(context.Background(), nil); err == nil {
 		t.Error("want error for nil agent")
+	}
+}
+
+// TestAgentStore_DiscoveryProfilesRoundTrip pins the discovery_profiles
+// JSON-array column codec (encodeDiscoveryProfiles/decodeDiscoveryProfiles)
+// through a real Save → FindByID cycle — the only direct exercise of the
+// column added by migration 006.
+func TestAgentStore_DiscoveryProfilesRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	store := NewAgentStore(db)
+	ctx := context.Background()
+
+	tests := []struct {
+		name     string
+		profiles []domain.DiscoveryProfile
+		want     []domain.DiscoveryProfile
+	}{
+		{
+			name:     "svcb_only",
+			profiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			want:     []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+		},
+		{
+			name: "union_preserves_order",
+			profiles: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT,
+			},
+			want: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT,
+			},
+		},
+		{
+			name:     "empty_round_trips_as_empty",
+			profiles: nil,
+			want:     nil,
+		},
+	}
+
+	for i, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			agent := newAgentFixture(t, fmt.Sprintf("agent-profiles-%d", i), fmt.Sprintf("p%d.example.com", i))
+			agent.DiscoveryProfiles = tc.profiles
+			if err := store.Save(ctx, agent); err != nil {
+				t.Fatalf("save: %v", err)
+			}
+			found, err := store.FindByID(ctx, agent.ID)
+			if err != nil {
+				t.Fatalf("FindByID: %v", err)
+			}
+			if len(found.DiscoveryProfiles) != len(tc.want) {
+				t.Fatalf("profiles length: got %d (%v), want %d (%v)",
+					len(found.DiscoveryProfiles), found.DiscoveryProfiles, len(tc.want), tc.want)
+			}
+			for j, p := range tc.want {
+				if found.DiscoveryProfiles[j] != p {
+					t.Errorf("profiles[%d]: got %q, want %q", j, found.DiscoveryProfiles[j], p)
+				}
+			}
+		})
 	}
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
@@ -537,9 +538,40 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 
 	mismatches, perRecord, err := s.verifyDNSRecords(ctx, reg.FQDN(), expected)
 	if err != nil {
+		// Systemic verifier failure (DNS unreachable, resolver error) —
+		// the caller sees a 500 with nothing in the body. WARN here so
+		// on-call can grep the agent and FQDN that wedged. agentID is in
+		// scope here but not inside verifyDNSRecords, so this is the one
+		// WARN site for the verifier error.
+		log.Warn().
+			Str("agentId", agentID).
+			Str("fqdn", reg.FQDN()).
+			Err(err).
+			Msg("dns verification failed with a systemic error")
 		return nil, fmt.Errorf("dns verify: %w", err)
 	}
 	if len(mismatches) > 0 {
+		// A 422 is an expected operator-side condition (their zone isn't
+		// published yet / is wrong), so INFO, not ERROR. Log names, types,
+		// and classification codes only — never the expected or live
+		// values — so on-call can distinguish "one bad operator zone" from
+		// "our emission regressed" without operators pasting 422 bodies.
+		recs := make([]struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}, len(mismatches))
+		for i, m := range mismatches {
+			recs[i].Name = m.Expected.Name
+			recs[i].Type = string(m.Expected.Type)
+			recs[i].Code = m.Code
+		}
+		log.Info().
+			Str("agentId", agentID).
+			Str("fqdn", reg.FQDN()).
+			Int("mismatchCount", len(mismatches)).
+			Interface("mismatchRecords", recs).
+			Msg("verify-dns returning mismatches")
 		return &VerifyDNSResult{Registration: reg, Now: now, DNSMismatches: mismatches}, nil
 	}
 
@@ -657,13 +689,38 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 				// Required check below.
 			}
 		}
+		// Optional records that aren't a DNSSEC-validated tamper (handled
+		// above) are skipped: TLSA without DNSSEC, the HTTPS RR that
+		// CNAME-at-apex operators cannot publish (RFC 1034 §3.6.2), and
+		// union-mode SVCB rows the walker flipped Required=false during the
+		// §4.4.2 transition are all optional by design — blocking on them
+		// would 422 operators forever on records the design says they need
+		// not publish. The DNSSEC hard-fail above is the only path that
+		// bypasses Required; this keeps the documented two-condition
+		// blocking contract (Required miss/mismatch, or DNSSEC tamper).
 		if !r.Record.Required {
 			continue
 		}
+		// For Required records, partition by what DNS actually answered,
+		// using r.Found as the verdict (the verifier already applied
+		// type-specific matching: SVCB subset-match, TLSA case-insensitive
+		// hex, etc.). The two not-found cases split on r.Actual per the
+		// port.RecordVerification contract — empty Actual means nothing
+		// answered (truly absent), a non-empty Actual means the zone has a
+		// live record that didn't match:
+		//
+		//   !Found && Actual == ""  → MISSING (operator hasn't published it)
+		//   !Found && Actual != ""  → MISMATCH carrying the live value, so
+		//                             the 422 shows the operator what's
+		//                             actually in their zone vs expected
+		//   Found                   → OK; the verifier's match is the verdict.
+		//                             A benign Actual≠Value delta (coexistence
+		//                             extras on an SVCB subset match) is not a
+		//                             mismatch.
 		switch {
-		case !r.Found:
+		case !r.Found && r.Actual == "":
 			out = append(out, DNSMismatch{Expected: r.Record, Code: dnsCodeMissing})
-		case r.Found && r.Actual != r.Record.Value:
+		case !r.Found:
 			out = append(out, DNSMismatch{Expected: r.Record, Found: r.Actual, Code: dnsCodeMismatch})
 		}
 	}

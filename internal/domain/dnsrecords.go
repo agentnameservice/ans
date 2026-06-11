@@ -1,8 +1,8 @@
 package domain
 
-// DNSRecordStyle names one DNS record family the RA can emit for an
-// agent registration. A registration carries a *set* of styles
-// (AgentRegistration.DNSRecordStyles); operators publishing the union
+// DiscoveryProfile names one DNS record family the RA can emit for an
+// agent registration. A registration carries a *set* of profiles
+// (AgentRegistration.DiscoveryProfiles); operators publishing the union
 // during a Consolidated Approach transition include both ANS_SVCB and
 // ANS_TXT in the same set.
 //
@@ -11,57 +11,61 @@ package domain
 // NextStep.action, ChallengeInfo.type, DnsRecord.type, etc.). The
 // `ANS_` prefix anchors the namespace so a future second agentic spec
 // adding its own SVCB family doesn't collide.
-type DNSRecordStyle string
+type DiscoveryProfile string
 
 const (
-	// DNSRecordStyleSVCB emits Consolidated Approach SVCB records per
+	// DiscoveryProfileANSSVCB emits Consolidated Approach SVCB records per
 	// RFC 9460 — one row per protocol at the bare FQDN, carrying alpn,
-	// port, wk, and (when the endpoint has a MetadataHash) card-sha256
-	// SvcParams.
-	DNSRecordStyleSVCB DNSRecordStyle = "ANS_SVCB"
+	// port, key65280 (well-known suffix), and (when the endpoint has a
+	// MetadataHash) key65281 (capability digest) SvcParams. key65280/
+	// key65281 are the RFC 9460 §14.3.1 Private Use presentation of the
+	// DNS-AID draft's wk/cap-sha256 params, which have no IANA code point;
+	// the adapter (internal/adapter/discovery/ans/svcb.go) documents why
+	// the named forms are unpublishable.
+	DiscoveryProfileANSSVCB DiscoveryProfile = "ANS_SVCB"
 
-	// DNSRecordStyleTXT emits the original `_ans` TXT shape — one row
+	// DiscoveryProfileANSTXT emits the original `_ans` TXT shape — one row
 	// per protocol at `_ans.{fqdn}`. Supported indefinitely for
 	// operators with existing zone-edit tooling that targets `_ans.`.
 	// Includes an HTTPS RR at the bare FQDN since `_ans` TXT carries
 	// no connection hints.
-	DNSRecordStyleTXT DNSRecordStyle = "ANS_TXT"
+	DiscoveryProfileANSTXT DiscoveryProfile = "ANS_TXT"
 )
 
-// DefaultDNSRecordStyles is the set applied when the registration
-// request omits dnsRecordStyles entirely. Pinned to {ANS_SVCB} so new
+// DefaultDiscoveryProfiles is the set applied when the registration
+// request omits discoveryProfiles entirely. Pinned to {ANS_SVCB} so new
 // integrations follow §4.4.2's "publish one SVCB record... rather than
 // parallel per-ecosystem record trees" SHOULD by default. Returned as a
 // fresh slice so callers can mutate without affecting the canonical set.
-func DefaultDNSRecordStyles() []DNSRecordStyle {
-	return []DNSRecordStyle{DNSRecordStyleSVCB}
+func DefaultDiscoveryProfiles() []DiscoveryProfile {
+	return []DiscoveryProfile{DiscoveryProfileANSSVCB}
 }
 
-// IsValid reports whether s is one of the defined styles. Empty
+// IsValid reports whether s is one of the defined profiles. Empty
 // string is treated as invalid; callers normalize empty/missing
-// dnsRecordStyles to DefaultDNSRecordStyles() before validation.
+// discoveryProfiles to DefaultDiscoveryProfiles() before validation.
 //
 // Coherence with the discovery registry is enforced at server start:
-// cmd/ans-ra/main.go asserts that every style in
-// ValidDNSRecordStyles() has a registered port.DiscoveryStyle adapter
+// cmd/ans-ra/main.go asserts that every profile in
+// ValidDiscoveryProfiles() has a registered port.ProfileEmitter adapter
 // and vice versa. Drift fails server start, not the first verify-dns
 // call.
-func (s DNSRecordStyle) IsValid() bool {
+func (s DiscoveryProfile) IsValid() bool {
 	switch s {
-	case DNSRecordStyleSVCB, DNSRecordStyleTXT:
+	case DiscoveryProfileANSSVCB, DiscoveryProfileANSTXT:
 		return true
 	}
 	return false
 }
 
-// ValidDNSRecordStyles returns the canonical valid set as strings —
+// ValidDiscoveryProfiles returns the canonical valid set as strings —
 // the single source of truth for enum membership. Used by error
-// messages and spec generation tooling so adding a third style is a
+// messages and spec generation tooling so adding a third profile is a
 // one-place change rather than a shotgun edit.
-func ValidDNSRecordStyles() []string {
+func ValidDiscoveryProfiles() []string {
 	return []string{
-		string(DNSRecordStyleSVCB),
-		string(DNSRecordStyleTXT),
+		string(DiscoveryProfileANSSVCB),
+		string(DiscoveryProfileANSTXT),
 	}
 }
 

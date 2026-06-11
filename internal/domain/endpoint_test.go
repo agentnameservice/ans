@@ -68,6 +68,34 @@ func TestAgentEndpoint_Validate(t *testing.T) {
 		assert.ErrorIs(t, e.Validate(), ErrValidation)
 	})
 
+	// Out-of-range ports parse fine through url.Parse but produce SVCB
+	// port= SvcParams and _<port>._tcp. TLSA owner names no DNS
+	// provider accepts — the boundary must reject them loudly instead
+	// of stranding the operator at verify-dns.
+	t.Run("reject port above 65535", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:99999/mcp"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject port zero", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:0/mcp"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject overflowing port literal", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:443443443443/mcp"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("accept explicit in-range port", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:8443/mcp"
+		assert.NoError(t, e.Validate())
+	})
+
 	t.Run("reject bad documentation url", func(t *testing.T) {
 		e := valid
 		e.DocumentationURL = "not a url"

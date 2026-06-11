@@ -39,7 +39,7 @@ type agentRow struct {
 	SupersedesRegistrationID sql.NullInt64  `db:"supersedes_registration_id"`
 	ACMEDNS01Token           sql.NullString `db:"acme_dns01_token"`
 	ACMEChallengeExpiresAtMs sql.NullInt64  `db:"acme_challenge_expires_at_ms"`
-	DNSRecordStyles          sql.NullString `db:"dns_record_styles"`
+	DiscoveryProfiles        sql.NullString `db:"discovery_profiles"`
 	CreatedAtMs              int64          `db:"created_at_ms"`
 	UpdatedAtMs              int64          `db:"updated_at_ms"`
 }
@@ -74,22 +74,22 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 	if r.ACMEChallengeExpiresAtMs.Valid {
 		reg.ACMEChallenge.ExpiresAt = msToTime(r.ACMEChallengeExpiresAtMs.Int64)
 	}
-	if r.DNSRecordStyles.Valid && r.DNSRecordStyles.String != "" {
-		styles, err := decodeDNSRecordStyles(r.DNSRecordStyles.String)
+	if r.DiscoveryProfiles.Valid && r.DiscoveryProfiles.String != "" {
+		profiles, err := decodeDiscoveryProfiles(r.DiscoveryProfiles.String)
 		if err != nil {
-			return nil, fmt.Errorf("sqlite: decode dns_record_styles: %w", err)
+			return nil, fmt.Errorf("sqlite: decode discovery_profiles: %w", err)
 		}
-		reg.DNSRecordStyles = styles
+		reg.DiscoveryProfiles = profiles
 	}
 	return reg, nil
 }
 
-// decodeDNSRecordStyles parses the JSON-array string stored in
-// agent_registrations.dns_record_styles into the typed domain slice.
+// decodeDiscoveryProfiles parses the JSON-array string stored in
+// agent_registrations.discovery_profiles into the typed domain slice.
 // Empty array unmarshals to a nil slice (the domain layer treats
 // empty as "use default") so post-load behavior matches a freshly
 // registered agent that didn't set the field.
-func decodeDNSRecordStyles(raw string) ([]domain.DNSRecordStyle, error) {
+func decodeDiscoveryProfiles(raw string) ([]domain.DiscoveryProfile, error) {
 	var strs []string
 	if err := json.Unmarshal([]byte(raw), &strs); err != nil {
 		return nil, err
@@ -97,24 +97,24 @@ func decodeDNSRecordStyles(raw string) ([]domain.DNSRecordStyle, error) {
 	if len(strs) == 0 {
 		return nil, nil
 	}
-	out := make([]domain.DNSRecordStyle, len(strs))
+	out := make([]domain.DiscoveryProfile, len(strs))
 	for i, s := range strs {
-		out[i] = domain.DNSRecordStyle(s)
+		out[i] = domain.DiscoveryProfile(s)
 	}
 	return out, nil
 }
 
-// encodeDNSRecordStyles renders a typed style slice as the canonical
-// JSON-array string the agent_registrations.dns_record_styles column
+// encodeDiscoveryProfiles renders a typed profile slice as the canonical
+// JSON-array string the agent_registrations.discovery_profiles column
 // stores. nil/empty input renders empty string so nullableString()
 // stamps SQL NULL — domain treats NULL the same as the default set
 // per ComputeRequiredDNSRecords.
-func encodeDNSRecordStyles(styles []domain.DNSRecordStyle) string {
-	if len(styles) == 0 {
+func encodeDiscoveryProfiles(profiles []domain.DiscoveryProfile) string {
+	if len(profiles) == 0 {
 		return ""
 	}
-	strs := make([]string, len(styles))
-	for i, s := range styles {
+	strs := make([]string, len(profiles))
+	for i, s := range profiles {
 		strs[i] = string(s)
 	}
 	b, err := json.Marshal(strs)
@@ -143,7 +143,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 registration_timestamp_ms, last_renewal_timestamp_ms,
                 supersedes_registration_id,
                 acme_dns01_token, acme_challenge_expires_at_ms,
-                dns_record_styles,
+                discovery_profiles,
                 created_at_ms, updated_at_ms
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
@@ -160,7 +160,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 			nullableInt64(agent.SupersedesRegistrationID),
 			nullableString(agent.ACMEChallenge.DNS01Token),
 			nullableMs(agent.ACMEChallenge.ExpiresAt),
-			nullableString(encodeDNSRecordStyles(agent.DNSRecordStyles)),
+			nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 			now, now,
 		)
 		if err != nil {
@@ -183,7 +183,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
             supersedes_registration_id = ?,
             acme_dns01_token = ?,
             acme_challenge_expires_at_ms = ?,
-            dns_record_styles = ?,
+            discovery_profiles = ?,
             updated_at_ms = ?
         WHERE id = ?`
 	_, err := s.db.extx(ctx).ExecContext(ctx, q,
@@ -194,7 +194,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 		nullableInt64(agent.SupersedesRegistrationID),
 		nullableString(agent.ACMEChallenge.DNS01Token),
 		nullableMs(agent.ACMEChallenge.ExpiresAt),
-		nullableString(encodeDNSRecordStyles(agent.DNSRecordStyles)),
+		nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 		now,
 		agent.ID,
 	)

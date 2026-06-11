@@ -10,7 +10,17 @@ import (
 type RecordVerification struct {
 	Record domain.ExpectedDNSRecord
 	Found  bool
-	Actual string // What was actually returned by DNS (empty if not found).
+	// Actual carries the live answer DNS returned for this record. When
+	// records exist for the name/type but none matched the expected
+	// value, Actual is the first live answer (so the verify-dns 422 can
+	// show the operator what is actually in their zone). When nothing
+	// answered at all, Actual is empty. The service layer partitions on
+	// exactly this: !Found && Actual == "" is MISSING, !Found && Actual
+	// != "" is a value MISMATCH. When Found is true, Actual MAY differ
+	// benignly from the expected value (e.g. an SVCB subset match where
+	// the live record carries coexistence extras) and is informational
+	// only — Found is the verdict.
+	Actual string
 	Error  string // Lookup error, if any.
 	// DNSSECVerified is true when the response carried an
 	// authenticated-data (AD) bit from a validating resolver. Set

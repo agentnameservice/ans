@@ -73,14 +73,14 @@ type RegisterRequest struct {
 	ServerCertificateChainPEM string
 	SchemaVersion             string
 
-	// DNSRecordStyles is the set of DNS record families the RA emits
+	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// in dnsRecordsProvisioned and tells the operator to publish.
-	// Each element is one of domain.ValidDNSRecordStyles(); typical
+	// Each element is one of domain.ValidDiscoveryProfiles(); typical
 	// values are {ANS_SVCB} (default), {ANS_TXT}, or the
 	// {ANS_SVCB, ANS_TXT} transition union. Empty/nil normalizes to
-	// domain.DefaultDNSRecordStyles(); any invalid element surfaces
-	// as INVALID_DNS_RECORD_STYLE before the aggregate is created.
-	DNSRecordStyles []domain.DNSRecordStyle
+	// domain.DefaultDiscoveryProfiles(); any invalid element surfaces
+	// as INVALID_DISCOVERY_PROFILE before the aggregate is created.
+	DiscoveryProfiles []domain.DiscoveryProfile
 }
 
 // RegisterResponse is returned to the HTTP handler after a successful
@@ -141,7 +141,7 @@ type RegistrationService struct {
 	outbox            OutboxEnqueuer
 	uow               port.UnitOfWork
 	dnsVerifier       port.DNSVerifier
-	discoveryRegistry port.DiscoveryRegistry
+	discoveryRegistry port.ProfileRegistry
 	// signer is the KeyManager + keyID + raID tuple used to sign
 	// outbox events. When nil, events are still persisted but without
 	// a signature — this is only valid for tests; production configs
@@ -169,8 +169,8 @@ type EventSigner struct {
 // runs at process start, never on a request path, so the no-panics-in-
 // request-paths rule (CLAUDE.md) is upheld. Production builds wire the
 // bundled ANS-family registry in cmd/ans-ra/main.go via
-// registry.New(ans.TXTStyle{}, ans.SVCBStyle{}); tests build the same
-// registry through service.NewDefaultDiscoveryRegistry. There is no
+// registry.New(ans.TXTProfile{}, ans.SVCBProfile{}); tests build the same
+// registry through service.NewDefaultProfileRegistry. There is no
 // optional builder.
 func NewRegistrationService(
 	agents port.AgentStore,
@@ -183,7 +183,7 @@ func NewRegistrationService(
 	bus port.EventBus,
 	outbox OutboxEnqueuer,
 	uow port.UnitOfWork,
-	discoveryRegistry port.DiscoveryRegistry,
+	discoveryRegistry port.ProfileRegistry,
 ) *RegistrationService {
 	if discoveryRegistry == nil {
 		panic("service.NewRegistrationService: discoveryRegistry is required (nil interface — wire registry.New(...) at construction)")
@@ -337,7 +337,7 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	}
 	reg.ServerCSR = pendingServerCSR
 
-	if err := applyDNSRecordStyles(reg, req); err != nil {
+	if err := applyDiscoveryProfiles(reg, req); err != nil {
 		return nil, err
 	}
 

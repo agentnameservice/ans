@@ -6,8 +6,8 @@ import (
 	"github.com/godaddy/ans/internal/port"
 )
 
-// NewDefaultDiscoveryRegistry returns a registry pre-wired with the
-// bundled ANS-family styles (TXTStyle, SVCBStyle) in the canonical
+// NewDefaultProfileRegistry returns a registry pre-wired with the
+// bundled ANS-family profiles (TXTProfile, SVCBProfile) in the canonical
 // emission order — TXT first, SVCB second — that the V2 TL canonical
 // bytes for the union case were established at. cmd/ans-ra/main.go
 // uses it for production wiring; tests across the RA layer use it
@@ -17,8 +17,8 @@ import (
 // Iteration order is the load-bearing part: the service walker
 // emits records in registry insertion order, and TL leaves carry
 // `dnsRecordsProvisioned[]` byte-for-byte from that ordering. Any
-// future production deployment that swaps in a different style set
-// MUST construct the registry with TXTStyle and SVCBStyle in this
+// future production deployment that swaps in a different profile set
+// MUST construct the registry with TXTProfile and SVCBProfile in this
 // same relative order to preserve canonical-bytes parity for
 // existing agents.
 //
@@ -28,13 +28,13 @@ import (
 // startup misconfig per the no-panic-in-request-paths rule.
 //
 // tlPublicBaseURL is the externally-reachable Transparency Log URL the
-// ANS styles stamp into the family `_ans-badge` record's url= (see
-// ans.NewTXTStyle / ans.NewSVCBStyle). Empty — tests, or a deployment
+// ANS profiles stamp into the family `_ans-badge` record's url= (see
+// ans.NewTXTProfile / ans.NewSVCBProfile). Empty — tests, or a deployment
 // without a public TL URL — falls the badge back to the agent's own
 // endpoint URL.
-func NewDefaultDiscoveryRegistry(tlPublicBaseURL string) (port.DiscoveryRegistry, error) {
+func NewDefaultProfileRegistry(tlPublicBaseURL string) (port.ProfileRegistry, error) {
 	return registry.New(
-		ans.NewTXTStyle(tlPublicBaseURL),
-		ans.NewSVCBStyle(tlPublicBaseURL),
+		ans.NewTXTProfile(tlPublicBaseURL),
+		ans.NewSVCBProfile(tlPublicBaseURL),
 	)
 }

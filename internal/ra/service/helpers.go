@@ -12,75 +12,68 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
-// applyDNSRecordStyles resolves the set of DNS record families the
-// registration emits and stores it on the aggregate, enforcing the
-// V2 spec's dnsRecordStyles validation rules at the API boundary.
+// applyDiscoveryProfiles resolves the set of DNS record families the
+// registration emits and stores it on the aggregate, normalizing the
+// V2 request's discoveryProfiles field defensively at the API boundary.
 //
 // V1 lane is pinned to {ANS_TXT} regardless of the request: V1
 // callers predate the Consolidated Approach and their tooling expects
-// the original `_ans` TXT shape. V1 has no dnsRecordStyles field on
+// the original `_ans` TXT shape. V1 has no discoveryProfiles field on
 // the wire, so this branch is the only path V1 registrations take.
 //
-// V2 validation enforces the OpenAPI contract:
-//   - Field absent (nil slice) → defaults to DefaultDNSRecordStyles()
-//     ({ANS_SVCB}). The spec doesn't list dnsRecordStyles in
+// V2 normalization:
+//   - Field absent (nil slice) → defaults to DefaultDiscoveryProfiles()
+//     ({ANS_SVCB}). The spec doesn't list discoveryProfiles in
 //     `required`, so omission is legal and the server picks the
 //     recommended Consolidated Approach.
-//   - Field present but empty (`"dnsRecordStyles": []`) → 422
-//     INVALID_DNS_RECORD_STYLE. Matches `minItems: 1` in the spec —
-//     a caller who explicitly sends an empty list is signalling
-//     intent that the schema doesn't permit.
-//   - Duplicate elements → 422 INVALID_DNS_RECORD_STYLE. Matches
-//     `uniqueItems: true`. Silent dedup would let a malformed
-//     client request persist as state the caller didn't intend.
-//   - Invalid element (not in ValidDNSRecordStyles()) → 422
-//     INVALID_DNS_RECORD_STYLE.
+//   - Field present but empty (`"discoveryProfiles": []`) → also
+//     normalizes to DefaultDiscoveryProfiles(), same as omission. The
+//     spec's `minItems: 1` is the canonical client contract; the server
+//     does not reject a client that sends an empty array anyway.
+//   - Duplicate elements → silently deduped, first occurrence wins. The
+//     spec's `uniqueItems: true` is the canonical client contract; a
+//     duplicate carries no extra meaning, so we normalize rather than
+//     reject.
+//   - Invalid element (not in ValidDiscoveryProfiles()) → 422
+//     INVALID_DISCOVERY_PROFILE. An unrecognized value can't be
+//     normalized away — it names a family the RA can't emit, so the
+//     caller must fix it.
 //
-// The handler-side conversion (toDomainDNSRecordStyles) preserves
-// the nil-vs-empty distinction so this function can tell field
-// omission from explicit empty.
+// The handler-side conversion (toDomainDiscoveryProfiles) preserves
+// the nil-vs-empty distinction, but both nil and empty normalize to the
+// default here so the distinction no longer changes the outcome.
 //
 // V1 detection routes through isV1Lane (lifecycle.go) so a future
 // schema-version evolution updates one site, not several. The error
-// messages reference ValidDNSRecordStyles() so adding a third style
+// message references ValidDiscoveryProfiles() so adding a third profile
 // is a one-place change.
-func applyDNSRecordStyles(reg *domain.AgentRegistration, req RegisterRequest) error {
+func applyDiscoveryProfiles(reg *domain.AgentRegistration, req RegisterRequest) error {
 	if isV1Lane(req.SchemaVersion) {
-		reg.DNSRecordStyles = []domain.DNSRecordStyle{domain.DNSRecordStyleTXT}
+		reg.DiscoveryProfiles = []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT}
 		return nil
 	}
-	if req.DNSRecordStyles == nil {
-		reg.DNSRecordStyles = domain.DefaultDNSRecordStyles()
+	if len(req.DiscoveryProfiles) == 0 {
+		reg.DiscoveryProfiles = domain.DefaultDiscoveryProfiles()
 		return nil
 	}
-	if len(req.DNSRecordStyles) == 0 {
-		return domain.NewValidationError(
-			"INVALID_DNS_RECORD_STYLE",
-			"dnsRecordStyles must contain at least one element when present (omit the field to default to ["+
-				string(domain.DNSRecordStyleSVCB)+"])",
-		)
-	}
-	seen := make(map[domain.DNSRecordStyle]struct{}, len(req.DNSRecordStyles))
-	out := make([]domain.DNSRecordStyle, 0, len(req.DNSRecordStyles))
-	for _, s := range req.DNSRecordStyles {
+	seen := make(map[domain.DiscoveryProfile]struct{}, len(req.DiscoveryProfiles))
+	out := make([]domain.DiscoveryProfile, 0, len(req.DiscoveryProfiles))
+	for _, s := range req.DiscoveryProfiles {
 		if !s.IsValid() {
 			return domain.NewValidationError(
-				"INVALID_DNS_RECORD_STYLE",
-				fmt.Sprintf("dnsRecordStyles element %q is not one of %s",
+				"INVALID_DISCOVERY_PROFILE",
+				fmt.Sprintf("discoveryProfiles element %q is not one of %s",
 					string(s),
-					strings.Join(domain.ValidDNSRecordStyles(), ", ")),
+					strings.Join(domain.ValidDiscoveryProfiles(), ", ")),
 			)
 		}
 		if _, dup := seen[s]; dup {
-			return domain.NewValidationError(
-				"INVALID_DNS_RECORD_STYLE",
-				fmt.Sprintf("dnsRecordStyles must not contain duplicates (saw %q twice)", string(s)),
-			)
+			continue
 		}
 		seen[s] = struct{}{}
 		out = append(out, s)
 	}
-	reg.DNSRecordStyles = out
+	reg.DiscoveryProfiles = out
 	return nil
 }
 

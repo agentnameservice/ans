@@ -203,111 +203,116 @@ func selfSignedCertPEM(t *testing.T) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
 }
 
-// ----- applyDNSRecordStyles -----
+// ----- applyDiscoveryProfiles -----
 
-// TestApplyDNSRecordStyles covers the V1-pin / V2-default / V2-validate
-// branches, including every INVALID_DNS_RECORD_STYLE rejection path
-// the API guards: invalid element, duplicate, and explicit empty
-// array. The integration tests follow happy paths through
-// RegisterAgent and don't reach the rejection branches directly.
-func TestApplyDNSRecordStyles(t *testing.T) {
+// TestApplyDiscoveryProfiles covers the V1-pin / V2-default /
+// V2-normalize branches. The server normalizes defensively: an explicit
+// empty array and field omission both fall back to the default set, and
+// duplicates are silently deduped (first occurrence wins). Only an
+// unrecognized value still surfaces as INVALID_DISCOVERY_PROFILE — it
+// names a family the RA can't emit, so it cannot be normalized away. The
+// integration tests follow happy paths through RegisterAgent and don't
+// reach the normalization/rejection branches directly.
+func TestApplyDiscoveryProfiles(t *testing.T) {
 	tests := []struct {
-		name        string
-		req         RegisterRequest
-		wantStyles  []domain.DNSRecordStyle
-		wantErrCode string
+		name         string
+		req          RegisterRequest
+		wantProfiles []domain.DiscoveryProfile
+		wantErrCode  string
 	}{
 		{
 			name: "v1_pins_to_ans_txt_ignoring_request_field",
 			req: RegisterRequest{
-				SchemaVersion:   "V1",
-				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+				SchemaVersion:     "V1",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			},
-			wantStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
 		},
 		{
-			name:       "v2_nil_normalizes_to_default",
-			req:        RegisterRequest{SchemaVersion: "V2"},
-			wantStyles: domain.DefaultDNSRecordStyles(),
+			name:         "v2_nil_normalizes_to_default",
+			req:          RegisterRequest{SchemaVersion: "V2"},
+			wantProfiles: domain.DefaultDiscoveryProfiles(),
 		},
 		{
-			// minItems: 1 in the spec — an explicit empty array is a
-			// signal of intent the schema doesn't allow. Distinct from
-			// "field omitted", which still defaults.
-			name:        "v2_explicit_empty_slice_rejected",
-			req:         RegisterRequest{SchemaVersion: "V2", DNSRecordStyles: []domain.DNSRecordStyle{}},
-			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+			// minItems: 1 is the canonical client contract, but the
+			// server normalizes an explicit empty array to the default
+			// set rather than rejecting it — same outcome as omission.
+			name:         "v2_explicit_empty_slice_normalizes_to_default",
+			req:          RegisterRequest{SchemaVersion: "V2", DiscoveryProfiles: []domain.DiscoveryProfile{}},
+			wantProfiles: domain.DefaultDiscoveryProfiles(),
 		},
 		{
-			name:       "unset_schema_treated_as_v2_default",
-			req:        RegisterRequest{},
-			wantStyles: domain.DefaultDNSRecordStyles(),
+			name:         "unset_schema_treated_as_v2_default",
+			req:          RegisterRequest{},
+			wantProfiles: domain.DefaultDiscoveryProfiles(),
 		},
 		{
 			name: "v2_valid_ans_svcb_only",
 			req: RegisterRequest{
-				SchemaVersion:   "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 			},
-			wantStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleSVCB},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
 		},
 		{
 			name: "v2_valid_ans_txt_only",
 			req: RegisterRequest{
-				SchemaVersion:   "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
 			},
-			wantStyles: []domain.DNSRecordStyle{domain.DNSRecordStyleTXT},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
 		},
 		{
 			name: "v2_valid_union_preserves_order",
 			req: RegisterRequest{
 				SchemaVersion: "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{
-					domain.DNSRecordStyleSVCB,
-					domain.DNSRecordStyleTXT,
+				DiscoveryProfiles: []domain.DiscoveryProfile{
+					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfileANSTXT,
 				},
 			},
-			wantStyles: []domain.DNSRecordStyle{
-				domain.DNSRecordStyleSVCB,
-				domain.DNSRecordStyleTXT,
+			wantProfiles: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSSVCB,
+				domain.DiscoveryProfileANSTXT,
 			},
 		},
 		{
-			// uniqueItems: true in the spec — duplicates are rejected
-			// rather than silently deduped. A caller sending the same
-			// style twice has either a client bug or an unclear
-			// intention; surfacing 422 forces the issue out into the
-			// open instead of letting a request the caller didn't
-			// quite mean to send become persisted state.
-			name: "v2_duplicate_elements_rejected",
+			// uniqueItems: true is the canonical client contract, but the
+			// server normalizes duplicates by deduping (first occurrence
+			// wins) rather than rejecting. A duplicate carries no extra
+			// meaning, so the persisted set drops the repeat and keeps
+			// the original order of first appearances.
+			name: "v2_duplicate_elements_deduped_first_wins",
 			req: RegisterRequest{
 				SchemaVersion: "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{
-					domain.DNSRecordStyleSVCB,
-					domain.DNSRecordStyleSVCB,
-					domain.DNSRecordStyleTXT,
+				DiscoveryProfiles: []domain.DiscoveryProfile{
+					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfileANSTXT,
 				},
 			},
-			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+			wantProfiles: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSSVCB,
+				domain.DiscoveryProfileANSTXT,
+			},
 		},
 		{
 			name: "v2_invalid_element_rejected",
 			req: RegisterRequest{
-				SchemaVersion:   "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyle("garbage")},
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage")},
 			},
-			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+			wantErrCode: "INVALID_DISCOVERY_PROFILE",
 		},
 		{
 			// CONSTANT_CASE is the wire form. lowercase is rejected so the
 			// V2 enum stays consistent with every other enum on the spec.
 			name: "v2_lowercase_element_rejected_as_invalid",
 			req: RegisterRequest{
-				SchemaVersion:   "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyle("ans_svcb")},
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfile("ans_svcb")},
 			},
-			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+			wantErrCode: "INVALID_DISCOVERY_PROFILE",
 		},
 		{
 			// First valid, second invalid — error surfaces at the
@@ -315,18 +320,18 @@ func TestApplyDNSRecordStyles(t *testing.T) {
 			name: "v2_mixed_valid_then_invalid_rejected",
 			req: RegisterRequest{
 				SchemaVersion: "V2",
-				DNSRecordStyles: []domain.DNSRecordStyle{
-					domain.DNSRecordStyleSVCB,
-					domain.DNSRecordStyle("garbage"),
+				DiscoveryProfiles: []domain.DiscoveryProfile{
+					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfile("garbage"),
 				},
 			},
-			wantErrCode: "INVALID_DNS_RECORD_STYLE",
+			wantErrCode: "INVALID_DISCOVERY_PROFILE",
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := &domain.AgentRegistration{}
-			err := applyDNSRecordStyles(reg, tc.req)
+			err := applyDiscoveryProfiles(reg, tc.req)
 			if tc.wantErrCode != "" {
 				if err == nil {
 					t.Fatalf("want error code %q, got nil", tc.wantErrCode)
@@ -343,37 +348,37 @@ func TestApplyDNSRecordStyles(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if !sameStyles(reg.DNSRecordStyles, tc.wantStyles) {
-				t.Errorf("DNSRecordStyles: got %v want %v", reg.DNSRecordStyles, tc.wantStyles)
+			if !sameProfiles(reg.DiscoveryProfiles, tc.wantProfiles) {
+				t.Errorf("DiscoveryProfiles: got %v want %v", reg.DiscoveryProfiles, tc.wantProfiles)
 			}
 		})
 	}
 }
 
-// TestApplyDNSRecordStyles_ErrorMessageListsValidValues confirms the
+// TestApplyDiscoveryProfiles_ErrorMessageListsValidValues confirms the
 // error detail enumerates the canonical valid set so SDK authors get
-// an actionable message. Sourced from domain.ValidDNSRecordStyles().
-func TestApplyDNSRecordStyles_ErrorMessageListsValidValues(t *testing.T) {
+// an actionable message. Sourced from domain.ValidDiscoveryProfiles().
+func TestApplyDiscoveryProfiles_ErrorMessageListsValidValues(t *testing.T) {
 	reg := &domain.AgentRegistration{}
-	err := applyDNSRecordStyles(reg, RegisterRequest{
-		SchemaVersion:   "V2",
-		DNSRecordStyles: []domain.DNSRecordStyle{domain.DNSRecordStyle("garbage")},
+	err := applyDiscoveryProfiles(reg, RegisterRequest{
+		SchemaVersion:     "V2",
+		DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage")},
 	})
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	for _, want := range domain.ValidDNSRecordStyles() {
+	for _, want := range domain.ValidDiscoveryProfiles() {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error message must list %q; got %q", want, err.Error())
 		}
 	}
 }
 
-// sameStyles compares two style slices for set-equal-with-order.
-// Used by TestApplyDNSRecordStyles to assert ordering on the happy
+// sameProfiles compares two profile slices for set-equal-with-order.
+// Used by TestApplyDiscoveryProfiles to assert ordering on the happy
 // paths without pulling in reflect.DeepEqual semantics that
 // distinguish nil from empty.
-func sameStyles(a, b []domain.DNSRecordStyle) bool {
+func sameProfiles(a, b []domain.DiscoveryProfile) bool {
 	if len(a) != len(b) {
 		return false
 	}

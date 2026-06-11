@@ -1,10 +1,10 @@
--- 006_agent_dns_record_styles.sql
+-- 006_agent_discovery_profiles.sql
 -- Persist the operator's chosen set of DNS record families on the
 -- registration row so verify-acme / verify-dns / badge responses
 -- carry the same shape the operator chose at registration time.
 --
 -- Stored as a JSON array of CONSTANT_CASE strings matching the V2
--- register schema's DNSRecordStyle enum:
+-- register schema's DiscoveryProfile enum:
 --   "ANS_SVCB" — Consolidated Approach SVCB rows + shared records
 --                (RFC 9460; recommended default).
 --   "ANS_TXT"  — original `_ans` TXT shape + HTTPS RR + shared
@@ -24,17 +24,17 @@
 -- json_valid() (SQLite JSON1) so a malformed array fails at the
 -- storage boundary instead of silently coercing in the domain.
 -- Element-level validation lives in the service layer, where the
--- INVALID_DNS_RECORD_STYLE error is raised before the row is written.
+-- INVALID_DISCOVERY_PROFILE error is raised before the row is written.
 
 ALTER TABLE agent_registrations
-    ADD COLUMN dns_record_styles TEXT
-    CHECK (dns_record_styles IS NULL OR json_valid(dns_record_styles));
+    ADD COLUMN discovery_profiles TEXT
+    CHECK (discovery_profiles IS NULL OR json_valid(discovery_profiles));
 
 -- Backfill: every row registered before this migration shipped was
 -- emitting the legacy `_ans` TXT shape (the only shape pre-PR-13).
 -- Stamp them as ["ANS_TXT"] so post-deploy verify-dns calls demand
 -- the record family the operator actually published. New rows get
--- the value written explicitly by applyDNSRecordStyles in the service.
+-- the value written explicitly by applyDiscoveryProfiles in the service.
 UPDATE agent_registrations
-    SET dns_record_styles = '["ANS_TXT"]'
-    WHERE dns_record_styles IS NULL;
+    SET discovery_profiles = '["ANS_TXT"]'
+    WHERE discovery_profiles IS NULL;

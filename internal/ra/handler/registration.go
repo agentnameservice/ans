@@ -40,13 +40,13 @@ type registrationRequest struct {
 	ServerCertificatePEM      string        `json:"serverCertificatePEM,omitempty"`
 	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
 
-	// DNSRecordStyles is the set of DNS record families the RA emits
+	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// for this registration. Each element is one of "ANS_SVCB" or
 	// "ANS_TXT". Typical values: ["ANS_SVCB"] (default, recommended),
 	// ["ANS_TXT"], or ["ANS_SVCB", "ANS_TXT"] (transition union).
 	// Empty/missing → ["ANS_SVCB"]. Any invalid element rejected
-	// with 422 INVALID_DNS_RECORD_STYLE. See ANS_SPEC.md §4.4.2.
-	DNSRecordStyles []string `json:"dnsRecordStyles,omitempty"`
+	// with 422 INVALID_DISCOVERY_PROFILE. See ANS_SPEC.md §4.4.2.
+	DiscoveryProfiles []string `json:"discoveryProfiles,omitempty"`
 }
 
 type endpointDTO struct {
@@ -161,7 +161,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		ServerCsrPEM:              req.ServerCsrPEM,
 		ServerCertificatePEM:      req.ServerCertificatePEM,
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
-		DNSRecordStyles:           toDomainDNSRecordStyles(req.DNSRecordStyles),
+		DiscoveryProfiles:         toDomainDiscoveryProfiles(req.DiscoveryProfiles),
 	})
 	if err != nil {
 		WriteError(w, err)
@@ -171,22 +171,20 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusAccepted, mapRegistrationResponse(resp, r))
 }
 
-// toDomainDNSRecordStyles converts the wire []string into the typed
-// domain slice while preserving the nil-vs-empty distinction. nil
-// (field omitted in the JSON request) flows through as nil so the
-// service layer applies DefaultDNSRecordStyles(); a non-nil empty
-// slice (explicit `"dnsRecordStyles": []`) flows through as an
-// empty non-nil []DNSRecordStyle so the service layer can reject it
-// per the spec's `minItems: 1`. Per-element validity, duplicate
-// rejection, and empty-array rejection all live in
-// applyDNSRecordStyles.
-func toDomainDNSRecordStyles(raw []string) []domain.DNSRecordStyle {
+// toDomainDiscoveryProfiles converts the wire []string into the typed
+// domain slice. nil (field omitted in the JSON request) flows through
+// as nil and a non-nil empty slice (explicit `"discoveryProfiles": []`)
+// flows through as an empty non-nil []DiscoveryProfile; the service
+// layer normalizes both to DefaultDiscoveryProfiles(), so the
+// distinction no longer changes the outcome. Per-element validity and
+// duplicate deduplication live in applyDiscoveryProfiles.
+func toDomainDiscoveryProfiles(raw []string) []domain.DiscoveryProfile {
 	if raw == nil {
 		return nil
 	}
-	out := make([]domain.DNSRecordStyle, len(raw))
+	out := make([]domain.DiscoveryProfile, len(raw))
 	for i, s := range raw {
-		out[i] = domain.DNSRecordStyle(s)
+		out[i] = domain.DiscoveryProfile(s)
 	}
 	return out
 }

@@ -14,17 +14,17 @@ import (
 //
 // Composition rules:
 //
-//  1. The set of styles to emit is reg.DNSRecordStyles, filtered to
+//  1. The set of profiles to emit is reg.DiscoveryProfiles, filtered to
 //     those the registry actually has wired. Empty after filtering
-//     (operator omitted dnsRecordStyles, or every entry was unknown
-//     to the registry) normalizes to domain.DefaultDNSRecordStyles().
+//     (operator omitted discoveryProfiles, or every entry was unknown
+//     to the registry) normalizes to domain.DefaultDiscoveryProfiles().
 //  2. Iteration order is the registry's insertion order (cmd/main
-//     wires [TXTStyle, SVCBStyle], so emission proceeds TXT-first
-//     then SVCB). User-supplied order on reg.DNSRecordStyles has no
-//     effect — `dnsRecordStyles` is set semantics on the wire.
-//  3. Each style's full record list (discovery + family trust records)
+//     wires [TXTProfile, SVCBProfile], so emission proceeds TXT-first
+//     then SVCB). User-supplied order on reg.DiscoveryProfiles has no
+//     effect — `discoveryProfiles` is set semantics on the wire.
+//  3. Each profile's full record list (discovery + family trust records)
 //     is collected and deduped by (Name, Type, Value). Family trust
-//     records that overlap across sibling styles in the same family
+//     records that overlap across sibling profiles in the same family
 //     (e.g. `_ans-badge` from both ANS_SVCB and ANS_TXT) emit once.
 //  4. Records are reordered into discovery-then-trust groupings,
 //     preserving within-group iteration order. This pins the V2 TL
@@ -36,20 +36,21 @@ import (
 //     `_ans` TXT family carries the operator's required signal and
 //     SVCB rides along as optional.
 //
-// Returns nil when reg has no endpoints AND no server cert (nothing
-// meaningful for the operator to publish), matching the pre-refactor
-// domain function's empty-input contract.
+// Returns an empty (non-nil) slice when reg has no endpoints AND no
+// server cert — nothing meaningful for the operator to publish. The
+// nil-vs-empty distinction never reaches the wire: the V2 event
+// builder re-wraps into its own slice.
 //
 // s.discoveryRegistry is guaranteed non-nil by NewRegistrationService
 // (constructor panics on nil), so the walker dereferences it
 // unconditionally.
 func (s *RegistrationService) ComputeRequiredDNSRecords(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord {
-	requested := s.resolveRequestedStyles(reg)
+	requested := s.resolveRequestedProfiles(reg)
 
 	logger := log.Debug().
 		Str("agentId", reg.AgentID).
-		Strs("requestedStyles", styleStrings(reg.DNSRecordStyles)).
-		Strs("resolvedStyles", styleStrings(setToSlice(requested)))
+		Strs("requestedProfiles", profileStrings(reg.DiscoveryProfiles)).
+		Strs("resolvedProfiles", profileStrings(setToSlice(requested)))
 	logger.Msg("computing required DNS records")
 
 	collected, seen := []domain.ExpectedDNSRecord{}, make(map[string]bool)
@@ -57,17 +58,23 @@ func (s *RegistrationService) ComputeRequiredDNSRecords(reg *domain.AgentRegistr
 		if !requested[id] {
 			continue
 		}
-		style, ok := s.discoveryRegistry.Get(id)
+		profile, ok := s.discoveryRegistry.Get(id)
 		if !ok {
 			continue
 		}
-		emitted := style.Records(reg)
+		emitted := profile.Records(reg)
 		log.Debug().
 			Str("agentId", reg.AgentID).
-			Str("style", string(id)).
+			Str("profile", string(id)).
 			Int("emittedCount", len(emitted)).
-			Msg("style emitted records")
+			Msg("profile emitted records")
 		for _, r := range emitted {
+			// Dedup key deliberately omits Required: sibling profiles
+			// emitting the same family trust record (badge, TLSA) must
+			// agree on the flag (both adapters do — badge true, TLSA
+			// false), so first-seen wins. A profile that disagreed
+			// would have its flag silently dropped here — keep the
+			// flags aligned across adapters.
 			key := r.Name + "|" + string(r.Type) + "|" + r.Value
 			if seen[key] {
 				continue
@@ -94,7 +101,7 @@ func (s *RegistrationService) ComputeRequiredDNSRecords(reg *domain.AgentRegistr
 	// SVCB Required-flag post-process: §4.4.2 says TXT carries the
 	// required signal during the transition; SVCB stays optional
 	// alongside.
-	if requested[domain.DNSRecordStyleTXT] {
+	if requested[domain.DiscoveryProfileANSTXT] {
 		for i := range result {
 			if result[i].Type == domain.DNSRecordSVCB {
 				result[i].Required = false
@@ -105,53 +112,53 @@ func (s *RegistrationService) ComputeRequiredDNSRecords(reg *domain.AgentRegistr
 	if len(result) == 0 && len(reg.Endpoints) > 0 {
 		log.Warn().
 			Str("agentId", reg.AgentID).
-			Strs("resolvedStyles", styleStrings(setToSlice(requested))).
+			Strs("resolvedProfiles", profileStrings(setToSlice(requested))).
 			Msg("DNS record computation produced no records despite having endpoints; check discovery registry wiring")
 	}
 
 	return result
 }
 
-// resolveRequestedStyles filters reg.DNSRecordStyles to those the
+// resolveRequestedProfiles filters reg.DiscoveryProfiles to those the
 // registry has wired, normalizing empty/all-invalid to the default
-// set. Unknown styles trigger a WARN log so an operator can spot a
+// set. Unknown profiles trigger a WARN log so an operator can spot a
 // post-decommission row in their data without parsing verify-dns
 // failures.
-func (s *RegistrationService) resolveRequestedStyles(reg *domain.AgentRegistration) map[domain.DNSRecordStyle]bool {
-	requested := make(map[domain.DNSRecordStyle]bool)
-	for _, id := range reg.DNSRecordStyles {
+func (s *RegistrationService) resolveRequestedProfiles(reg *domain.AgentRegistration) map[domain.DiscoveryProfile]bool {
+	requested := make(map[domain.DiscoveryProfile]bool)
+	for _, id := range reg.DiscoveryProfiles {
 		if _, ok := s.discoveryRegistry.Get(id); ok {
 			requested[id] = true
 			continue
 		}
 		log.Warn().
 			Str("agentId", reg.AgentID).
-			Str("style", string(id)).
-			Msg("registration carries DNS style unknown to the running registry; skipping")
+			Str("profile", string(id)).
+			Msg("registration carries discovery profile unknown to the running registry; skipping")
 	}
 	if len(requested) == 0 {
-		for _, id := range domain.DefaultDNSRecordStyles() {
+		for _, id := range domain.DefaultDiscoveryProfiles() {
 			requested[id] = true
 		}
 	}
 	return requested
 }
 
-func styleStrings(styles []domain.DNSRecordStyle) []string {
-	out := make([]string, len(styles))
-	for i, s := range styles {
+func profileStrings(profiles []domain.DiscoveryProfile) []string {
+	out := make([]string, len(profiles))
+	for i, s := range profiles {
 		out[i] = string(s)
 	}
 	return out
 }
 
 // setToSlice converts the requested-set map to a deterministic slice
-// for logging. Order tracks domain.ValidDNSRecordStyles() so logs are
+// for logging. Order tracks domain.ValidDiscoveryProfiles() so logs are
 // stable across runs.
-func setToSlice(set map[domain.DNSRecordStyle]bool) []domain.DNSRecordStyle {
-	var out []domain.DNSRecordStyle
-	for _, valid := range domain.ValidDNSRecordStyles() {
-		id := domain.DNSRecordStyle(valid)
+func setToSlice(set map[domain.DiscoveryProfile]bool) []domain.DiscoveryProfile {
+	var out []domain.DiscoveryProfile
+	for _, valid := range domain.ValidDiscoveryProfiles() {
+		id := domain.DiscoveryProfile(valid)
 		if set[id] {
 			out = append(out, id)
 		}
