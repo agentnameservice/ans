@@ -16,12 +16,6 @@ import (
 	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
 )
 
-// identityLane is the outbox schema_version value routing identity
-// events to the TL's `POST /v1/internal/identities/event` ingest
-// lane. Same producer signature and replay-verbatim invariant as the
-// V1/V2 agent lanes; different inner-event schema.
-const identityLane = "IDENTITY"
-
 // maxProofsPerVerify bounds the multi-key proof set on one
 // verify-control call. did:web legitimately proves several
 // assertionMethod keys; sixteen is far beyond any real document while
@@ -33,6 +27,28 @@ const maxProofsPerVerify = 16
 // chunking, v1 rejects oversized batches and lets the caller chunk —
 // every accepted call still seals exactly one event.
 const maxLinkBatch = 256
+
+// sealClaimTTL bounds the provisional verify-control claim taken
+// across the seal-before-success TL round trip: a claim older than
+// this (a crashed claimer) is reclaimable. Comfortably above the
+// seal timeout, comfortably below the nonce TTL.
+const sealClaimTTL = 30 * time.Second
+
+// defaultSealTimeout bounds the inline TL seal call (§5.6.1) —
+// parity with the outbound-fetch budget (§3.7).
+const defaultSealTimeout = 5 * time.Second
+
+// IdentityEventSealer submits one producer-signed identity event to
+// the TL's IDENTITY ingest lane and returns only after the TL
+// acknowledges the seal — the dependency seal-before-success (design
+// §5.6.1) hangs on. Identity events never ride the outbox: delivery
+// precedes success, a failed delivery IS a failed operation, and
+// there is nothing for a background worker to retry (retrying would
+// seal an event whose row transition never happened). Implementations
+// map failures to domain error kinds (ErrUnavailable for transient).
+type IdentityEventSealer interface {
+	SealIdentityEvent(ctx context.Context, innerCanonical []byte, producerSig string) error
+}
 
 // ProofChallenge is one entry of the 202 challenge list: a key the
 // registrant may prove, plus the exact base64url signing input a
@@ -66,7 +82,7 @@ type IdentityService struct {
 	identities port.IdentityStore
 	links      port.IdentityLinkStore
 	agents     port.AgentStore
-	outbox     OutboxEnqueuer
+	sealer     IdentityEventSealer
 	uow        port.UnitOfWork
 	signer     *EventSigner
 
@@ -76,19 +92,23 @@ type IdentityService struct {
 	verifiers map[domain.IdentifierKind]controlVerifier
 
 	challengeTTL time.Duration
+	sealTimeout  time.Duration
 	limiter      *ownerLimiter
+	linkLimiter  *ownerLimiter
 	clock        func() time.Time
 	newID        func() (string, error)
 	newNonce     func() (string, error)
 }
 
-// NewIdentityService constructs an IdentityService.
+// NewIdentityService constructs an IdentityService. A nil sealer
+// fails every sealing operation closed with TL_UNAVAILABLE — the
+// seal-before-success rule (§5.6.1) admits no "seal later" mode.
 func NewIdentityService(
 	identities port.IdentityStore,
 	links port.IdentityLinkStore,
 	agents port.AgentStore,
 	resolver port.DIDResolver,
-	outbox OutboxEnqueuer,
+	sealer IdentityEventSealer,
 	uow port.UnitOfWork,
 ) *IdentityService {
 	return &IdentityService{
@@ -96,10 +116,12 @@ func NewIdentityService(
 		links:        links,
 		agents:       agents,
 		verifiers:    newControlVerifiers(resolver),
-		outbox:       outbox,
+		sealer:       sealer,
 		uow:          uow,
 		challengeTTL: time.Hour,
+		sealTimeout:  defaultSealTimeout,
 		limiter:      newOwnerLimiter(defaultRegisterPerMinute),
+		linkLimiter:  newOwnerLimiter(defaultLinkPerMinute),
 		clock:        time.Now,
 		newID: func() (string, error) {
 			id, err := uuid.NewV7()
@@ -142,6 +164,24 @@ func (s *IdentityService) WithChallengeTTL(ttl time.Duration) *IdentityService {
 func (s *IdentityService) WithRegisterRateLimit(perMinute int) *IdentityService {
 	if perMinute > 0 {
 		s.limiter = newOwnerLimiter(perMinute)
+	}
+	return s
+}
+
+// WithLinkRateLimit overrides the per-owner link/unlink rate limit
+// (default 60/min — design §4.3 operational hardening: the bounds
+// limit blast radius and TL noise, not the named risk).
+func (s *IdentityService) WithLinkRateLimit(perMinute int) *IdentityService {
+	if perMinute > 0 {
+		s.linkLimiter = newOwnerLimiter(perMinute)
+	}
+	return s
+}
+
+// WithSealTimeout overrides the inline TL seal budget (default 5s).
+func (s *IdentityService) WithSealTimeout(timeout time.Duration) *IdentityService {
+	if timeout > 0 {
+		s.sealTimeout = timeout
 	}
 	return s
 }
@@ -209,7 +249,7 @@ func (s *IdentityService) Register(ctx context.Context, providerID, rawValue str
 			"identifier is already verified by this owner; rotate it with PUT instead")
 	case err == nil:
 		// PENDING_CONTROL → idempotent re-challenge on the same row.
-		return s.challenge(ctx, existing, now)
+		return s.challenge(ctx, existing, now, false)
 	case errors.Is(err, domain.ErrNotFound):
 		// fall through to creation
 	default:
@@ -234,7 +274,7 @@ func (s *IdentityService) Register(ctx context.Context, providerID, rawValue str
 	if err != nil {
 		return nil, err
 	}
-	return s.challenge(ctx, identity, now)
+	return s.challenge(ctx, identity, now, true)
 }
 
 // Rotate stages a same-kind replacement (§4.2 PUT) and returns fresh
@@ -254,13 +294,27 @@ func (s *IdentityService) Rotate(ctx context.Context, providerID, identityID, ra
 	if err := identity.StageRotation(rawValue, now); err != nil {
 		return nil, err
 	}
-	return s.challenge(ctx, identity, now)
+	return s.challenge(ctx, identity, now, false)
 }
 
 // challenge mints a fresh nonce on the identity, runs the kind's
 // advisory resolution to seed the per-key challenge list, persists,
 // and assembles the 202 response. Shared by Register and Rotate.
-func (s *IdentityService) challenge(ctx context.Context, identity *domain.VerifiedIdentity, now time.Time) (*IdentityChallengeResponse, error) {
+//
+// isNew selects the persist path: a brand-new identity INSERTs
+// (fresh UUIDv7 — unracable); an existing row persists through the
+// store's CONDITIONAL StageChallenge — the resolver fetch between
+// load and persist spans seconds, and a blind upsert here could
+// clobber a verify or revoke that committed in that window (status
+// regression = a different owner could then take the identifier).
+func (s *IdentityService) challenge(ctx context.Context, identity *domain.VerifiedIdentity, now time.Time, isNew bool) (*IdentityChallengeResponse, error) {
+	// Load-time snapshot for the conditional persist.
+	expectedStatus := identity.Status
+	expectedNonce := ""
+	if identity.Challenge != nil {
+		expectedNonce = identity.Challenge.Nonce
+	}
+
 	nonce, err := s.newNonce()
 	if err != nil {
 		return nil, domain.NewInternalError("CHALLENGE_GENERATION", "could not generate challenge nonce", err)
@@ -291,8 +345,14 @@ func (s *IdentityService) challenge(ctx context.Context, identity *domain.Verifi
 		return nil, err
 	}
 
-	if err := s.identities.Save(ctx, identity); err != nil {
-		return nil, mapIdentitySaveErr(err)
+	if isNew {
+		if err := s.identities.Save(ctx, identity); err != nil {
+			return nil, mapIdentitySaveErr(err)
+		}
+	} else {
+		if err := s.identities.StageChallenge(ctx, identity, expectedStatus, expectedNonce, now.Add(-sealClaimTTL)); err != nil {
+			return nil, err
+		}
 	}
 	return &IdentityChallengeResponse{
 		Identity:   identity,
@@ -303,12 +363,15 @@ func (s *IdentityService) challenge(ctx context.Context, identity *domain.Verifi
 }
 
 // VerifyControl runs the identity's per-kind control proof over the
-// submission and, when every proof passes, flips the identity to
-// VERIFIED (or completes a staged rotation), consumes the nonce, and
-// seals IDENTITY_VERIFIED / IDENTITY_UPDATED on the identity's TL
-// stream — all in one transaction. One bad proof fails the call
-// closed; a failed attempt does NOT consume the nonce. The per-kind
-// logic lives entirely behind the controlVerifier seam
+// submission and, when every proof passes, seals IDENTITY_VERIFIED /
+// IDENTITY_UPDATED on the identity's TL stream and THEN flips the
+// identity to VERIFIED (or completes a staged rotation), consuming
+// the nonce in the commit transaction — seal-before-success (§5.6.1):
+// success is reported only after the TL acknowledges the seal, and
+// the RA row can never be ahead of the log. One bad proof fails the
+// call closed; a failed attempt does NOT consume the nonce (the
+// provisional claim taken across the seal round trip is released).
+// The per-kind logic lives entirely behind the controlVerifier seam
 // (identitykinds.go); this method owns the kind-agnostic discipline.
 func (s *IdentityService) VerifyControl(ctx context.Context, providerID, identityID string, sub ProofSubmission) (*domain.VerifiedIdentity, error) {
 	identity, err := s.ownedIdentityForWrite(ctx, providerID, identityID)
@@ -345,16 +408,56 @@ func (s *IdentityService) VerifyControl(ctx context.Context, providerID, identit
 		return nil, err
 	}
 
+	// Advisory cross-owner duplicate check before sealing — narrows
+	// the window in which a competing owner's verify could leave a
+	// sealed event whose row transition loses the proven-uniqueness
+	// index race. The index at commit stays the authoritative guard;
+	// a sealed loser is a benign true fact (control WAS proven) whose
+	// row never flips and whose identity never becomes linkable.
 	statusBefore := identity.Status
-	var sealed *domain.VerifiedIdentity
-	err = s.uow.Run(ctx, func(txCtx context.Context) error {
-		// Consume the nonce first — the conditional update is the
-		// TOCTOU guard; exactly one concurrent verify can win.
-		if err := s.identities.ConsumeChallenge(txCtx, identity.IdentityID, identity.Challenge.Nonce, now); err != nil {
-			return err
+	if statusBefore != domain.IdentityVerified {
+		if taken, terr := s.identities.ExistsVerified(ctx, identity.Kind, identity.EffectiveValue()); terr != nil {
+			return nil, terr
+		} else if taken {
+			return nil, domain.NewConflictError("IDENTIFIER_DUPLICATE",
+				"identifier is already verified by another owner")
 		}
-		previousValue, err := identity.CompleteVerification(now)
-		if err != nil {
+	}
+
+	// Phase A — claim. Serializes concurrent verify attempts on this
+	// nonce across the seal round trip: at most one in-flight attempt
+	// can seal. A claim is NOT consumption; every failure path below
+	// releases it.
+	nonce := identity.Challenge.Nonce
+	if err := s.identities.ClaimChallenge(ctx, identity.IdentityID, nonce, now, now.Add(-sealClaimTTL)); err != nil {
+		return nil, err
+	}
+
+	previousValue, err := identity.CompleteVerification(now)
+	if err != nil {
+		s.releaseClaim(ctx, identity.IdentityID, nonce)
+		return nil, err
+	}
+	eventType := identityevent.TypeIdentityVerified
+	if statusBefore == domain.IdentityVerified {
+		eventType = identityevent.TypeIdentityUpdated
+	}
+	inner := s.buildIdentityEvent(identity, eventType, now)
+	inner.Keys = provenKeys
+	inner.PreviousValue = previousValue
+	inner.VerifiedAt = now.Format(time.RFC3339)
+
+	// Phase B — seal. No success without the TL's acknowledgment.
+	if err := s.sealIdentityEvent(ctx, inner, now); err != nil {
+		s.releaseClaim(ctx, identity.IdentityID, nonce)
+		return nil, err
+	}
+
+	// Phase C — commit with the ack: consume the nonce (the
+	// conditional update stays the authoritative TOCTOU guard) and
+	// flip the row.
+	err = s.uow.Run(ctx, func(txCtx context.Context) error {
+		if err := s.identities.ConsumeChallenge(txCtx, identity.IdentityID, nonce, now); err != nil {
 			return err
 		}
 		consumed := now
@@ -362,27 +465,25 @@ func (s *IdentityService) VerifyControl(ctx context.Context, providerID, identit
 		if err := s.identities.Save(txCtx, identity); err != nil {
 			return mapIdentitySaveErr(err)
 		}
-
-		eventType := identityevent.TypeIdentityVerified
-		if statusBefore == domain.IdentityVerified {
-			eventType = identityevent.TypeIdentityUpdated
-		}
-		inner := s.buildIdentityEvent(identity, eventType, now)
-		inner.Keys = provenKeys
-		inner.PreviousValue = previousValue
-		inner.VerifiedAt = now.Format(time.RFC3339)
-		return s.enqueueIdentityEvent(txCtx, inner, now)
+		return nil
 	})
 	if err != nil {
+		s.releaseClaim(ctx, identity.IdentityID, nonce)
 		return nil, err
 	}
-	sealed = identity
-	return sealed, nil
+	return identity, nil
+}
+
+// releaseClaim is the best-effort failure-path release of the
+// verify-control seal claim — failed attempts never consume (§3.2).
+func (s *IdentityService) releaseClaim(ctx context.Context, identityID, nonce string) {
+	_ = s.identities.ReleaseChallenge(ctx, identityID, nonce)
 }
 
 // Revoke transitions a VERIFIED identity to REVOKED and seals
 // IDENTITY_REVOKED — one event; propagation to every linked agent's
-// badge is the TL's read-time join, never a write fan-out.
+// badge is the TL's read-time join, never a write fan-out. Seal
+// before success (§5.6.1): the row flips only after the TL ack.
 func (s *IdentityService) Revoke(ctx context.Context, providerID, identityID string) (*domain.VerifiedIdentity, error) {
 	identity, err := s.ownedIdentityForWrite(ctx, providerID, identityID)
 	if err != nil {
@@ -392,23 +493,27 @@ func (s *IdentityService) Revoke(ctx context.Context, providerID, identityID str
 	if err := identity.Revoke(now); err != nil {
 		return nil, err
 	}
-	err = s.uow.Run(ctx, func(txCtx context.Context) error {
-		if err := s.identities.Save(txCtx, identity); err != nil {
-			return mapIdentitySaveErr(err)
-		}
-		inner := s.buildIdentityEvent(identity, identityevent.TypeIdentityRevoked, now)
-		inner.RevokedAt = now.Format(time.RFC3339)
-		return s.enqueueIdentityEvent(txCtx, inner, now)
-	})
-	if err != nil {
+	inner := s.buildIdentityEvent(identity, identityevent.TypeIdentityRevoked, now)
+	inner.RevokedAt = now.Format(time.RFC3339)
+	if err := s.sealIdentityEvent(ctx, inner, now); err != nil {
+		return nil, err
+	}
+	// Phase C — CONDITIONAL commit (re-read + compare, §plan W1): the
+	// seal round trip is a window a concurrent verify/rotate commit
+	// can land in; a blind save would overwrite it with this call's
+	// stale snapshot. On conflict the sealed IDENTITY_REVOKED is the
+	// benign residue (the TL's read-time status is terminal on ANY
+	// revocation leaf) and the caller retries against fresh state.
+	if err := s.identities.MarkRevoked(ctx, identity.IdentityID, now); err != nil {
 		return nil, err
 	}
 	return identity, nil
 }
 
-// List returns the owner's identities, newest first.
-func (s *IdentityService) List(ctx context.Context, providerID string) ([]*domain.VerifiedIdentity, error) {
-	return s.identities.ListByOwner(ctx, providerID)
+// List returns one page of the owner's identities, newest first
+// (opaque-cursor pagination, the agent-list convention).
+func (s *IdentityService) List(ctx context.Context, providerID string, limit int, cursor string) (*port.CursorPage[*domain.VerifiedIdentity], error) {
+	return s.identities.ListByOwner(ctx, providerID, limit, cursor)
 }
 
 // LinkedIdentitySummary is one entry of the RA-side computed
@@ -425,10 +530,21 @@ type LinkedIdentitySummary struct {
 }
 
 // LinkedIdentitiesForAgent computes the identities currently linked
-// to an agent. Callers reach this through the ownership-gated agent
-// detail route; links are same-owner by construction, so no further
-// gate applies here.
+// to an agent under the §5.6.3 visibility predicate: link LINKED ∧
+// agent live — a terminal agent's view is empty (its links are no
+// longer visible; history stays in the TL). REVOKED identities stay
+// visible with their status: a reader must see the who behind a
+// still-linked agent was revoked. Callers reach this through the
+// ownership-gated agent detail route; links are same-owner by
+// construction, so no further gate applies here.
 func (s *IdentityService) LinkedIdentitiesForAgent(ctx context.Context, agentID string) ([]LinkedIdentitySummary, error) {
+	reg, err := s.agents.FindByAgentID(ctx, agentID)
+	if err != nil {
+		return nil, err
+	}
+	if !agentLinkable(reg.Status) {
+		return []LinkedIdentitySummary{}, nil
+	}
 	links, err := s.links.ListLiveByAgent(ctx, agentID)
 	if err != nil {
 		return nil, err
@@ -450,7 +566,10 @@ func (s *IdentityService) LinkedIdentitiesForAgent(ctx context.Context, agentID 
 	return out, nil
 }
 
-// Detail returns one identity plus its live links.
+// Detail returns one identity plus its visible links — the §5.6.3
+// visibility predicate applies to the linked-agent list and count
+// exactly as to every other "current" view: a link to a terminal
+// agent drops out (its history stays in the TL).
 func (s *IdentityService) Detail(ctx context.Context, providerID, identityID string) (*domain.VerifiedIdentity, []*domain.IdentityLink, error) {
 	identity, err := s.ownedIdentity(ctx, providerID, identityID)
 	if err != nil {
@@ -460,17 +579,39 @@ func (s *IdentityService) Detail(ctx context.Context, providerID, identityID str
 	if err != nil {
 		return nil, nil, err
 	}
-	return identity, links, nil
+	visible := make([]*domain.IdentityLink, 0, len(links))
+	for _, l := range links {
+		reg, err := s.agents.FindByAgentID(ctx, l.AgentID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue // agent row gone (admin cleanup) — not visible
+			}
+			return nil, nil, err // infra failure must surface, never under-count
+		}
+		if !agentLinkable(reg.Status) {
+			continue
+		}
+		visible = append(visible, l)
+	}
+	return identity, visible, nil
 }
 
 // Link binds a batch of the owner's agents to the identity — a
 // single owner-gated call, no challenge, no signature (§4.3): the
 // caller must own the identity AND every named agent; key possession
-// never authorizes a link. The whole batch seals as ONE
-// IDENTITY_LINKED event on the identity stream; agent streams are
-// never written. Already-linked agents are skipped idempotently; a
-// call that links nothing new seals nothing.
+// never authorizes a link. Liveness gate (§4.3): the identity must
+// be VERIFIED and every agent live (ACTIVE or DEPRECATED — a
+// deprecated agent still serves during migration and the who stays
+// true); terminal or pre-activation agents are AGENT_NOT_LINKABLE.
+// The whole batch seals as ONE IDENTITY_LINKED event on the identity
+// stream — before success is reported (§5.6.1) — and agent streams
+// are never written. Already-linked agents are skipped idempotently;
+// a call that links nothing new seals nothing.
 func (s *IdentityService) Link(ctx context.Context, providerID, identityID string, agentIDs []string) (int, error) {
+	if !s.linkLimiter.Allow(providerID, s.clock()) {
+		return 0, domain.NewValidationError("RATE_LIMITED",
+			"too many link/unlink calls; retry later")
+	}
 	identity, err := s.ownedIdentityForWrite(ctx, providerID, identityID)
 	if err != nil {
 		return 0, err
@@ -500,7 +641,9 @@ func (s *IdentityService) Link(ctx context.Context, providerID, identityID strin
 
 	// Owner gate, both sides: every agent must exist and belong to
 	// the caller. A non-owned agent is reported as not-found — the
-	// caller learns nothing about other owners' agents.
+	// caller learns nothing about other owners' agents. Then the
+	// liveness gate: rejected atomically, all-or-nothing, matching
+	// the one-event batch semantics.
 	for _, agentID := range deduped {
 		reg, err := s.agents.FindByAgentID(ctx, agentID)
 		if err != nil {
@@ -511,50 +654,124 @@ func (s *IdentityService) Link(ctx context.Context, providerID, identityID strin
 			return 0, domain.NewNotFoundError("AGENT_NOT_FOUND",
 				fmt.Sprintf("agent %q not found", agentID))
 		}
+		if !agentLinkable(reg.Status) {
+			return 0, domain.NewValidationError("AGENT_NOT_LINKABLE",
+				fmt.Sprintf("agent %q is %s — links require a live agent (ACTIVE or DEPRECATED)", agentID, reg.Status))
+		}
+	}
+
+	// Compute the batch BEFORE sealing: the sealed ansIds[] must be
+	// exactly the pairs this call creates.
+	existingLinks, err := s.links.ListLiveByIdentity(ctx, identityID)
+	if err != nil {
+		return 0, err
+	}
+	alreadyLinked := make(map[string]bool, len(existingLinks))
+	for _, l := range existingLinks {
+		alreadyLinked[l.AgentID] = true
+	}
+	newlyLinked := make([]string, 0, len(deduped))
+	for _, agentID := range deduped {
+		if !alreadyLinked[agentID] {
+			newlyLinked = append(newlyLinked, agentID)
+		}
+	}
+	if len(newlyLinked) == 0 {
+		return 0, nil // fully idempotent — nothing to seal
 	}
 
 	now := s.clock().UTC()
-	linked := 0
+	inner := s.buildIdentityEvent(identity, identityevent.TypeIdentityLinked, now)
+	inner.AnsIDs = newlyLinked
+
+	// Seal before success (§5.6.1), then commit the rows with the
+	// ack. A concurrent call winning a pair's row in between is
+	// benign: both sealed events assert LINKED, the row upsert is
+	// idempotent, and latest-event-wins reads are unaffected.
+	if err := s.sealIdentityEvent(ctx, inner, now); err != nil {
+		return 0, err
+	}
 	err = s.uow.Run(ctx, func(txCtx context.Context) error {
-		newlyLinked := make([]string, 0, len(deduped))
-		for _, agentID := range deduped {
-			created, err := s.links.Link(txCtx, identityID, agentID, now)
-			if err != nil {
+		// Re-read + compare (§plan W1): a revoke that committed
+		// during the seal round trip must not gain live link rows —
+		// the §4.3 VERIFIED gate holds at commit, not just at entry.
+		current, err := s.identities.FindByID(txCtx, identityID)
+		if err != nil {
+			return err
+		}
+		if current.Status != domain.IdentityVerified {
+			return domain.NewInvalidStateError("IDENTITY_NOT_VERIFIED",
+				"identity was revoked while the link was sealing; the sealed link event is inert")
+		}
+		for _, agentID := range newlyLinked {
+			if _, err := s.links.Link(txCtx, identityID, agentID, now); err != nil {
 				return err
 			}
-			if created {
-				newlyLinked = append(newlyLinked, agentID)
-			}
 		}
-		linked = len(newlyLinked)
-		if linked == 0 {
-			return nil // fully idempotent — nothing to seal
-		}
-		inner := s.buildIdentityEvent(identity, identityevent.TypeIdentityLinked, now)
-		inner.AnsIDs = newlyLinked
-		return s.enqueueIdentityEvent(txCtx, inner, now)
+		return nil
 	})
 	if err != nil {
 		return 0, err
 	}
-	return linked, nil
+	return len(newlyLinked), nil
+}
+
+// agentLinkable is the link liveness gate (§4.3): live states only.
+// DEPRECATED is deliberately linkable; terminal and pre-activation
+// states are not (a terminal link is dead on arrival under the
+// visibility predicate, and a pre-activation agent has no sealed TL
+// presence to join).
+func agentLinkable(status domain.RegistrationStatus) bool {
+	return status == domain.StatusActive || status == domain.StatusDeprecated
 }
 
 // Unlink ends one association and seals IDENTITY_UNLINKED on the
-// identity stream. The association's history persists in the log.
+// identity stream — before success is reported (§5.6.1). The
+// association's history persists in the log.
 func (s *IdentityService) Unlink(ctx context.Context, providerID, identityID, agentID string) error {
+	if !s.linkLimiter.Allow(providerID, s.clock()) {
+		return domain.NewValidationError("RATE_LIMITED",
+			"too many link/unlink calls; retry later")
+	}
 	identity, err := s.ownedIdentityForWrite(ctx, providerID, identityID)
 	if err != nil {
 		return err
 	}
+
+	// The live link must exist before anything seals.
+	existingLinks, err := s.links.ListLiveByIdentity(ctx, identityID)
+	if err != nil {
+		return err
+	}
+	live := false
+	for _, l := range existingLinks {
+		if l.AgentID == agentID {
+			live = true
+			break
+		}
+	}
+	if !live {
+		return domain.NewNotFoundError("LINK_NOT_FOUND",
+			"no live link exists for this identity and agent")
+	}
+
 	now := s.clock().UTC()
+	inner := s.buildIdentityEvent(identity, identityevent.TypeIdentityUnlinked, now)
+	inner.AnsIDs = []string{agentID}
+	if err := s.sealIdentityEvent(ctx, inner, now); err != nil {
+		return err
+	}
 	return s.uow.Run(ctx, func(txCtx context.Context) error {
 		if err := s.links.Unlink(txCtx, identityID, agentID, now); err != nil {
+			// A concurrent unlink winning the row after our liveness
+			// read is benign: the association ended and both sealed
+			// events say so.
+			if errors.Is(err, domain.ErrNotFound) {
+				return nil
+			}
 			return err
 		}
-		inner := s.buildIdentityEvent(identity, identityevent.TypeIdentityUnlinked, now)
-		inner.AnsIDs = []string{agentID}
-		return s.enqueueIdentityEvent(txCtx, inner, now)
+		return nil
 	})
 }
 
@@ -618,13 +835,18 @@ func (s *IdentityService) buildIdentityEvent(
 	}
 }
 
-// enqueueIdentityEvent JCS-canonicalizes the inner event, signs it
-// once with the producer key, and writes the outbox row on the
-// IDENTITY lane. Same replay-verbatim invariant as the agent lanes:
-// the worker must POST these exact bytes on every retry.
-func (s *IdentityService) enqueueIdentityEvent(ctx context.Context, inner *identityevent.Event, now time.Time) error {
-	if s.outbox == nil {
-		return nil
+// sealIdentityEvent JCS-canonicalizes the inner event, signs it once
+// with the producer key, and submits it inline to the TL's IDENTITY
+// ingest lane, returning only on the TL's acknowledgment —
+// seal-before-success (§5.6.1). Identity events never ride the
+// outbox: sign once, submit once; a failed submission is a failed
+// operation, surfaced retryable (TL_UNAVAILABLE) with nothing
+// consumed. A nil sealer fails closed for the same reason — there is
+// no "seal later" mode.
+func (s *IdentityService) sealIdentityEvent(ctx context.Context, inner *identityevent.Event, now time.Time) error {
+	if s.sealer == nil {
+		return domain.NewUnavailableError("TL_UNAVAILABLE",
+			"identity sealing is not configured; identity operations cannot report success without a sealed event")
 	}
 	innerCanonical, err := identityevent.CanonicalizeEvent(inner)
 	if err != nil {
@@ -645,17 +867,9 @@ func (s *IdentityService) enqueueIdentityEvent(ctx context.Context, inner *ident
 			return fmt.Errorf("sign identity event: %w", err)
 		}
 	}
-	payload, err := marshalOutboxPayload(innerCanonical, producerSig)
-	if err != nil {
-		return err
-	}
-	// The outbox row's subject column carries the identityId — the
-	// stream key for identity events, exactly as agent rows carry
-	// the agentId.
-	if _, err := s.outbox.Enqueue(ctx, string(inner.EventType), inner.IdentityID, identityLane, payload, now); err != nil {
-		return err
-	}
-	return nil
+	sealCtx, cancel := context.WithTimeout(ctx, s.sealTimeout)
+	defer cancel()
+	return s.sealer.SealIdentityEvent(sealCtx, innerCanonical, producerSig)
 }
 
 // mapIdentitySaveErr converts the storage layer's generic conflict

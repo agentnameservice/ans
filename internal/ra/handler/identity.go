@@ -3,6 +3,7 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -176,22 +177,38 @@ func (h *IdentityHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, toDetailResponse(identity, nil))
 }
 
-// List handles GET /v2/ans/identities — the caller's identities.
+// List handles GET /v2/ans/identities — one page of the caller's
+// identities, in the v2 limit + opaque-cursor envelope (§5.6.1:
+// pagination inherits the surface's convention).
 func (h *IdentityHandler) List(w http.ResponseWriter, r *http.Request) {
 	providerID, ok := callerSubject(w, r)
 	if !ok {
 		return
 	}
-	identities, err := h.svc.List(r.Context(), providerID)
+	q := r.URL.Query()
+	limit := 0
+	if lv := q.Get("limit"); lv != "" {
+		n, err := strconv.Atoi(lv)
+		if err != nil || n < 1 || n > 100 {
+			WriteError(w, domain.NewValidationError("INVALID_LIMIT", "limit must be between 1 and 100"))
+			return
+		}
+		limit = n
+	}
+	page, err := h.svc.List(r.Context(), providerID, limit, q.Get("cursor"))
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
-	out := make([]identityDetailResponse, 0, len(identities))
-	for _, identity := range identities {
+	out := make([]identityDetailResponse, 0, len(page.Items))
+	for _, identity := range page.Items {
 		out = append(out, toDetailResponse(identity, nil))
 	}
-	WriteJSON(w, http.StatusOK, map[string]any{"identities": out})
+	resp := map[string]any{"identities": out, "nextCursor": nil}
+	if page.NextCursor != "" {
+		resp["nextCursor"] = page.NextCursor
+	}
+	WriteJSON(w, http.StatusOK, resp)
 }
 
 // Detail handles GET /v2/ans/identities/{identityId} — the identity

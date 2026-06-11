@@ -24,6 +24,8 @@ func defaultRAConfig() *RAConfig {
 			Resolver:          IdentityResolver{Type: "noop"},
 			ChallengeTTL:      time.Hour,
 			RegisterRateLimit: 10,
+			LinkRateLimit:     60,
+			SealTimeout:       5 * time.Second,
 		},
 		Keys: Keys{
 			Type: "file",

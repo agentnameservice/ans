@@ -28,6 +28,7 @@ import (
 	"github.com/godaddy/ans/internal/adapter/eventbus"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	anscrypto "github.com/godaddy/ans/internal/crypto"
+	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/handler"
 	ramiddleware "github.com/godaddy/ans/internal/ra/middleware"
@@ -36,11 +37,19 @@ import (
 
 // identityHTTPFixture wires the identity routes (plus the agent
 // register + detail routes the link tests need) over real SQLite and
-// the noop resolver. No signer — covering the unsigned outbox branch;
-// the signed path is pinned by the service tests.
+// the noop resolver. No signer — the seal goes through an always-ok
+// stub sealer with an unsigned payload; the signed seal path is
+// pinned by the service tests.
 type identityHTTPFixture struct {
 	router chi.Router
+	agents *sqlite.AgentStore
 }
+
+// okSealer acknowledges every seal — the HTTP tests pin the wire
+// contract, not the seal discipline (service tests own that).
+type okSealer struct{}
+
+func (okSealer) SealIdentityEvent(context.Context, []byte, string) error { return nil }
 
 func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 	t.Helper()
@@ -77,7 +86,7 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 		sqlite.NewIdentityLinkStore(db),
 		agents,
 		didresolver.NewNoopResolver(),
-		outbox,
+		okSealer{},
 		db,
 	).WithChallengeTTL(30 * time.Minute)
 
@@ -98,7 +107,7 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 	r.Post("/v2/ans/identities/{identityId}/links", idH.Link)
 	r.Delete("/v2/ans/identities/{identityId}/links/{agentId}", idH.Unlink)
 
-	return &identityHTTPFixture{router: r}
+	return &identityHTTPFixture{router: r, agents: agents}
 }
 
 // do sends a request as the given owner ("" = unauthenticated) and
@@ -410,5 +419,72 @@ func registerAgentForIdentity(t *testing.T, f *identityHTTPFixture, owner, host 
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil || resp.AgentID == "" {
 		t.Fatalf("agent register response: %s (%v)", rec.Body, err)
 	}
+
+	// Drive the agent to ACTIVE directly through the store — the link
+	// liveness gate (§4.3) rejects pre-activation agents, and these
+	// tests pin the identity wire contract, not the ACME lifecycle.
+	reg, err := f.agents.FindByAgentID(context.Background(), resp.AgentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Status = domain.StatusActive
+	if err := f.agents.Save(context.Background(), reg); err != nil {
+		t.Fatal(err)
+	}
 	return resp.AgentID
+}
+
+// TestIdentityHandler_ListPagination pins the v2 limit + opaque-
+// cursor envelope on GET /v2/ans/identities.
+func TestIdentityHandler_ListPagination(t *testing.T) {
+	t.Parallel()
+	f := newIdentityHTTPFixture(t)
+	owner := "owner-pages"
+	f.registerAndVerify(t, owner, "did:web:page-a.example.com")
+	f.registerAndVerify(t, owner, "did:web:page-b.example.com")
+	f.registerAndVerify(t, owner, "did:web:page-c.example.com")
+
+	// Invalid limit → 422 INVALID_LIMIT.
+	rec := f.do(t, owner, http.MethodGet, "/v2/ans/identities?limit=0", nil)
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("limit=0: %d %s", rec.Code, rec.Body)
+	}
+
+	type page struct {
+		Identities []struct {
+			IdentityID string `json:"identityId"`
+		} `json:"identities"`
+		NextCursor *string `json:"nextCursor"`
+	}
+	var p1 page
+	rec = f.do(t, owner, http.MethodGet, "/v2/ans/identities?limit=2", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 1: %d %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &p1); err != nil {
+		t.Fatal(err)
+	}
+	if len(p1.Identities) != 2 || p1.NextCursor == nil {
+		t.Fatalf("page 1 shape: %+v", p1)
+	}
+
+	var p2 page
+	rec = f.do(t, owner, http.MethodGet, "/v2/ans/identities?limit=2&cursor="+*p1.NextCursor, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("page 2: %d %s", rec.Code, rec.Body)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &p2); err != nil {
+		t.Fatal(err)
+	}
+	if len(p2.Identities) != 1 || p2.NextCursor != nil {
+		t.Fatalf("page 2 shape: %+v", p2)
+	}
+	// No overlap between pages.
+	seen := map[string]bool{}
+	for _, e := range append(p1.Identities, p2.Identities...) {
+		if seen[e.IdentityID] {
+			t.Fatalf("duplicate across pages: %s", e.IdentityID)
+		}
+		seen[e.IdentityID] = true
+	}
 }

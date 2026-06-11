@@ -175,9 +175,10 @@ type IdentityStore interface {
 	// verify time.
 	ExistsVerified(ctx context.Context, kind domain.IdentifierKind, value string) (bool, error)
 
-	// ListByOwner returns every identity owned by the principal,
-	// newest first.
-	ListByOwner(ctx context.Context, providerID string) ([]*domain.VerifiedIdentity, error)
+	// ListByOwner returns the principal's identities, newest first,
+	// cursor-paginated with the same opaque-cursor convention as the
+	// agent list (§5.6.1 pagination inherits, never invents).
+	ListByOwner(ctx context.Context, providerID string, limit int, cursor string) (*CursorPage[*domain.VerifiedIdentity], error)
 
 	// ConsumeChallenge atomically consumes the live challenge nonce:
 	// a conditional update that succeeds only while the stored nonce
@@ -186,6 +187,39 @@ type IdentityStore interface {
 	// the loser receives an invalid-state error. MUST be called
 	// inside the verify-control success transaction.
 	ConsumeChallenge(ctx context.Context, identityID, nonce string, now time.Time) error
+
+	// ClaimChallenge takes the short-TTL provisional claim on the
+	// live nonce before the seal-before-success TL round trip
+	// (design §5.6.1): a conditional update that succeeds only while
+	// the nonce matches, is unconsumed, and is not already claimed
+	// by an attempt fresher than staleBefore. Serializes concurrent
+	// verify-control attempts so at most one can seal; the loser
+	// gets an invalid-state error. A claim is NOT consumption.
+	ClaimChallenge(ctx context.Context, identityID, nonce string, now, staleBefore time.Time) error
+
+	// ReleaseChallenge releases a provisional claim after a failed
+	// attempt so the registrant can retry until the nonce expires
+	// (§3.2 failed-attempts-don't-consume). Best-effort: releasing
+	// an already-consumed or superseded nonce is a no-op.
+	ReleaseChallenge(ctx context.Context, identityID, nonce string) error
+
+	// StageChallenge persists a freshly issued challenge (and any
+	// staged pending_value) onto an EXISTING row, conditionally on
+	// the status and nonce observed at load time and on no live seal
+	// claim — the optimistic-concurrency guard that stops a re-add /
+	// rotate from clobbering a concurrently committed verify or
+	// revoke (their commits race the resolver fetch between load and
+	// persist). Never writes status, value, or verified_at: issuing
+	// a challenge is not a state transition. A failed condition maps
+	// to a precise conflict error.
+	StageChallenge(ctx context.Context, identity *domain.VerifiedIdentity, expectedStatus domain.IdentityStatus, expectedNonce string, staleBefore time.Time) error
+
+	// MarkRevoked flips a VERIFIED row to REVOKED conditionally —
+	// the seal-before-success Phase C commit for Revoke. The status
+	// condition (not a blind save) means a verify or rotate that
+	// committed during the revoke's TL round trip is never clobbered
+	// with stale column values. Zero rows → conflict.
+	MarkRevoked(ctx context.Context, identityID string, now time.Time) error
 }
 
 // IdentityLinkStore persists identity↔agent link rows. Rows are

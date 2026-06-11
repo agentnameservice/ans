@@ -35,6 +35,8 @@ import (
 	"io"
 	"net/http"
 	"time"
+
+	"github.com/godaddy/ans/internal/domain"
 )
 
 // AppendResult is the parsed success response from the TL's ingest
@@ -237,4 +239,30 @@ func IsTransient(err error) bool {
 func IsPermanent(err error) bool {
 	var p *PermanentError
 	return errors.As(err, &p)
+}
+
+// SealIdentityEvent submits a producer-signed identity event on the
+// IDENTITY lane and returns only after the TL acknowledges the seal —
+// the client half of seal-before-success (design §5.6.1). Identity
+// events never ride the outbox: delivery precedes success, and a
+// failed delivery IS a failed operation, so errors are mapped to
+// domain kinds the service layer can return directly:
+//
+//   - transient (transport, 5xx, 429) → ErrUnavailable / 503
+//     TL_UNAVAILABLE: retryable, the caller consumed nothing;
+//   - permanent (other 4xx)           → ErrInternal /
+//     TL_REJECTED_EVENT: the RA produced an event the TL refuses —
+//     a pipeline bug, not weather; operators must see it.
+func (c *Client) SealIdentityEvent(ctx context.Context, innerCanonical []byte, producerSig string) error {
+	_, err := c.Append(ctx, "IDENTITY", innerCanonical, producerSig)
+	switch {
+	case err == nil:
+		return nil
+	case IsTransient(err):
+		return domain.NewUnavailableError("TL_UNAVAILABLE",
+			"the transparency log did not confirm the seal; the operation is retryable and nothing was consumed")
+	default:
+		return domain.NewInternalError("TL_REJECTED_EVENT",
+			"the transparency log rejected the identity event", err)
+	}
 }

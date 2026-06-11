@@ -73,6 +73,8 @@ func statusForCause(cause error) int {
 		return http.StatusUnprocessableEntity
 	case errors.Is(cause, domain.ErrUnauthorized):
 		return http.StatusForbidden
+	case errors.Is(cause, domain.ErrUnavailable):
+		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -92,6 +94,8 @@ func titleForCause(cause error) string {
 		return "Certificate Error"
 	case errors.Is(cause, domain.ErrUnauthorized):
 		return "Forbidden"
+	case errors.Is(cause, domain.ErrUnavailable):
+		return "Service Unavailable"
 	default:
 		return "Internal Server Error"
 	}

@@ -210,6 +210,21 @@ func canonicalizeDIDWeb(value string) (string, error) {
 		if seg == "" {
 			return "", NewValidationError("DID_BAD_FORMAT", "did:web has an empty path segment")
 		}
+		// Dot segments would re-path the resolution URL; control
+		// bytes (NUL first among them) have no legitimate use in a
+		// path segment. The same parsed segments feed both the
+		// resolution URL and the SSRF dialer check (§3.6/§3.7), so
+		// the rejection happens exactly once, here.
+		if seg == "." || seg == ".." {
+			return "", NewValidationError("DID_BAD_FORMAT",
+				"did:web path segments must not be '.' or '..'")
+		}
+		for _, r := range seg {
+			if r < 0x20 || r == 0x7f {
+				return "", NewValidationError("DID_BAD_FORMAT",
+					"did:web path segment contains a control character")
+			}
+		}
 	}
 	canonical := "did:web:" + host
 	if len(segments) > 1 {

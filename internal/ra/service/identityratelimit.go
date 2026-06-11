@@ -1,7 +1,6 @@
 package service
 
 import (
-	"encoding/json"
 	"sync"
 	"time"
 )
@@ -12,6 +11,13 @@ import (
 // the budget exists to stop an authenticated owner from turning the
 // RA into a fetch proxy (design §3.7 "bounded fetch").
 const defaultRegisterPerMinute = 10
+
+// defaultLinkPerMinute is the default per-owner budget for the link
+// route (design §4.3): operational/DoS hardening — one link suffices
+// for the named stolen-credential risk, so the bound limits blast
+// radius and TL noise, not the risk itself. Links seal synchronously
+// (§5.6.1), so the limiter also shields the TL ingest lane.
+const defaultLinkPerMinute = 60
 
 // ownerLimiter is a fixed-window per-owner rate limiter. In-process
 // and intentionally simple: the window is a minute, the state is one
@@ -66,15 +72,4 @@ func (l *ownerLimiter) prune(now time.Time) {
 			delete(l.windows, owner)
 		}
 	}
-}
-
-// marshalOutboxPayload renders the {innerEventCanonical,
-// producerSignature} outbox payload — the bytes the worker replays
-// verbatim. Shared by every event family; the inner canonical bytes
-// are family-specific, the payload wrapper is not.
-func marshalOutboxPayload(innerCanonical []byte, producerSig string) ([]byte, error) {
-	return json.Marshal(OutboxPayload{
-		InnerEventCanonical: json.RawMessage(innerCanonical),
-		ProducerSignature:   producerSig,
-	})
 }

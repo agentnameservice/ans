@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -278,5 +279,32 @@ func TestEffectiveValueWithoutPending(t *testing.T) {
 	v := newPendingIdentity(t, "did:web:a.com")
 	if v.EffectiveValue() != "did:web:a.com" {
 		t.Fatal("effective value should be the proven value when nothing is staged")
+	}
+}
+
+// TestInferIdentifierKind_DIDWebSegmentRejections pins the §3.6
+// per-segment rejection list: '.', '..', and control characters are
+// DID_BAD_FORMAT (empty segments, '%', '@', '/', and ports are pinned
+// by the existing grammar tests).
+func TestInferIdentifierKind_DIDWebSegmentRejections(t *testing.T) {
+	t.Parallel()
+	for _, value := range []string{
+		"did:web:acme-corp.com:.",
+		"did:web:acme-corp.com:..",
+		"did:web:acme-corp.com:..:identity",
+		"did:web:acme-corp.com:iden\x00tity",
+		"did:web:acme-corp.com:iden\ttity",
+	} {
+		_, _, err := InferIdentifierKind(value)
+		var de *Error
+		if !errors.As(err, &de) || de.Code != "DID_BAD_FORMAT" {
+			t.Fatalf("%q: want DID_BAD_FORMAT, got %v", value, err)
+		}
+	}
+
+	// Sane multi-segment forms still canonicalize.
+	kind, canonical, err := InferIdentifierKind("did:web:Acme-Corp.com:user:alice")
+	if err != nil || kind != KindDIDWeb || canonical != "did:web:acme-corp.com:user:alice" {
+		t.Fatalf("multi-segment: %v %v %v", kind, canonical, err)
 	}
 }

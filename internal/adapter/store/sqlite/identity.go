@@ -3,10 +3,12 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"time"
 
 	"github.com/godaddy/ans/internal/domain"
+	"github.com/godaddy/ans/internal/port"
 )
 
 // IdentityStore implements port.IdentityStore.
@@ -94,6 +96,12 @@ func (s *IdentityStore) Save(ctx context.Context, v *domain.VerifiedIdentity) er
             challenge_nonce          = excluded.challenge_nonce,
             challenge_expires_at_ms  = excluded.challenge_expires_at_ms,
             challenge_consumed_at_ms = excluded.challenge_consumed_at_ms,
+            -- Every save resets the provisional seal claim: a save
+            -- either issues a new challenge (the claim must not leak
+            -- into the new nonce's epoch), commits a verified flip
+            -- (nonce consumed, claim moot), or revokes (challenge
+            -- moot). See ClaimChallenge.
+            challenge_claimed_at_ms  = NULL,
             verified_at_ms           = excluded.verified_at_ms,
             updated_at_ms            = excluded.updated_at_ms`
 	_, err := s.db.extx(ctx).ExecContext(ctx, q,
@@ -155,21 +163,53 @@ func (s *IdentityStore) ExistsVerified(ctx context.Context, kind domain.Identifi
 
 // ListByOwner returns every identity owned by the principal, newest
 // first.
-func (s *IdentityStore) ListByOwner(ctx context.Context, providerID string) ([]*domain.VerifiedIdentity, error) {
+func (s *IdentityStore) ListByOwner(ctx context.Context, providerID string, limit int, cursor string) (*port.CursorPage[*domain.VerifiedIdentity], error) {
 	var rows []identityRow
-	err := s.db.extx(ctx).SelectContext(ctx, &rows,
-		`SELECT `+identityCols+`
+	// identity_id is a UUIDv7 — lexicographic order IS creation
+	// order — so the id doubles as a stable cursor.
+	const defaultLimit, maxLimit = 20, 100
+	if limit <= 0 {
+		limit = defaultLimit
+	}
+	if limit > maxLimit {
+		limit = maxLimit
+	}
+	q := `SELECT ` + identityCols + `
          FROM identities
-         WHERE provider_id = ?
-         ORDER BY created_at_ms DESC, identity_id DESC`, providerID)
+         WHERE provider_id = ?`
+	args := []any{providerID}
+	if cursor != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(cursor)
+		if err != nil {
+			return nil, domain.NewValidationError("INVALID_CURSOR", "malformed cursor")
+		}
+		q += ` AND identity_id < ?`
+		args = append(args, string(raw))
+	}
+	q += ` ORDER BY identity_id DESC LIMIT ?`
+	args = append(args, limit+1)
+
+	err := s.db.extx(ctx).SelectContext(ctx, &rows, q, args...)
 	if err != nil {
 		return nil, mapSQLErr(err)
+	}
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
 	}
 	out := make([]*domain.VerifiedIdentity, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, r.toDomain())
 	}
-	return out, nil
+	page := &port.CursorPage[*domain.VerifiedIdentity]{
+		Items:         out,
+		HasMore:       hasMore,
+		ReturnedCount: len(out),
+	}
+	if hasMore && len(out) > 0 {
+		page.NextCursor = base64.RawURLEncoding.EncodeToString([]byte(out[len(out)-1].IdentityID))
+	}
+	return page, nil
 }
 
 // ConsumeChallenge atomically consumes the live challenge nonce. The
@@ -195,6 +235,151 @@ func (s *IdentityStore) ConsumeChallenge(ctx context.Context, identityID, nonce 
 	if n != 1 {
 		return domain.NewInvalidStateError("PRICC_TOKEN_ALREADY_USED",
 			"challenge nonce is consumed, expired, or superseded")
+	}
+	return nil
+}
+
+// ClaimChallenge takes the short-TTL provisional claim that
+// serializes concurrent verify-control attempts across the
+// seal-before-success TL round trip (design §5.6.1). The conditional
+// UPDATE succeeds only while the nonce is live, unconsumed, and not
+// claimed by an attempt fresher than staleBefore — a crashed
+// claimer's stale claim is reclaimable. A claim is NOT consumption.
+func (s *IdentityStore) ClaimChallenge(ctx context.Context, identityID, nonce string, now, staleBefore time.Time) error {
+	res, err := s.db.extx(ctx).ExecContext(ctx, `
+        UPDATE identities
+        SET challenge_claimed_at_ms = ?, updated_at_ms = ?
+        WHERE identity_id = ?
+          AND challenge_nonce = ?
+          AND challenge_consumed_at_ms IS NULL
+          AND challenge_expires_at_ms > ?
+          AND (challenge_claimed_at_ms IS NULL OR challenge_claimed_at_ms < ?)`,
+		now.UnixMilli(), now.UnixMilli(), identityID, nonce,
+		now.UnixMilli(), staleBefore.UnixMilli())
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return domain.NewInvalidStateError("VERIFICATION_IN_FLIGHT",
+			"a verify-control attempt for this challenge is already in flight, or the nonce is consumed, expired, or superseded")
+	}
+	return nil
+}
+
+// ReleaseChallenge releases a provisional claim after a failed
+// attempt (failed attempts never consume — §3.2). Best-effort: a
+// consumed or superseded nonce matches zero rows, which is fine.
+func (s *IdentityStore) ReleaseChallenge(ctx context.Context, identityID, nonce string) error {
+	_, err := s.db.extx(ctx).ExecContext(ctx, `
+        UPDATE identities
+        SET challenge_claimed_at_ms = NULL
+        WHERE identity_id = ?
+          AND challenge_nonce = ?
+          AND challenge_consumed_at_ms IS NULL`,
+		identityID, nonce)
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	return nil
+}
+
+// StageChallenge persists a freshly issued challenge onto an
+// existing row, conditional on the load-time snapshot: the status
+// must be unchanged, the nonce must still be the one observed (a
+// concurrent verify consumes it; a concurrent re-add supersedes it),
+// and no fresh seal claim may be live (an in-flight verify must not
+// have its nonce yanked mid-seal). Status, value, and verified_at
+// are deliberately NOT written — issuing a challenge is not a state
+// transition, so a racing commit can never be clobbered.
+func (s *IdentityStore) StageChallenge(
+	ctx context.Context,
+	v *domain.VerifiedIdentity,
+	expectedStatus domain.IdentityStatus,
+	expectedNonce string,
+	staleBefore time.Time,
+) error {
+	if v.Challenge == nil {
+		return domain.NewInternalError("CHALLENGE_STAGE", "no challenge on the aggregate", errors.New("nil challenge"))
+	}
+	var expires sql.NullInt64
+	if !v.Challenge.ExpiresAt.IsZero() {
+		expires = sql.NullInt64{Int64: v.Challenge.ExpiresAt.UnixMilli(), Valid: true}
+	}
+	res, err := s.db.extx(ctx).ExecContext(ctx, `
+        UPDATE identities
+        SET challenge_nonce          = ?,
+            challenge_expires_at_ms  = ?,
+            challenge_consumed_at_ms = NULL,
+            challenge_claimed_at_ms  = NULL,
+            pending_value            = ?,
+            updated_at_ms            = ?
+        WHERE identity_id = ?
+          AND status = ?
+          AND (challenge_nonce = ? OR (challenge_nonce IS NULL AND ? = ''))
+          AND (challenge_claimed_at_ms IS NULL OR challenge_claimed_at_ms < ?)`,
+		v.Challenge.Nonce, expires, v.PendingValue, v.UpdatedAt.UnixMilli(),
+		v.IdentityID, string(expectedStatus), expectedNonce, expectedNonce,
+		staleBefore.UnixMilli())
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		return nil
+	}
+	// Lost the race — re-read for the precise refusal.
+	current, rerr := s.FindByID(ctx, v.IdentityID)
+	if rerr != nil {
+		return rerr
+	}
+	switch {
+	case current.Status == domain.IdentityRevoked:
+		return domain.NewInvalidStateError("IDENTITY_REVOKED", "identity was revoked")
+	case current.Status == domain.IdentityVerified && expectedStatus != domain.IdentityVerified:
+		return domain.NewConflictError("IDENTIFIER_DUPLICATE",
+			"identifier was verified concurrently; rotate it with PUT instead")
+	default:
+		return domain.NewConflictError("VERIFICATION_IN_FLIGHT",
+			"a verify-control attempt is in flight or the challenge was superseded; retry shortly")
+	}
+}
+
+// MarkRevoked is Revoke's conditional Phase C commit: flip VERIFIED
+// → REVOKED, clearing the rotation stage and challenge state, only
+// while the row is still VERIFIED — a verify/rotate that committed
+// during the revoke's seal round trip is never overwritten with the
+// revoker's stale snapshot. Zero rows → conflict (the caller's view
+// was stale; the sealed IDENTITY_REVOKED is the benign residue the
+// retry converges with).
+func (s *IdentityStore) MarkRevoked(ctx context.Context, identityID string, now time.Time) error {
+	res, err := s.db.extx(ctx).ExecContext(ctx, `
+        UPDATE identities
+        SET status                   = 'REVOKED',
+            pending_value            = '',
+            challenge_nonce          = NULL,
+            challenge_expires_at_ms  = NULL,
+            challenge_consumed_at_ms = NULL,
+            challenge_claimed_at_ms  = NULL,
+            updated_at_ms            = ?
+        WHERE identity_id = ? AND status = 'VERIFIED'`,
+		now.UnixMilli(), identityID)
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return domain.NewConflictError("IDENTITY_CONCURRENTLY_MODIFIED",
+			"identity changed during the revoke; re-read and retry")
 	}
 	return nil
 }

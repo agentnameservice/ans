@@ -966,20 +966,39 @@ paths:
       tags:
         - Verified Identities
       summary: List my identities
-      description: Returns every identity owned by the caller, newest first.
+      description: |
+        Returns one page of the caller's identities, newest first, in
+        the standard limit + opaque-cursor envelope (the agent-list
+        convention). Pass `nextCursor` back as `cursor` for the next
+        page; a null `nextCursor` is the last page.
       operationId: listIdentities
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque cursor from the previous page's nextCursor
       responses:
         '200':
-          description: The caller's identities
+          description: One page of the caller's identities
           content:
             application/json:
               schema:
                 type: object
+                required: [identities, nextCursor]
                 properties:
                   identities:
                     type: array
                     items:
                       $ref: '#/components/schemas/IdentityDetails'
+                  nextCursor:
+                    type: string
+                    nullable: true
+                    description: Cursor for the next page; null on the last page
         '401':
           description: Authentication failed
           content:
@@ -1081,11 +1100,19 @@ paths:
         closed. The nonce is consumed exactly once, inside the
         success transaction — a failed attempt does not consume it.
 
-        On success the identity flips to `VERIFIED` (or completes a
-        staged rotation) and the RA seals `IDENTITY_VERIFIED` /
+        JWS bearing unrecognized `crit` header parameters are
+        rejected (RFC 7515 §4.1.11) — this verifier implements no
+        critical extensions.
+
+        Seal-before-success: the RA seals `IDENTITY_VERIFIED` /
         `IDENTITY_UPDATED` on the identity's own Transparency Log
-        stream, with every proven key sealed self-verifyingly
-        (public key + signed proof).
+        stream — every proven key sealed self-verifyingly (public
+        key + signed proof) — and reports success ONLY after the TL
+        acknowledges the seal; the row transition commits with that
+        acknowledgment, so anything this API reports as set up is
+        resolvable in the TL at that moment. If the TL is
+        unavailable the call fails 503 `TL_UNAVAILABLE`, retryable:
+        the nonce is NOT consumed and the prior state stands.
       operationId: verifyIdentityControl
       parameters:
         - $ref: '#/components/parameters/IdentityIdPath'
@@ -1118,8 +1145,12 @@ paths:
           description: |
             Challenge state error — `PRICC_TOKEN_EXPIRED`,
             `PRICC_TOKEN_ALREADY_USED`, `IDENTIFIER_CHALLENGE_EXPIRED`
-            — or the identity is revoked. Recovery from an expired
-            nonce is the idempotent re-add (re-POST the same value).
+            — the identity is revoked, a concurrent verify attempt
+            holds the seal claim (`VERIFICATION_IN_FLIGHT` — retry
+            shortly; the claim expires within ~30s), or the
+            identifier is already verified by another owner
+            (`IDENTIFIER_DUPLICATE`). Recovery from an expired nonce
+            is the idempotent re-add (re-POST the same value).
           content:
             application/json:
               schema:
@@ -1129,6 +1160,13 @@ paths:
             Proof rejected — `PRICC_SIGNATURE_INVALID`,
             `DID_VERIFICATION_METHOD_INVALID`, `DID_RESOLUTION_FAILED`,
             `DID_DOCUMENT_ID_MISMATCH`, `IDENTIFIER_PROOF_INVALID`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable; the nonce is NOT consumed)
           content:
             application/json:
               schema:
@@ -1146,6 +1184,10 @@ paths:
         append-only in the Transparency Log. Propagation to every
         linked agent's badge is the TL's read-time join, not a write
         fan-out.
+
+        Seal-before-success: the row flips only after the TL
+        acknowledges the seal. TL unavailable → 503 `TL_UNAVAILABLE`,
+        retryable, the identity stays VERIFIED.
       operationId: revokeIdentity
       parameters:
         - $ref: '#/components/parameters/IdentityIdPath'
@@ -1174,6 +1216,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable, nothing changed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
 
   /ans/identities/{identityId}/links:
     post:
@@ -1189,7 +1237,19 @@ paths:
         the agent ids; an agent's own stream and audit history are
         never written by identity operations. Already-linked agents
         are skipped idempotently; a call that links nothing new seals
-        nothing. Links attach only while the identity is VERIFIED.
+        nothing.
+
+        Liveness gate: links attach only while the identity is
+        VERIFIED, and every named agent must be live — ACTIVE or
+        DEPRECATED; a terminal or pre-activation agent fails the
+        whole batch with 422 `AGENT_NOT_LINKABLE` (all-or-nothing,
+        matching the one-event batch semantics). The route is
+        per-owner rate limited (429-equivalent `RATE_LIMITED`).
+
+        Seal-before-success: success is reported only after the TL
+        acknowledges the `IDENTITY_LINKED` seal; link rows commit
+        with the acknowledgment. TL unavailable → 503
+        `TL_UNAVAILABLE`, retryable, nothing linked.
       operationId: linkIdentityAgents
       parameters:
         - $ref: '#/components/parameters/IdentityIdPath'
@@ -1225,7 +1285,14 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Invalid link request (empty or oversized batch)
+          description: Invalid link request (empty or oversized batch — INVALID_LINK_REQUEST), or a named agent is not live (AGENT_NOT_LINKABLE — links require ACTIVE or DEPRECATED; rejected all-or-nothing)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable, nothing linked)
           content:
             application/json:
               schema:
@@ -1240,7 +1307,12 @@ paths:
         Ends one association and seals `IDENTITY_UNLINKED` on the
         identity stream. The association's history persists in the
         identity's audit chain and the raw log tiles; unlinked pairs
-        may be re-linked later.
+        may be re-linked later. Shares the link route's per-owner
+        rate limit.
+
+        Seal-before-success: the link row flips only after the TL
+        acknowledges the seal. TL unavailable → 503 `TL_UNAVAILABLE`,
+        retryable, the link stands.
       operationId: unlinkIdentityAgent
       parameters:
         - $ref: '#/components/parameters/IdentityIdPath'
@@ -1256,6 +1328,12 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
           description: Identity or live link not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable, nothing changed)
           content:
             application/json:
               schema:

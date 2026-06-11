@@ -120,6 +120,14 @@ type Identity struct {
 	// minute (default 10) — each call can trigger an outbound
 	// did:web fetch before any proof exists.
 	RegisterRateLimit int `koanf:"register-rate-limit"`
+	// LinkRateLimit is the per-owner link/unlink budget per minute
+	// (default 60) — operational hardening on the link route
+	// (design §4.3).
+	LinkRateLimit int `koanf:"link-rate-limit"`
+	// SealTimeout bounds the inline TL seal call identity operations
+	// make before reporting success (seal-before-success, design
+	// §5.6.1). Default 5s.
+	SealTimeout time.Duration `koanf:"seal-timeout"`
 }
 
 // IdentityResolver selects the did:web resolver adapter. "noop"

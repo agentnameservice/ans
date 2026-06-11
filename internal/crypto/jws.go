@@ -70,6 +70,14 @@ type JWSProtectedHeader struct {
 	// resolver ignores it — the authoritatively resolved document is
 	// always the key source. Never set on producer/TL signatures.
 	Jwk json.RawMessage `json:"jwk,omitempty"`
+
+	// Crit (RFC 7515 §4.1.11) names header parameters the signer
+	// requires verifiers to understand. This implementation supports
+	// no critical extensions, so decode REJECTS any JWS bearing a
+	// non-empty crit — required behavior for a conforming verifier,
+	// and the design's third-party verification recipe (§5.5) states
+	// the same rule. Never emitted on the signing path.
+	Crit []string `json:"crit,omitempty"`
 }
 
 // SignDetachedJWS produces a detached JWS — compact-serialization
@@ -453,6 +461,12 @@ func decodeHeader(encodedHeader string) (*JWSProtectedHeader, error) {
 	var h JWSProtectedHeader
 	if err := json.Unmarshal(headerJSON, &h); err != nil {
 		return nil, fmt.Errorf("%w: parse header: %w", ErrJWSDecode, err)
+	}
+	// RFC 7515 §4.1.11: a verifier MUST reject a JWS whose crit names
+	// extensions it does not implement — and this implementation
+	// implements none.
+	if len(h.Crit) > 0 {
+		return nil, fmt.Errorf("%w: unsupported critical header parameters %v", ErrJWSDecode, h.Crit)
 	}
 	return &h, nil
 }

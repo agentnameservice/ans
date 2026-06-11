@@ -191,12 +191,29 @@ func TestIdentityStore_ListByOwner(t *testing.T) {
 		}
 	}
 
-	got, err := store.ListByOwner(ctx, "owner-1")
+	page, err := store.ListByOwner(ctx, "owner-1", 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
+	got := page.Items
 	if len(got) != 2 || got[0].IdentityID != "id-2" || got[1].IdentityID != "id-1" {
 		t.Fatalf("list wrong: %+v", got)
+	}
+	if page.HasMore || page.NextCursor != "" {
+		t.Fatalf("two rows fit one default page: %+v", page)
+	}
+
+	// Cursor pagination: limit 1 → first row + cursor → second row.
+	first1, err := store.ListByOwner(ctx, "owner-1", 1, "")
+	if err != nil || len(first1.Items) != 1 || first1.Items[0].IdentityID != "id-2" || !first1.HasMore {
+		t.Fatalf("page 1: %+v (%v)", first1, err)
+	}
+	page2, err := store.ListByOwner(ctx, "owner-1", 1, first1.NextCursor)
+	if err != nil || len(page2.Items) != 1 || page2.Items[0].IdentityID != "id-1" || page2.HasMore {
+		t.Fatalf("page 2: %+v (%v)", page2, err)
+	}
+	if _, err := store.ListByOwner(ctx, "owner-1", 1, "%%%not-base64%%%"); err == nil {
+		t.Fatal("malformed cursor must be rejected")
 	}
 }
 
@@ -295,5 +312,174 @@ func TestIdentityLinkStore_Lifecycle(t *testing.T) {
 	created, err = links.Link(ctx, "id-1", "agent-1", identityNow.Add(2*time.Hour))
 	if err != nil || !created {
 		t.Fatalf("re-link after unlink: created=%v err=%v", created, err)
+	}
+}
+
+func TestIdentityStore_ClaimAndReleaseChallenge(t *testing.T) {
+	db := newTestDB(t)
+	store := NewIdentityStore(db)
+	ctx := context.Background()
+
+	v := newIdentityFixture(t, "id-claim", "owner-1", "did:web:claim.example.com")
+	if err := v.IssueChallenge("nonce-c", time.Hour, identityNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+
+	now := identityNow.Add(time.Minute)
+	staleBefore := now.Add(-30 * time.Second)
+
+	// First claim wins; a second concurrent claim loses while the
+	// first is fresh.
+	if err := store.ClaimChallenge(ctx, "id-claim", "nonce-c", now, staleBefore); err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	err := store.ClaimChallenge(ctx, "id-claim", "nonce-c", now.Add(time.Second), now.Add(time.Second).Add(-30*time.Second))
+	if err == nil || !strings.Contains(err.Error(), "VERIFICATION_IN_FLIGHT") {
+		t.Fatalf("second claim must lose: %v", err)
+	}
+
+	// Release → claimable again (failed attempts never consume).
+	if err := store.ReleaseChallenge(ctx, "id-claim", "nonce-c"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ClaimChallenge(ctx, "id-claim", "nonce-c", now.Add(2*time.Second), now.Add(2*time.Second).Add(-30*time.Second)); err != nil {
+		t.Fatalf("re-claim after release: %v", err)
+	}
+
+	// A stale claim (crashed claimer) is reclaimable after the TTL.
+	later := now.Add(time.Minute)
+	if err := store.ClaimChallenge(ctx, "id-claim", "nonce-c", later, later.Add(-30*time.Second)); err != nil {
+		t.Fatalf("stale claim must be reclaimable: %v", err)
+	}
+
+	// Consumption beats any claim; a consumed nonce is unclaimable.
+	if err := store.ConsumeChallenge(ctx, "id-claim", "nonce-c", later.Add(time.Second)); err != nil {
+		t.Fatalf("consume: %v", err)
+	}
+	if err := store.ClaimChallenge(ctx, "id-claim", "nonce-c", later.Add(2*time.Second), later.Add(2*time.Second)); err == nil {
+		t.Fatal("consumed nonce must not be claimable")
+	}
+	// Releasing a consumed nonce is a harmless no-op.
+	if err := store.ReleaseChallenge(ctx, "id-claim", "nonce-c"); err != nil {
+		t.Fatal(err)
+	}
+
+	// A fresh challenge (Save) resets any prior claim epoch.
+	if err := v.IssueChallenge("nonce-d", time.Hour, later); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	fresh := later.Add(3 * time.Second)
+	if err := store.ClaimChallenge(ctx, "id-claim", "nonce-d", fresh, fresh.Add(-30*time.Second)); err != nil {
+		t.Fatalf("new nonce epoch must be claimable: %v", err)
+	}
+}
+
+func TestIdentityStore_StageChallengeOptimisticConcurrency(t *testing.T) {
+	db := newTestDB(t)
+	store := NewIdentityStore(db)
+	ctx := context.Background()
+
+	v := newIdentityFixture(t, "id-stage", "owner-1", "did:web:stage.example.com")
+	if err := v.IssueChallenge("nonce-1", time.Hour, identityNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	now := identityNow.Add(time.Minute)
+	stale := now.Add(-30 * time.Second)
+
+	// Happy path: snapshot matches → fresh nonce persists, status
+	// untouched.
+	loaded, _ := store.FindByID(ctx, "id-stage")
+	if err := loaded.IssueChallenge("nonce-2", time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StageChallenge(ctx, loaded, domain.IdentityPendingControl, "nonce-1", stale); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	got, _ := store.FindByID(ctx, "id-stage")
+	if got.Challenge.Nonce != "nonce-2" || got.Status != domain.IdentityPendingControl {
+		t.Fatalf("staged state: %+v", got)
+	}
+
+	// A stale snapshot (nonce superseded) is refused — never clobbers.
+	stale2 := loaded
+	if err := stale2.IssueChallenge("nonce-3", time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	err := store.StageChallenge(ctx, stale2, domain.IdentityPendingControl, "nonce-1", stale)
+	if err == nil || !strings.Contains(err.Error(), "VERIFICATION_IN_FLIGHT") {
+		t.Fatalf("superseded snapshot must be refused: %v", err)
+	}
+
+	// A live seal claim blocks re-challenge (it would yank the nonce
+	// out from under an in-flight verify).
+	if err := store.ClaimChallenge(ctx, "id-stage", "nonce-2", now, stale); err != nil {
+		t.Fatal(err)
+	}
+	fresh, _ := store.FindByID(ctx, "id-stage")
+	if err := fresh.IssueChallenge("nonce-4", time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	err = store.StageChallenge(ctx, fresh, domain.IdentityPendingControl, "nonce-2", stale)
+	if err == nil || !strings.Contains(err.Error(), "VERIFICATION_IN_FLIGHT") {
+		t.Fatalf("live claim must block re-challenge: %v", err)
+	}
+
+	// A concurrently committed VERIFIED flip maps to the precise
+	// duplicate refusal.
+	if err := store.ReleaseChallenge(ctx, "id-stage", "nonce-2"); err != nil {
+		t.Fatal(err)
+	}
+	committed, _ := store.FindByID(ctx, "id-stage")
+	committed.Status = domain.IdentityVerified
+	committed.VerifiedAt = now
+	if err := store.Save(ctx, committed); err != nil {
+		t.Fatal(err)
+	}
+	again, _ := store.FindByID(ctx, "id-stage")
+	again.Status = domain.IdentityPendingControl // simulate the stale loader's view
+	if err := again.IssueChallenge("nonce-5", time.Hour, now); err != nil {
+		t.Fatal(err)
+	}
+	err = store.StageChallenge(ctx, again, domain.IdentityPendingControl, "nonce-2", stale)
+	if err == nil || !strings.Contains(err.Error(), "IDENTIFIER_DUPLICATE") {
+		t.Fatalf("concurrent verify must map to IDENTIFIER_DUPLICATE: %v", err)
+	}
+}
+
+func TestIdentityStore_MarkRevokedConditional(t *testing.T) {
+	db := newTestDB(t)
+	store := NewIdentityStore(db)
+	ctx := context.Background()
+
+	v := newIdentityFixture(t, "id-mr", "owner-1", "did:web:mr.example.com")
+	v.Status = domain.IdentityVerified
+	v.VerifiedAt = identityNow
+	if err := store.Save(ctx, v); err != nil {
+		t.Fatal(err)
+	}
+	now := identityNow.Add(time.Minute)
+
+	if err := store.MarkRevoked(ctx, "id-mr", now); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	got, _ := store.FindByID(ctx, "id-mr")
+	if got.Status != domain.IdentityRevoked || got.PendingValue != "" || got.Challenge != nil {
+		t.Fatalf("revoked state: %+v", got)
+	}
+
+	// Second revoke (or revoke of a non-VERIFIED row): conflict, no
+	// clobber.
+	err := store.MarkRevoked(ctx, "id-mr", now.Add(time.Second))
+	if err == nil || !strings.Contains(err.Error(), "IDENTITY_CONCURRENTLY_MODIFIED") {
+		t.Fatalf("conditional revoke must conflict on a non-VERIFIED row: %v", err)
 	}
 }

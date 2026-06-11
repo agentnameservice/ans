@@ -3,9 +3,10 @@ package service_test
 // IdentityService tests: the proof gate (payload equality, kid
 // selection, signature verification, nonce discipline), the lifecycle
 // (register → verify → rotate → revoke), the owner-gated links, and
-// the sealed-event emission on the outbox IDENTITY lane. Real SQLite
-// stores + real crypto; the resolver is the noop adapter (hint
-// synthesis) or a canned-document fake for the did:web rules.
+// the synchronous seal-before-success emission (§5.6.1) through a
+// recording sealer. Real SQLite stores + real crypto; the resolver is
+// the noop adapter (hint synthesis) or a canned-document fake for the
+// did:web rules.
 
 import (
 	"context"
@@ -18,6 +19,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -45,11 +47,55 @@ func (f *fakeResolver) Resolve(context.Context, string, []port.KeyHint) (*port.D
 type identityFixture struct {
 	svc        *service.IdentityService
 	db         *sqlite.DB
-	outbox     *sqlite.OutboxStore
+	sealer     *recordingSealer
 	agents     port.AgentStore
 	signerPub  any
 	clock      *fakeClock
 	providerID string
+}
+
+// recordingSealer is the test IdentityEventSealer: it records every
+// sealed (innerCanonical, producerSig) pair the service submitted —
+// each entry is one TL-acknowledged seal — and can be primed to
+// fail, exercising the seal-before-success failure paths.
+type recordingSealer struct {
+	mu     sync.Mutex
+	events []sealedEvent
+	err    error
+	// hook runs inside SealIdentityEvent before recording — the test
+	// stand-in for "something committed during the TL round trip",
+	// which is exactly the window the Phase C conditional commits
+	// must survive.
+	hook func()
+}
+
+type sealedEvent struct {
+	Inner []byte
+	Sig   string
+}
+
+func (r *recordingSealer) SealIdentityEvent(_ context.Context, innerCanonical []byte, producerSig string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.hook != nil {
+		r.hook()
+	}
+	if r.err != nil {
+		return r.err
+	}
+	r.events = append(r.events, sealedEvent{
+		Inner: append([]byte(nil), innerCanonical...),
+		Sig:   producerSig,
+	})
+	return nil
+}
+
+// fail primes the sealer to reject every seal with err (nil restores
+// normal operation).
+func (r *recordingSealer) fail(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.err = err
 }
 
 type fakeClock struct{ now time.Time }
@@ -82,12 +128,13 @@ func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixtur
 		resolver = didresolver.NewNoopResolver()
 	}
 	clock := &fakeClock{now: time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)}
+	sealer := &recordingSealer{}
 	svc := service.NewIdentityService(
 		sqlite.NewIdentityStore(db),
 		sqlite.NewIdentityLinkStore(db),
 		sqlite.NewAgentStore(db),
 		resolver,
-		sqlite.NewOutboxStore(db),
+		sealer,
 		db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
@@ -98,7 +145,7 @@ func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixtur
 	return &identityFixture{
 		svc:        svc,
 		db:         db,
-		outbox:     sqlite.NewOutboxStore(db),
+		sealer:     sealer,
 		agents:     sqlite.NewAgentStore(db),
 		signerPub:  pub,
 		clock:      clock,
@@ -108,6 +155,13 @@ func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixtur
 
 // saveAgent persists a minimal ACTIVE agent owned by `owner`.
 func (fx *identityFixture) saveAgent(t *testing.T, agentID, owner, host string) {
+	t.Helper()
+	fx.saveAgentWithStatus(t, agentID, owner, host, domain.StatusActive)
+}
+
+// saveAgentWithStatus persists a minimal agent in the given lifecycle
+// state — the link liveness-gate tests need every state.
+func (fx *identityFixture) saveAgentWithStatus(t *testing.T, agentID, owner, host string, status domain.RegistrationStatus) {
 	t.Helper()
 	v, err := domain.NewSemVer(1, 0, 0)
 	if err != nil {
@@ -121,7 +175,7 @@ func (fx *identityFixture) saveAgent(t *testing.T, agentID, owner, host string) 
 		AgentID: agentID,
 		OwnerID: owner,
 		AnsName: ansName,
-		Status:  domain.StatusActive,
+		Status:  status,
 		Details: domain.RegistrationDetails{
 			RegistrationTimestamp: fx.clock.now,
 			DisplayName:           "agent " + agentID,
@@ -173,38 +227,27 @@ func genKey(t *testing.T) *ecdsa.PrivateKey {
 	return priv
 }
 
-// drainOutbox claims and returns all pending outbox rows.
-func (fx *identityFixture) drainOutbox(t *testing.T) []sqlite.OutboxEvent {
+// drainSealed returns (and clears) everything the recording sealer
+// accepted — the events the TL acknowledged, in seal order.
+func (fx *identityFixture) drainSealed(t *testing.T) []sealedEvent {
 	t.Helper()
-	rows, err := fx.outbox.Claim(context.Background(), 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, row := range rows {
-		if err := fx.outbox.MarkSent(context.Background(), row.ID); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return rows
+	fx.sealer.mu.Lock()
+	defer fx.sealer.mu.Unlock()
+	out := fx.sealer.events
+	fx.sealer.events = nil
+	return out
 }
 
-// decodeOutboxEvent parses one outbox row's payload, verifies the
-// producer signature against the fixture's signer key, and returns
-// the inner identity event.
-func (fx *identityFixture) decodeOutboxEvent(t *testing.T, row sqlite.OutboxEvent) *identityevent.Event {
+// decodeSealed verifies one sealed record's producer signature
+// against the fixture's signer key and returns the inner identity
+// event.
+func (fx *identityFixture) decodeSealed(t *testing.T, rec sealedEvent) *identityevent.Event {
 	t.Helper()
-	var payload struct {
-		InnerEventCanonical json.RawMessage `json:"innerEventCanonical"`
-		ProducerSignature   string          `json:"producerSignature"`
-	}
-	if err := json.Unmarshal(row.PayloadJSON, &payload); err != nil {
-		t.Fatalf("payload: %v", err)
-	}
-	if _, err := anscrypto.VerifyWithPublicKey(fx.signerPub, payload.ProducerSignature, payload.InnerEventCanonical); err != nil {
+	if _, err := anscrypto.VerifyWithPublicKey(fx.signerPub, rec.Sig, rec.Inner); err != nil {
 		t.Fatalf("producer signature: %v", err)
 	}
 	var inner identityevent.Event
-	if err := json.Unmarshal(payload.InnerEventCanonical, &inner); err != nil {
+	if err := json.Unmarshal(rec.Inner, &inner); err != nil {
 		t.Fatalf("inner event: %v", err)
 	}
 	if err := inner.Validate(); err != nil {
@@ -263,7 +306,7 @@ func TestIdentityRegister_DIDWebNoop(t *testing.T) {
 	}
 
 	// Register seals nothing — only proven control reaches the TL.
-	if rows := fx.drainOutbox(t); len(rows) != 0 {
+	if rows := fx.drainSealed(t); len(rows) != 0 {
 		t.Fatalf("register must not emit, got %d rows", len(rows))
 	}
 }
@@ -343,11 +386,11 @@ func TestIdentityVerifyControl_DIDWebNoop(t *testing.T) {
 		t.Fatalf("verified state: %+v", identity)
 	}
 
-	rows := fx.drainOutbox(t)
-	if len(rows) != 1 || rows[0].SchemaVersion != "IDENTITY" {
-		t.Fatalf("outbox rows: %+v", rows)
+	rows := fx.drainSealed(t)
+	if len(rows) != 1 {
+		t.Fatalf("sealed events: %d", len(rows))
 	}
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	inner := fx.decodeSealed(t, rows[0])
 	if inner.EventType != identityevent.TypeIdentityVerified ||
 		inner.IdentityID != identity.IdentityID ||
 		inner.ProviderID != fx.providerID ||
@@ -398,8 +441,8 @@ func TestIdentityVerifyControl_MultiKey(t *testing.T) {
 	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, service.ProofSubmission{SignedProofs: []string{jws1, jws2}}); err != nil {
 		t.Fatalf("multi-key verify: %v", err)
 	}
-	rows := fx.drainOutbox(t)
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	rows := fx.drainSealed(t)
+	inner := fx.decodeSealed(t, rows[0])
 	if len(inner.Keys) != 2 {
 		t.Fatalf("sealed keys: %d", len(inner.Keys))
 	}
@@ -666,8 +709,8 @@ func TestIdentityLifecycle_DIDKey(t *testing.T) {
 	if identity.Status != domain.IdentityVerified || identity.ProofMethod != "did-key-sig" {
 		t.Fatalf("did:key verified state: %+v", identity)
 	}
-	rows := fx.drainOutbox(t)
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	rows := fx.drainSealed(t)
+	inner := fx.decodeSealed(t, rows[0])
 	if inner.Kind != "did:key" || len(inner.Keys) != 1 {
 		t.Fatalf("did:key sealed event: %+v", inner)
 	}
@@ -718,8 +761,8 @@ func TestIdentityLifecycle_Ed25519(t *testing.T) {
 
 	// The seal quotes the did:key Multikey method — its key material
 	// is the method-specific id verbatim from the identifier.
-	rows := fx.drainOutbox(t)
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	rows := fx.drainSealed(t)
+	inner := fx.decodeSealed(t, rows[0])
 	var vm struct {
 		Type               string `json:"type"`
 		PublicKeyMultibase string `json:"publicKeyMultibase"`
@@ -770,7 +813,7 @@ func TestIdentityRotation_SealsUpdated(t *testing.T) {
 	ctx := context.Background()
 
 	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:a.com")
-	fx.drainOutbox(t)
+	fx.drainSealed(t)
 
 	rot, err := fx.svc.Rotate(ctx, fx.providerID, identity.IdentityID, "did:web:b.com")
 	if err != nil {
@@ -781,7 +824,7 @@ func TestIdentityRotation_SealsUpdated(t *testing.T) {
 	}
 	// Until the proof lands, the previously sealed state stands —
 	// nothing emitted by the PUT itself.
-	if rows := fx.drainOutbox(t); len(rows) != 0 {
+	if rows := fx.drainSealed(t); len(rows) != 0 {
 		t.Fatalf("PUT must not seal, got %d rows", len(rows))
 	}
 
@@ -795,11 +838,11 @@ func TestIdentityRotation_SealsUpdated(t *testing.T) {
 		t.Fatalf("rotated state: %+v", rotated)
 	}
 
-	rows := fx.drainOutbox(t)
+	rows := fx.drainSealed(t)
 	if len(rows) != 1 {
 		t.Fatalf("rotation rows: %d", len(rows))
 	}
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	inner := fx.decodeSealed(t, rows[0])
 	if inner.EventType != identityevent.TypeIdentityUpdated ||
 		inner.Value != "did:web:b.com" || inner.PreviousValue != "did:web:a.com" {
 		t.Fatalf("IDENTITY_UPDATED event: %+v", inner)
@@ -812,7 +855,7 @@ func TestIdentityRevoke(t *testing.T) {
 	ctx := context.Background()
 
 	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:a.com")
-	fx.drainOutbox(t)
+	fx.drainSealed(t)
 
 	revoked, err := fx.svc.Revoke(ctx, fx.providerID, identity.IdentityID)
 	if err != nil {
@@ -821,8 +864,8 @@ func TestIdentityRevoke(t *testing.T) {
 	if revoked.Status != domain.IdentityRevoked {
 		t.Fatalf("status: %s", revoked.Status)
 	}
-	rows := fx.drainOutbox(t)
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	rows := fx.drainSealed(t)
+	inner := fx.decodeSealed(t, rows[0])
 	if inner.EventType != identityevent.TypeIdentityRevoked || inner.RevokedAt == "" {
 		t.Fatalf("IDENTITY_REVOKED event: %+v", inner)
 	}
@@ -892,7 +935,7 @@ func TestIdentityProvenUniquenessRace(t *testing.T) {
 	}
 	// The losing transaction rolled back whole — including the nonce
 	// consumption — and only the winner's event sealed.
-	rows := fx.drainOutbox(t)
+	rows := fx.drainSealed(t)
 	if len(rows) != 1 {
 		t.Fatalf("sealed events after race: %d", len(rows))
 	}
@@ -918,14 +961,14 @@ func TestIdentityOwnerGates(t *testing.T) {
 	if _, err := fx.svc.Rotate(ctx, "owner-2", identity.IdentityID, "did:web:b.com"); !errors.Is(err, domain.ErrUnauthorized) {
 		t.Fatalf("cross-owner rotate: %v", err)
 	}
-	// List is owner-scoped.
-	mine, err := fx.svc.List(ctx, fx.providerID)
-	if err != nil || len(mine) != 1 {
-		t.Fatalf("list mine: %d %v", len(mine), err)
+	// List is owner-scoped (one page, default limit).
+	mine, err := fx.svc.List(ctx, fx.providerID, 0, "")
+	if err != nil || len(mine.Items) != 1 {
+		t.Fatalf("list mine: %+v %v", mine, err)
 	}
-	theirs, err := fx.svc.List(ctx, "owner-2")
-	if err != nil || len(theirs) != 0 {
-		t.Fatalf("list theirs: %d %v", len(theirs), err)
+	theirs, err := fx.svc.List(ctx, "owner-2", 0, "")
+	if err != nil || len(theirs.Items) != 0 {
+		t.Fatalf("list theirs: %+v %v", theirs, err)
 	}
 }
 
@@ -937,7 +980,7 @@ func TestIdentityLinks(t *testing.T) {
 	ctx := context.Background()
 
 	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:a.com")
-	fx.drainOutbox(t)
+	fx.drainSealed(t)
 	fx.saveAgent(t, "agent-1", fx.providerID, "one.example.com")
 	fx.saveAgent(t, "agent-2", fx.providerID, "two.example.com")
 	fx.saveAgent(t, "agent-x", "owner-2", "theirs.example.com")
@@ -948,7 +991,7 @@ func TestIdentityLinks(t *testing.T) {
 	if !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("cross-owner agent in batch: %v", err)
 	}
-	if rows := fx.drainOutbox(t); len(rows) != 0 {
+	if rows := fx.drainSealed(t); len(rows) != 0 {
 		t.Fatal("failed batch must seal nothing")
 	}
 
@@ -957,11 +1000,11 @@ func TestIdentityLinks(t *testing.T) {
 	if err != nil || linked != 2 {
 		t.Fatalf("link batch: %d %v", linked, err)
 	}
-	rows := fx.drainOutbox(t)
+	rows := fx.drainSealed(t)
 	if len(rows) != 1 {
 		t.Fatalf("link batch rows: %d", len(rows))
 	}
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	inner := fx.decodeSealed(t, rows[0])
 	if inner.EventType != identityevent.TypeIdentityLinked || len(inner.AnsIDs) != 2 {
 		t.Fatalf("IDENTITY_LINKED event: %+v", inner)
 	}
@@ -971,7 +1014,7 @@ func TestIdentityLinks(t *testing.T) {
 	if err != nil || linked != 0 {
 		t.Fatalf("idempotent link: %d %v", linked, err)
 	}
-	if rows := fx.drainOutbox(t); len(rows) != 0 {
+	if rows := fx.drainSealed(t); len(rows) != 0 {
 		t.Fatal("idempotent link must seal nothing")
 	}
 
@@ -985,8 +1028,8 @@ func TestIdentityLinks(t *testing.T) {
 	if err := fx.svc.Unlink(ctx, fx.providerID, identity.IdentityID, "agent-1"); err != nil {
 		t.Fatalf("unlink: %v", err)
 	}
-	rows = fx.drainOutbox(t)
-	inner = fx.decodeOutboxEvent(t, rows[0])
+	rows = fx.drainSealed(t)
+	inner = fx.decodeSealed(t, rows[0])
 	if inner.EventType != identityevent.TypeIdentityUnlinked ||
 		len(inner.AnsIDs) != 1 || inner.AnsIDs[0] != "agent-1" {
 		t.Fatalf("IDENTITY_UNLINKED event: %+v", inner)
@@ -995,7 +1038,7 @@ func TestIdentityLinks(t *testing.T) {
 	if err := fx.svc.Unlink(ctx, fx.providerID, identity.IdentityID, "agent-1"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("double unlink: %v", err)
 	}
-	if rows := fx.drainOutbox(t); len(rows) != 0 {
+	if rows := fx.drainSealed(t); len(rows) != 0 {
 		t.Fatal("failed unlink must seal nothing")
 	}
 }
@@ -1032,5 +1075,366 @@ func TestIdentityLinkGuards(t *testing.T) {
 	if _, err := fx.svc.Link(ctx, "owner-2", identity.IdentityID, huge); err == nil ||
 		!strings.Contains(err.Error(), "at most") {
 		t.Errorf("oversized batch: %v", err)
+	}
+}
+
+// TestVerifyControl_SealFailureIsRetryable pins seal-before-success
+// (§5.6.1): a TL failure surfaces retryable, consumes nothing —
+// including the provisional claim — and the SAME proof succeeds once
+// the TL returns.
+func TestVerifyControl_SealFailureIsRetryable(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+
+	res, err := fx.svc.Register(ctx, fx.providerID, "did:web:seal-fail.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := genKey(t)
+	jws := signProof(t, priv, res.Identity.Value+"#key-1", res.Challenges[0].SigningInput, true)
+	sub := service.ProofSubmission{SignedProofs: []string{jws}}
+
+	fx.sealer.fail(domain.NewUnavailableError("TL_UNAVAILABLE", "down"))
+	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, sub); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+	// Nothing sealed, row untouched, nonce unconsumed.
+	if rows := fx.drainSealed(t); len(rows) != 0 {
+		t.Fatalf("failed seal must record nothing, got %d", len(rows))
+	}
+	identity, _, err := fx.svc.Detail(ctx, fx.providerID, res.Identity.IdentityID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.Status != domain.IdentityPendingControl {
+		t.Fatalf("row must stand on seal failure, got %s", identity.Status)
+	}
+
+	// TL back: the same proof (same nonce) succeeds — the claim was
+	// released, the nonce never consumed.
+	fx.sealer.fail(nil)
+	verified, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, sub)
+	if err != nil {
+		t.Fatalf("retry after TL recovery: %v", err)
+	}
+	if verified.Status != domain.IdentityVerified {
+		t.Fatalf("status: %s", verified.Status)
+	}
+	if rows := fx.drainSealed(t); len(rows) != 1 {
+		t.Fatalf("exactly one seal after recovery, got %d", len(rows))
+	}
+}
+
+// TestLink_LivenessGate pins §4.3: terminal and pre-activation agents
+// are AGENT_NOT_LINKABLE (atomically — one bad agent fails the whole
+// batch); DEPRECATED is deliberately linkable.
+func TestLink_LivenessGate(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:liveness.example.com")
+	fx.drainSealed(t)
+
+	fx.saveAgentWithStatus(t, "agent-active", fx.providerID, "a.example.com", domain.StatusActive)
+	fx.saveAgentWithStatus(t, "agent-deprecated", fx.providerID, "d.example.com", domain.StatusDeprecated)
+	fx.saveAgentWithStatus(t, "agent-revoked", fx.providerID, "r.example.com", domain.StatusRevoked)
+	fx.saveAgentWithStatus(t, "agent-pending", fx.providerID, "p.example.com", domain.StatusPendingValidation)
+
+	for _, tc := range []struct {
+		name    string
+		agentID string
+	}{
+		{"terminal", "agent-revoked"},
+		{"pre-activation", "agent-pending"},
+		{"mixed batch is atomic", "agent-revoked"},
+	} {
+		batch := []string{tc.agentID}
+		if tc.name == "mixed batch is atomic" {
+			batch = []string{"agent-active", tc.agentID}
+		}
+		_, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, batch)
+		var de *domain.Error
+		if !errors.As(err, &de) || de.Code != "AGENT_NOT_LINKABLE" {
+			t.Fatalf("%s: want AGENT_NOT_LINKABLE, got %v", tc.name, err)
+		}
+	}
+	// The atomic rejection linked nothing.
+	if rows := fx.drainSealed(t); len(rows) != 0 {
+		t.Fatalf("rejected batches must seal nothing, got %d", len(rows))
+	}
+
+	// ACTIVE and DEPRECATED both link.
+	linked, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-active", "agent-deprecated"})
+	if err != nil || linked != 2 {
+		t.Fatalf("live link: %d %v", linked, err)
+	}
+}
+
+// TestLink_SealFailureLeavesNoRows pins seal-before-success on the
+// link path: a failed seal writes no link rows and the retry links
+// the full batch.
+func TestLink_SealFailureLeavesNoRows(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:link-seal.example.com")
+	fx.drainSealed(t)
+	fx.saveAgent(t, "agent-ls", fx.providerID, "ls.example.com")
+
+	fx.sealer.fail(domain.NewUnavailableError("TL_UNAVAILABLE", "down"))
+	if _, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-ls"}); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+	if _, links, _ := fx.svc.Detail(ctx, fx.providerID, identity.IdentityID); len(links) != 0 {
+		t.Fatalf("failed seal must write no rows, got %d", len(links))
+	}
+
+	fx.sealer.fail(nil)
+	if linked, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-ls"}); err != nil || linked != 1 {
+		t.Fatalf("retry: %d %v", linked, err)
+	}
+}
+
+// TestLink_RateLimited pins the §4.3 link-route limiter.
+func TestLink_RateLimited(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	fx.svc.WithLinkRateLimit(1)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:ratelimit.example.com")
+	fx.saveAgent(t, "agent-rl-1", fx.providerID, "rl1.example.com")
+	fx.saveAgent(t, "agent-rl-2", fx.providerID, "rl2.example.com")
+
+	if _, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-rl-1"}); err != nil {
+		t.Fatalf("first link: %v", err)
+	}
+	_, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-rl-2"})
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "RATE_LIMITED" {
+		t.Fatalf("want RATE_LIMITED, got %v", err)
+	}
+}
+
+// TestUnlink_Discipline pins the unlink guards: rate limit shared
+// with link, LINK_NOT_FOUND before anything seals, seal failure
+// leaves the link standing, and a clean unlink seals exactly one
+// IDENTITY_UNLINKED.
+func TestUnlink_Discipline(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	fx.svc.WithSealTimeout(2 * time.Second)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:unlink.example.com")
+	fx.saveAgent(t, "agent-ud", fx.providerID, "ud.example.com")
+
+	// Unlink before any link: LINK_NOT_FOUND, nothing sealed.
+	err := fx.svc.Unlink(ctx, fx.providerID, identity.IdentityID, "agent-ud")
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "LINK_NOT_FOUND" {
+		t.Fatalf("want LINK_NOT_FOUND, got %v", err)
+	}
+
+	if _, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-ud"}); err != nil {
+		t.Fatal(err)
+	}
+	fx.drainSealed(t)
+
+	// Seal failure: the link stands, retry works.
+	fx.sealer.fail(domain.NewUnavailableError("TL_UNAVAILABLE", "down"))
+	if err := fx.svc.Unlink(ctx, fx.providerID, identity.IdentityID, "agent-ud"); !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable, got %v", err)
+	}
+	if _, links, _ := fx.svc.Detail(ctx, fx.providerID, identity.IdentityID); len(links) != 1 {
+		t.Fatalf("failed unlink seal must leave the link, got %d", len(links))
+	}
+	fx.sealer.fail(nil)
+	if err := fx.svc.Unlink(ctx, fx.providerID, identity.IdentityID, "agent-ud"); err != nil {
+		t.Fatalf("retry unlink: %v", err)
+	}
+	rows := fx.drainSealed(t)
+	if len(rows) != 1 {
+		t.Fatalf("unlink seals exactly one event, got %d", len(rows))
+	}
+	if inner := fx.decodeSealed(t, rows[0]); inner.EventType != identityevent.TypeIdentityUnlinked {
+		t.Fatalf("event type: %s", inner.EventType)
+	}
+}
+
+// TestVisibilityPredicate_RASide pins §5.6.3 on the management
+// plane: a terminal agent's AgentDetails identities[] is empty, and
+// the identity detail's linked list drops links to terminal agents —
+// while the link rows (history) stay in place.
+func TestVisibilityPredicate_RASide(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:predicate.example.com")
+	fx.saveAgent(t, "agent-vp-1", fx.providerID, "vp1.example.com")
+	fx.saveAgent(t, "agent-vp-2", fx.providerID, "vp2.example.com")
+	if _, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-vp-1", "agent-vp-2"}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Both live: both views full.
+	if got, err := fx.svc.LinkedIdentitiesForAgent(ctx, "agent-vp-1"); err != nil || len(got) != 1 {
+		t.Fatalf("live agent view: %v %v", got, err)
+	}
+	if _, links, _ := fx.svc.Detail(ctx, fx.providerID, identity.IdentityID); len(links) != 2 {
+		t.Fatalf("want 2 visible links, got %d", len(links))
+	}
+
+	// Terminal agent: drops from every current view. Flip the status
+	// on the EXISTING row (a fresh save would collide on ans_name).
+	reg, err := fx.agents.FindByAgentID(ctx, "agent-vp-2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Status = domain.StatusRevoked
+	if err := fx.agents.Save(ctx, reg); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := fx.svc.LinkedIdentitiesForAgent(ctx, "agent-vp-2"); err != nil || len(got) != 0 {
+		t.Fatalf("terminal agent view must be empty: %v %v", got, err)
+	}
+	if _, links, _ := fx.svc.Detail(ctx, fx.providerID, identity.IdentityID); len(links) != 1 {
+		t.Fatalf("terminal agent's link must drop from the count, got %d", len(links))
+	}
+}
+
+// TestVerifyControl_ClaimSerializesAttempts pins the seal claim: a
+// held claim rejects a second attempt (VERIFICATION_IN_FLIGHT)
+// without consuming anything.
+func TestVerifyControl_ClaimSerializesAttempts(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	res, err := fx.svc.Register(ctx, fx.providerID, "did:web:claimrace.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := genKey(t)
+	jws := signProof(t, priv, res.Identity.Value+"#key-1", res.Challenges[0].SigningInput, true)
+	sub := service.ProofSubmission{SignedProofs: []string{jws}}
+
+	// Simulate a concurrent in-flight attempt holding the claim.
+	store := sqlite.NewIdentityStore(fx.db)
+	now := fx.clock.now
+	if err := store.ClaimChallenge(ctx, res.Identity.IdentityID, res.Nonce, now, now.Add(-30*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	_, err = fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, sub)
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "VERIFICATION_IN_FLIGHT" {
+		t.Fatalf("want VERIFICATION_IN_FLIGHT, got %v", err)
+	}
+
+	// The holder releases (failed attempt) — the next attempt wins.
+	if err := store.ReleaseChallenge(ctx, res.Identity.IdentityID, res.Nonce); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, sub); err != nil {
+		t.Fatalf("verify after release: %v", err)
+	}
+}
+
+// TestLink_RevokeDuringSealRoundTrip pins the Phase C re-read: a
+// revoke committing while the IDENTITY_LINKED seal is in flight must
+// not gain live link rows — the §4.3 VERIFIED gate holds at commit,
+// and the sealed link event is inert (the TL's read-time status is
+// terminal on any revocation leaf).
+func TestLink_RevokeDuringSealRoundTrip(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:race-link.example.com")
+	fx.saveAgent(t, "agent-race", fx.providerID, "race.example.com")
+	fx.drainSealed(t)
+
+	store := sqlite.NewIdentityStore(fx.db)
+	fx.sealer.hook = func() {
+		if err := store.MarkRevoked(ctx, identity.IdentityID, fx.clock.now); err != nil {
+			t.Errorf("hook revoke: %v", err)
+		}
+	}
+	_, err := fx.svc.Link(ctx, fx.providerID, identity.IdentityID, []string{"agent-race"})
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "IDENTITY_NOT_VERIFIED" {
+		t.Fatalf("want IDENTITY_NOT_VERIFIED at commit, got %v", err)
+	}
+	fx.sealer.hook = nil
+	if _, links, _ := fx.svc.Detail(ctx, fx.providerID, identity.IdentityID); len(links) != 0 {
+		t.Fatalf("revoked identity must gain no live links, got %d", len(links))
+	}
+}
+
+// TestVerifyControl_RevokeDuringSealRoundTrip pins the other side of
+// the race: a revoke committing while a rotation's IDENTITY_UPDATED
+// seal is in flight clears the nonce, so the verifier's conditional
+// consume fails closed — the row stays REVOKED, never resurrected.
+func TestVerifyControl_RevokeDuringSealRoundTrip(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	identity, _ := verifyDIDWeb(t, fx, fx.providerID, "did:web:race-verify.example.com")
+	fx.drainSealed(t)
+
+	// Stage a rotation (same value — key rotation) → fresh nonce.
+	res, err := fx.svc.Rotate(ctx, fx.providerID, identity.IdentityID, identity.Value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := genKey(t)
+	jws := signProof(t, priv, identity.Value+"#key-1", res.Challenges[0].SigningInput, true)
+
+	store := sqlite.NewIdentityStore(fx.db)
+	fx.sealer.hook = func() {
+		if err := store.MarkRevoked(ctx, identity.IdentityID, fx.clock.now); err != nil {
+			t.Errorf("hook revoke: %v", err)
+		}
+	}
+	_, err = fx.svc.VerifyControl(ctx, fx.providerID, identity.IdentityID, service.ProofSubmission{SignedProofs: []string{jws}})
+	if err == nil {
+		t.Fatal("verify racing a committed revoke must fail closed")
+	}
+	fx.sealer.hook = nil
+	got, _, gerr := fx.svc.Detail(ctx, fx.providerID, identity.IdentityID)
+	if gerr != nil || got.Status != domain.IdentityRevoked {
+		t.Fatalf("row must stay REVOKED, got %v (%v)", got.Status, gerr)
+	}
+}
+
+// TestNilSealerFailsClosed pins seal-before-success's no-"seal
+// later" rule: without a configured sealer every sealing operation
+// refuses with TL_UNAVAILABLE and consumes nothing.
+func TestNilSealerFailsClosed(t *testing.T) {
+	t.Parallel()
+	db, err := sqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	svc := service.NewIdentityService(
+		sqlite.NewIdentityStore(db),
+		sqlite.NewIdentityLinkStore(db),
+		sqlite.NewAgentStore(db),
+		didresolver.NewNoopResolver(),
+		nil, // no sealer
+		db,
+	)
+	ctx := context.Background()
+	res, err := svc.Register(ctx, "owner-ns", "did:web:nosealer.example.com")
+	if err != nil {
+		t.Fatalf("register (no seal needed): %v", err)
+	}
+	priv := genKey(t)
+	jws := signProof(t, priv, res.Identity.Value+"#key-1", res.Challenges[0].SigningInput, true)
+	_, err = svc.VerifyControl(ctx, "owner-ns", res.Identity.IdentityID, service.ProofSubmission{SignedProofs: []string{jws}})
+	if !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("nil sealer must fail closed with ErrUnavailable, got %v", err)
+	}
+	got, _, gerr := svc.Detail(ctx, "owner-ns", res.Identity.IdentityID)
+	if gerr != nil || got.Status != domain.IdentityPendingControl {
+		t.Fatalf("row must stand: %v (%v)", got.Status, gerr)
 	}
 }

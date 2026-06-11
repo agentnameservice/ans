@@ -187,15 +187,27 @@ func run(cfgPath string) error {
 
 	// Verified identities — the "who" behind the agents. Shares the
 	// producer signer with the registration service: one RA, one
-	// producer identity on every TL lane.
+	// producer identity on every TL lane. Identity events seal
+	// SYNCHRONOUSLY (seal-before-success, design §5.6.1): they never
+	// ride the outbox, so the service gets the TL client directly. A
+	// disabled TL client means identity sealing operations fail
+	// closed with TL_UNAVAILABLE — there is no "seal later" mode.
+	var identitySealer service.IdentityEventSealer
+	if !cfg.TLClient.Disabled {
+		identitySealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout)
+	} else {
+		logger.Warn().Msg("TL client disabled — identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
+	}
 	identitySvc := service.NewIdentityService(
-		identityStore, identityLinks, agents, didResolver, outbox, db,
+		identityStore, identityLinks, agents, didResolver, identitySealer, db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      signerKeyID,
 		RaID:       cfg.Signer.RaID,
 	}).WithChallengeTTL(cfg.Identity.ChallengeTTL).
-		WithRegisterRateLimit(cfg.Identity.RegisterRateLimit)
+		WithRegisterRateLimit(cfg.Identity.RegisterRateLimit).
+		WithLinkRateLimit(cfg.Identity.LinkRateLimit).
+		WithSealTimeout(cfg.Identity.SealTimeout)
 
 	// HTTP.
 	r := chi.NewRouter()
