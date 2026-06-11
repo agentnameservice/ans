@@ -31,9 +31,17 @@
 #   17. TL     /v1/identities/{id}/receipt                 SCITT COSE receipt for the identity leaf
 #   18. DELETE .../links/{agentId}                         unlink the did:web from agent #1 ONLY → agent #1
 #                                                          keeps its did:key link; agent #2 keeps the did:web
+#   18b. POST  .../links → 422 AGENT_NOT_LINKABLE          liveness gate: a REVOKED agent rejects the whole
+#                                                          batch and seals NOTHING
 #   19. POST   /v2/ans/identities/{id}/revoke              revoke the did:web → IDENTITY_REVOKED (one event)
 #   20. TL     did:web badge REVOKED — agent-2's join shows it at the next read; agent-1's did:key
-#              stays VERIFIED; both agents stay ACTIVE (the whats survive the who)
+#              stays VERIFIED with no keys quoted; both agents stay ACTIVE (the whats survive the who)
+#
+# Every sealing operation above is SEAL-BEFORE-SUCCESS (§5.6.1): the
+# RA reports success only after the TL acknowledges the seal, so the
+# TL reads in this script run immediately after each call — no
+# polling anywhere. Badge views quote the current proven keys[]
+# VERBATIM from the latest sealed proof event (+ keysLogId to it).
 #
 # The demo runs against the noop did:web resolver (the default —
 # `identity.resolver.type: noop`): signature verification is real,
@@ -194,6 +202,13 @@ ok "did:key identity VERIFIED — the keyless-future test track"
 header "8. Register TWO fresh agents to ACTIVE (the fleet to link)"
 AGENT_1=$(register_agent "linked-a-$(openssl rand -hex 4).example.com")
 AGENT_2=$(register_agent "linked-b-$(openssl rand -hex 4).example.com")
+# The AGENT lane still seals via the async outbox (flagged 2026-06-11
+# as a bug in the design doc §5.6.1 — agents should also wait for seal
+# confirmation; tracked separately). Until that lands, wait for both
+# agents' TL streams here: the identity-side reads below join against
+# agent TL status, which needs the AGENT_REGISTERED leaves present.
+poll_tl_audit "$AGENT_1" 1 30
+poll_tl_audit "$AGENT_2" 1 30
 ok "fleet ready: $AGENT_1 + $AGENT_2"
 
 # ----- 9. Link the fleet — one owner-gated call per identity -----
@@ -216,9 +231,9 @@ header "10. GET /v2/ans/agents/$AGENT_1  (RA detail — computed identities[], n
 curl_json GET "/v2/ans/agents/$AGENT_1" >/dev/null
 
 # ----- 11. TL identity stream -----
-header "11. Wait for the outbox worker, then read the identity stream from the TL"
-poll_tl_identity_audit "$IDENTITY_ID" 2 30
-ok "TL sealed the IDENTITY_VERIFIED + IDENTITY_LINKED leaves"
+header "11. Read the identity stream from the TL — NO polling: identity ops are seal-before-success (§5.6.1)"
+assert_tl_identity_audit "$IDENTITY_ID" 2
+ok "IDENTITY_VERIFIED + IDENTITY_LINKED were already sealed when the API calls returned"
 
 header "11a. TL: GET /v1/identities/$IDENTITY_ID  (identity badge — latest sealed event + proof + status)"
 curl_tl GET "/v1/identities/$IDENTITY_ID" >/dev/null
@@ -241,7 +256,7 @@ AGENTS_COUNT=$(printf '%s' "$AGENTS_VIEW" | jq -r '.agents | length')
 [ "$AGENTS_COUNT" = "2" ] || fail "reverse join should list 2 agents, got $AGENTS_COUNT"
 
 header "11d. TL: GET /v1/identities/$DK_ID  (did:key badge — the sealed Multikey verification method)"
-poll_tl_identity_audit "$DK_ID" 2 30
+assert_tl_identity_audit "$DK_ID" 2
 DK_BADGE_VM=$(curl_tl GET "/v1/identities/$DK_ID/audit" | \
   jq -r '[.records[].payload.producer.event | select(.keys)][0].keys[0].verificationMethod')
 DK_VM_TYPE=$(printf '%s' "$DK_BADGE_VM" | jq -r '.type // empty')
@@ -251,14 +266,14 @@ DK_VM_MB=$(printf '%s' "$DK_BADGE_VM" | jq -r '.publicKeyMultibase // empty')
 ok "did:key sealed verbatim: type=Multikey, publicKeyMultibase = the did:key msid itself"
 
 # ----- 12-13. Agent-side computed views (both badges) -----
-poll_tl_audit "$AGENT_1" 1 30
-poll_tl_audit "$AGENT_2" 1 30
 header "12. TL: GET /v1/agents/{both}  (agent-1 carries BOTH whos; agent-2 carries the did:web)"
 BADGE_1=$(curl_tl GET "/v1/agents/$AGENT_1")
 IDS_1=$(printf '%s' "$BADGE_1" | jq -r '.identities | length')
 [ "$IDS_1" = "2" ] || fail "agent-1 badge should show 2 identities, got $IDS_1"
-KEYIDS_1=$(printf '%s' "$BADGE_1" | jq -r '.identities[] | select(.kind == "did:web") | .provenKeyIds | length')
-[ "$KEYIDS_1" = "2" ] || fail "agent-1's did:web entry should show 2 provenKeyIds, got $KEYIDS_1"
+KEYS_1=$(printf '%s' "$BADGE_1" | jq -r '.identities[] | select(.kind == "did:web") | .keys | length')
+[ "$KEYS_1" = "2" ] || fail "agent-1's did:web entry should quote 2 verbatim keys, got $KEYS_1"
+KEYSLOG_1=$(printf '%s' "$BADGE_1" | jq -r '.identities[] | select(.kind == "did:web") | .keysLogId // empty')
+[ -n "$KEYSLOG_1" ] || fail "agent-1's did:web entry is missing keysLogId (the seal the keys are quoted from)"
 DK_ON_1=$(printf '%s' "$BADGE_1" | jq -r '.identities[] | select(.kind == "did:key") | .value // empty')
 [ "$DK_ON_1" = "$DID_KEY" ] || fail "agent-1's did:key entry missing"
 BADGE_2=$(curl_tl GET "/v1/agents/$AGENT_2")
@@ -269,7 +284,7 @@ WHO_2=$(printf '%s' "$BADGE_2" | jq -r '.identities[0].value // empty')
 SEALED_X_BEFORE=$(printf '%s' "$AUDIT" | \
   jq -r '[.records[].payload.producer.event | select(.keys)][0].keys[0].verificationMethod.publicKeyJwk.x // empty')
 [ -n "$SEALED_X_BEFORE" ] || fail "sealed proof event is missing the verbatim verification method"
-ok "agent-1: did:web (provenKeyIds[2]) + did:key (Ed25519) side by side; agent-2: $WHO_2"
+ok "agent-1: did:web (keys[2] quoted verbatim + keysLogId) + did:key (Ed25519) side by side; agent-2: $WHO_2"
 
 header "13. TL: GET /v1/agents/$AGENT_1/identities  +  /identities/history"
 curl_tl GET "/v1/agents/$AGENT_1/identities" >/dev/null
@@ -290,7 +305,7 @@ curl_json POST "/v2/ans/identities/$IDENTITY_ID/verify-control" \
 assert_2xx "rotation verify-control"
 
 header "16. TL: the rotation sealed ONE IDENTITY_UPDATED — proven set 2 keys → 1, key material changed"
-poll_tl_identity_audit "$IDENTITY_ID" 3 30
+assert_tl_identity_audit "$IDENTITY_ID" 3
 AUDIT=$(curl_tl GET "/v1/identities/$IDENTITY_ID/audit")
 SEALED_X_AFTER=$(printf '%s' "$AUDIT" | \
   jq -r '[.records[].payload.producer.event | select(.keys)][0].keys[0].verificationMethod.publicKeyJwk.x // empty')
@@ -301,9 +316,9 @@ SEALED_KEYS_AFTER=$(printf '%s' "$AUDIT" | \
 [ "$SEALED_KEYS_AFTER" = "1" ] || fail "rotated proven set should be 1 key, got $SEALED_KEYS_AFTER"
 # Both linked badges reflect it immediately (read-time join) — with
 # 10,000 linked agents this would still be ONE sealed event.
-KEYIDS_1_AFTER=$(curl_tl GET "/v1/agents/$AGENT_1" | \
-  jq -r '.identities[] | select(.kind == "did:web") | .provenKeyIds | length')
-[ "$KEYIDS_1_AFTER" = "1" ] || fail "agent-1's did:web entry should now show 1 provenKeyId, got $KEYIDS_1_AFTER"
+KEYS_1_AFTER=$(curl_tl GET "/v1/agents/$AGENT_1" | \
+  jq -r '.identities[] | select(.kind == "did:web") | .keys | length')
+[ "$KEYS_1_AFTER" = "1" ] || fail "agent-1's did:web entry should now quote 1 key, got $KEYS_1_AFTER"
 ok "sealed key material flipped (${SEALED_X_BEFORE:0:12}… → ${SEALED_X_AFTER:0:12}…), set 2→1 — ONE event, zero agent-stream writes"
 
 # ----- 17. Identity receipt -----
@@ -323,7 +338,7 @@ fi
 header "18. DELETE /v2/ans/identities/$IDENTITY_ID/links/$AGENT_1  (unlink the did:web from agent #1 only)"
 curl_json DELETE "/v2/ans/identities/$IDENTITY_ID/links/$AGENT_1" >/dev/null
 assert_2xx "unlink"
-poll_tl_identity_audit "$IDENTITY_ID" 4 30
+assert_tl_identity_audit "$IDENTITY_ID" 4
 BADGE_1=$(curl_tl GET "/v1/agents/$AGENT_1")
 REMAINING_1=$(printf '%s' "$BADGE_1" | jq -r '(.identities | length) // 0')
 KIND_1=$(printf '%s' "$BADGE_1" | jq -r '.identities[0].kind // empty')
@@ -334,11 +349,26 @@ REMAINING_2=$(curl_tl GET "/v1/agents/$AGENT_2" | jq -r '(.identities | length) 
 ok "the did:web↔agent-1 pair ended; agent-1's did:key link and agent-2's did:web link are untouched"
 curl_tl GET "/v1/agents/$AGENT_1/identities/history" >/dev/null
 
+# ----- 18b. Link liveness gate — terminal agents are not linkable -----
+header "18b. Liveness gate: linking to a REVOKED agent fails 422 AGENT_NOT_LINKABLE (nothing seals)"
+AGENT_3=$(register_agent "dead-$(openssl rand -hex 3).example.com")
+curl_json POST "/v2/ans/agents/$AGENT_3/revoke" \
+  "$(jq -n '{reason: "CESSATION_OF_OPERATION", comments: "liveness-gate demo"}')" >/dev/null
+assert_2xx "revoke agent-3"
+GATE_RESP=$(curl_json POST "/v2/ans/identities/$DK_ID/links" \
+  "$(jq -n --arg a "$AGENT_3" '{agentIds: [$a]}')" || true)
+GATE_CODE=$(printf '%s' "$GATE_RESP" | jq -r '.code // empty')
+[ "$GATE_CODE" = "AGENT_NOT_LINKABLE" ] || \
+  fail "linking a revoked agent must fail AGENT_NOT_LINKABLE, got: $GATE_RESP"
+# Nothing sealed: the did:key stream still has exactly its 2 events.
+assert_tl_identity_audit "$DK_ID" 2
+ok "terminal agent rejected all-or-nothing; the did:key stream sealed nothing"
+
 # ----- 19-20. Revoke — the who dies, the whats survive -----
 header "19. POST /v2/ans/identities/$IDENTITY_ID/revoke  (state change — an identity cannot be deleted)"
 curl_json POST "/v2/ans/identities/$IDENTITY_ID/revoke" >/dev/null
 assert_2xx "revoke"
-poll_tl_identity_audit "$IDENTITY_ID" 5 30
+assert_tl_identity_audit "$IDENTITY_ID" 5
 
 header "20. TL: did:web REVOKED; agent-2's join shows it; agent-1's did:key stays VERIFIED"
 ID_STATUS=$(curl_tl GET "/v1/identities/$IDENTITY_ID" | jq -r '.status')
@@ -347,6 +377,10 @@ BADGE_2=$(curl_tl GET "/v1/agents/$AGENT_2")
 WHO_STATUS_2=$(printf '%s' "$BADGE_2" | jq -r '.identities[0].identityStatus // empty')
 AGENT_STATUS_2=$(printf '%s' "$BADGE_2" | jq -r '.status')
 [ "$WHO_STATUS_2" = "REVOKED" ] || fail "agent-2's identities[] should show REVOKED, got $WHO_STATUS_2"
+# Visibility ≠ attestation: the revoked entry stays on the badge —
+# a verifier must SEE the who was revoked — but its keys[] are gone.
+REVOKED_KEYS_2=$(printf '%s' "$BADGE_2" | jq -r '(.identities[0].keys | length) // 0')
+[ "$REVOKED_KEYS_2" = "0" ] || fail "revoked identity must quote no keys, got $REVOKED_KEYS_2"
 [ "$AGENT_STATUS_2" = "ACTIVE" ] || fail "agent-2 status=$AGENT_STATUS_2, want ACTIVE — identity ops must never touch the agent"
 # Each identity has its own lifecycle: the did:key on agent-1 is
 # unaffected by the did:web's revocation.

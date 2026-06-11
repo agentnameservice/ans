@@ -351,7 +351,9 @@ curl_json POST "/v2/ans/identities/$IDENTITY_ID/links" \
 assert_2xx "identity link"
 
 header "19. TL: GET /v1/agents/$AGENT_ID  (badge — computed identities[] join)"
-poll_tl_identity_audit "$IDENTITY_ID" 2 30
+# No polling: identity ops are seal-before-success — the seals are
+# already in the log the moment the link call returned.
+assert_tl_identity_audit "$IDENTITY_ID" 2
 BADGE_WITH_WHO=$(curl_tl GET "/v1/agents/$AGENT_ID")
 WHO_VALUE=$(printf '%s' "$BADGE_WITH_WHO" | jq -r '.identities[0].value // empty')
 [ "$WHO_VALUE" = "$IDENTITY_DID" ] || fail "badge identities[] join missing (got: $WHO_VALUE)"

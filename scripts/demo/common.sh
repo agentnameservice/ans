@@ -317,27 +317,40 @@ poll_tl_audit() {
   fail "TL not ready for $agent_id in ${timeout}s (records=${count:-0}, with merkle proof=${withproof:-0}; want $expected of each)"
 }
 
-# poll_tl_identity_audit IDENTITY_ID EXPECTED_COUNT [TIMEOUT_SECONDS]
+# assert_tl_identity_audit IDENTITY_ID EXPECTED_COUNT [TIMEOUT_SECONDS]
 #
-# Sibling of poll_tl_audit for the identity stream: polls
-# /v1/identities/{identityId}/audit until it shows at least
-# EXPECTED_COUNT events with Merkle proofs.
-poll_tl_identity_audit() {
-  local identity_id="$1" expected="$2" timeout="${3:-30}"
-  local i=0 count withproof
+# Sibling of poll_tl_audit for the identity stream — with ONE crucial
+# difference: the RECORD COUNT is asserted on the very first read, no
+# polling. Identity operations are seal-before-success (design
+# §5.6.1): the RA reports success only after the TL acknowledges the
+# seal, so the events MUST already be in the log the moment the API
+# returned — a missing record here is a seal-before-success
+# regression, not a timing flake. Merkle INCLUSION PROOFS are the one
+# thing allowed to lag: proofs are built against the latest published
+# checkpoint, and checkpoint publication is cadence-based (one root,
+# one cadence — unchanged by this design), so proof coverage alone is
+# polled briefly.
+assert_tl_identity_audit() {
+  local identity_id="$1" expected="$2" timeout="${3:-15}"
+  local resp count withproof
+  resp=$(curl -sSf -H "Authorization: Bearer $TL_API_KEY" \
+    "$TL_URL/v1/identities/$identity_id/audit" 2>/dev/null || true)
+  count=$(printf '%s' "$resp" | jq -r '(.records | length) // 0')
+  if [ "${count:-0}" -lt "$expected" ]; then
+    fail "seal-before-success violated for identity $identity_id: audit shows ${count:-0} records immediately after the API returned; want $expected"
+  fi
+  local i=0
   while [ "$i" -lt "$timeout" ]; do
-    local resp
-    resp=$(curl -sSf -H "Authorization: Bearer $TL_API_KEY" \
-      "$TL_URL/v1/identities/$identity_id/audit" 2>/dev/null || true)
-    count=$(printf '%s' "$resp" | jq -r '(.records | length) // 0')
     withproof=$(printf '%s' "$resp" | jq -r '[.records[]? | select(.merkleProof)] | length // 0')
-    if [ "${count:-0}" -ge "$expected" ] && [ "${withproof:-0}" -ge "$expected" ]; then
+    if [ "${withproof:-0}" -ge "$expected" ]; then
       return 0
     fi
     sleep 1
     i=$((i + 1))
+    resp=$(curl -sSf -H "Authorization: Bearer $TL_API_KEY" \
+      "$TL_URL/v1/identities/$identity_id/audit" 2>/dev/null || true)
   done
-  fail "TL not ready for identity $identity_id in ${timeout}s (records=${count:-0}, with merkle proof=${withproof:-0}; want $expected of each)"
+  fail "checkpoint never covered identity $identity_id's leaves in ${timeout}s (records=${count}, with proof=${withproof:-0}; want $expected)"
 }
 
 # wait_ready URL [TIMEOUT_SECONDS]
