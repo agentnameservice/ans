@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -62,6 +63,41 @@ type ProofSubmission struct {
 	// and the future did:plc / did:ion): one compact JWS per proven
 	// key, every payload equal to the served signingInput verbatim.
 	SignedProofs []string
+	// CESRSignature is the lei (vLEI) proof: one CESR signature over
+	// the served signingInput, produced by the subject AID's current
+	// signing key. Set only for lei; the JWS kinds ignore it.
+	CESRSignature string
+}
+
+// RegisterOptions carries the additive, per-kind material a register
+// (or rotate) call may need beyond the identifier value. It is empty
+// for kinds with no register-time presentation (did:web, did:key);
+// lei populates VLEIPresentation. Additive by design — a new kind adds
+// a member here, existing callers pass the zero value.
+type RegisterOptions struct {
+	// VLEIPresentation is the lei full-chain CESR export submitted to
+	// the vlei-verifier at register time (the credential + KELs). The
+	// verifier derives the subject AID from it; the caller never
+	// asserts the AID.
+	VLEIPresentation string
+}
+
+// presentationRegistrar is the optional capability a kind implements
+// when it carries credential material at REGISTER time (lei's vLEI
+// presentation). The service discovers it by type-assertion on the
+// kind's controlVerifier — the same discover-by-capability pattern the
+// 202 response uses for presentationStatus — so kinds with no
+// register-time presentation (did:web, did:key) never grow a dead
+// method. RegisterPresentation runs inside the shared challenge path,
+// so an idempotent re-add (and a rotation) re-presents and refreshes
+// the verifier's authorization window for free.
+type presentationRegistrar interface {
+	// RegisterPresentation submits the kind's register-time credential
+	// material to its verifier, pins the derived subject identifier on
+	// the aggregate, reconciles it against the requested value, and
+	// returns the advisory presentation status ("AUTHORIZED" |
+	// "PENDING") for the 202 body.
+	RegisterPresentation(ctx context.Context, identity *domain.VerifiedIdentity, opts RegisterOptions, now time.Time) (string, error)
 }
 
 // controlVerifier is the per-kind control-proof gate — the design's
@@ -86,14 +122,16 @@ type controlVerifier interface {
 // did:ion, and did:ethr slot in here when their verifiers are real;
 // until then domain.InferIdentifierKind may recognize a value's form
 // but the missing registry entry yields IDENTIFIER_KIND_UNSUPPORTED.
-func newControlVerifiers(resolver port.DIDResolver) map[domain.IdentifierKind]controlVerifier {
+func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifier) map[domain.IdentifierKind]controlVerifier {
 	// NOTE: deliberately NOT exhaustive over IdentifierKind — a
-	// recognized-but-absent kind (lei, until its vlei-verifier
-	// integration ships) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
-	// rather than register a stub. The 404-is-the-signal rule.
-	return map[domain.IdentifierKind]controlVerifier{ //nolint:exhaustive // absence == kind not enabled, by design
+	// recognized-but-absent kind (did:plc, did:ion, did:ethr, until
+	// their verifiers ship) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
+	// rather than register a stub. The 404-is-the-signal rule. lei
+	// now registers — its noop adapter is the zero-infra quickstart.
+	return map[domain.IdentifierKind]controlVerifier{
 		domain.KindDIDWeb: &didWebVerifier{resolver: resolver},
 		domain.KindDIDKey: &didKeyVerifier{},
+		domain.KindLEI:    &leiVerifier{v: leiCtl},
 	}
 }
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/godaddy/ans/internal/adapter/didresolver"
 	"github.com/godaddy/ans/internal/adapter/keymanager"
+	"github.com/godaddy/ans/internal/adapter/leiverifier"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -105,8 +106,15 @@ type fakeClock struct{ now time.Time }
 func (c *fakeClock) Now() time.Time { return c.now }
 
 // newIdentityFixture wires the service against real SQLite + the
-// given resolver (nil → noop).
+// given resolver (nil → noop), with the noop lei verifier.
 func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixture {
+	return newIdentityFixtureWithLEI(t, resolver, leiverifier.NewNoop())
+}
+
+// newIdentityFixtureWithLEI is newIdentityFixture with an injectable lei
+// control verifier — the lei lane tests drive a programmable fake to
+// reach every failure code deterministically.
+func newIdentityFixtureWithLEI(t *testing.T, resolver port.DIDResolver, lei port.LEIControlVerifier) *identityFixture {
 	t.Helper()
 	db, err := sqlite.Open(context.Background(), ":memory:")
 	if err != nil {
@@ -137,6 +145,7 @@ func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixtur
 		sqlite.NewAgentStore(db),
 		resolver,
 		sealer,
+		lei,
 		db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
@@ -325,10 +334,11 @@ func TestIdentityRegister_Rejections(t *testing.T) {
 		!strings.Contains(err.Error(), "IDENTIFIER_KIND_UNSUPPORTED") {
 		t.Errorf("bogus value: %v", err)
 	}
-	// lei is recognized but postponed.
+	// lei is now enabled: a register with no presentation fails on the
+	// missing CESR, not on the kind being unsupported.
 	if _, err := fx.svc.Register(ctx, fx.providerID, "5493001KJTIIGC8Y1R17"); err == nil ||
-		!strings.Contains(err.Error(), "IDENTIFIER_KIND_UNSUPPORTED") {
-		t.Errorf("lei: %v", err)
+		!strings.Contains(err.Error(), "IDENTIFIER_PRESENTATION_REQUIRED") {
+		t.Errorf("lei without presentation: %v", err)
 	}
 }
 
@@ -1422,6 +1432,7 @@ func TestNilSealerFailsClosed(t *testing.T) {
 		sqlite.NewAgentStore(db),
 		didresolver.NewNoopResolver(),
 		nil, // no sealer
+		leiverifier.NewNoop(),
 		db,
 	)
 	ctx := context.Background()

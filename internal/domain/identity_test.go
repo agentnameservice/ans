@@ -308,3 +308,29 @@ func TestInferIdentifierKind_DIDWebSegmentRejections(t *testing.T) {
 		t.Fatalf("multi-segment: %v %v %v", kind, canonical, err)
 	}
 }
+
+func TestSetSubjectAID(t *testing.T) {
+	v := newPendingIdentity(t, "5493001KJTIIGC8Y1R17")
+
+	// Empty AID is rejected and mutates nothing.
+	err := v.SetSubjectAID("", idNow)
+	var domainErr *Error
+	if !errors.As(err, &domainErr) || domainErr.Code != "LEI_PRESENTATION_INVALID" {
+		t.Fatalf("want LEI_PRESENTATION_INVALID, got %v", err)
+	}
+	if v.SubjectAID != "" {
+		t.Fatalf("subject AID should remain unset, got %q", v.SubjectAID)
+	}
+
+	// A non-empty AID pins the field and stamps UpdatedAt.
+	later := idNow.Add(time.Minute)
+	if err := v.SetSubjectAID("EAID123", later); err != nil {
+		t.Fatalf("SetSubjectAID: %v", err)
+	}
+	if v.SubjectAID != "EAID123" {
+		t.Fatalf("subject AID = %q, want EAID123", v.SubjectAID)
+	}
+	if !v.UpdatedAt.Equal(later.UTC()) {
+		t.Fatalf("UpdatedAt = %v, want %v", v.UpdatedAt, later.UTC())
+	}
+}

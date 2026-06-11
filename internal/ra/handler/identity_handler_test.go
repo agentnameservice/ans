@@ -26,6 +26,7 @@ import (
 	"github.com/godaddy/ans/internal/adapter/cert"
 	"github.com/godaddy/ans/internal/adapter/didresolver"
 	"github.com/godaddy/ans/internal/adapter/eventbus"
+	"github.com/godaddy/ans/internal/adapter/leiverifier"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -87,6 +88,8 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 		agents,
 		didresolver.NewNoopResolver(),
 		okSealer{},
+		leiverifier.NewNoop(),
+		outbox,
 		db,
 	).WithChallengeTTL(30 * time.Minute)
 

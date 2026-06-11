@@ -92,6 +92,13 @@ type VerifiedIdentity struct {
 	// (§4.2): set by StageRotation, applied by CompleteVerification.
 	// While staged, the previously sealed state stands.
 	PendingValue string
+	// SubjectAID is the lei (vLEI) holder AID the verifier extracted
+	// from the presentation at register time and the RA pinned on the
+	// aggregate — the signer the verify-control proof is checked
+	// against (§3.6 pinning rule; the caller never re-supplies it).
+	// Empty for kinds with no register-time presentation (did:web,
+	// did:key).
+	SubjectAID string
 	// Challenge is the live anti-replay nonce, if any.
 	Challenge  *IdentityChallenge
 	VerifiedAt time.Time // zero until first proof
@@ -381,6 +388,18 @@ func (v *VerifiedIdentity) StageRotation(rawValue string, now time.Time) error {
 			fmt.Sprintf("cannot rotate a %s identity to %s; revoke and register a new identity", v.Kind, kind))
 	}
 	v.PendingValue = canonical
+	v.UpdatedAt = now.UTC()
+	return nil
+}
+
+// SetSubjectAID pins the lei holder AID the verifier derived from the
+// presentation (§3.6). Rejects an empty AID — pinning a blank signer
+// would let any key satisfy verify-control.
+func (v *VerifiedIdentity) SetSubjectAID(aid string, now time.Time) error {
+	if aid == "" {
+		return NewValidationError("LEI_PRESENTATION_INVALID", "subject AID is required")
+	}
+	v.SubjectAID = aid
 	v.UpdatedAt = now.UTC()
 	return nil
 }

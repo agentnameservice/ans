@@ -25,6 +25,7 @@ type identityRow struct {
 	Status                string         `db:"status"`
 	ProofMethod           string         `db:"proof_method"`
 	PendingValue          string         `db:"pending_value"`
+	SubjectAID            sql.NullString `db:"subject_aid"`
 	ChallengeNonce        sql.NullString `db:"challenge_nonce"`
 	ChallengeExpiresAtMs  sql.NullInt64  `db:"challenge_expires_at_ms"`
 	ChallengeConsumedAtMs sql.NullInt64  `db:"challenge_consumed_at_ms"`
@@ -34,7 +35,7 @@ type identityRow struct {
 }
 
 const identityCols = `identity_id, provider_id, kind, value, status, proof_method,
-       pending_value, challenge_nonce, challenge_expires_at_ms,
+       pending_value, subject_aid, challenge_nonce, challenge_expires_at_ms,
        challenge_consumed_at_ms, verified_at_ms, created_at_ms, updated_at_ms`
 
 func (r identityRow) toDomain() *domain.VerifiedIdentity {
@@ -46,6 +47,7 @@ func (r identityRow) toDomain() *domain.VerifiedIdentity {
 		Status:       domain.IdentityStatus(r.Status),
 		ProofMethod:  r.ProofMethod,
 		PendingValue: r.PendingValue,
+		SubjectAID:   r.SubjectAID.String,
 		CreatedAt:    msToTime(r.CreatedAtMs),
 		UpdatedAt:    msToTime(r.UpdatedAtMs),
 	}
@@ -85,14 +87,19 @@ func (s *IdentityStore) Save(ctx context.Context, v *domain.VerifiedIdentity) er
 	if !v.VerifiedAt.IsZero() {
 		verifiedAt = sql.NullInt64{Int64: v.VerifiedAt.UnixMilli(), Valid: true}
 	}
+	var subjectAID sql.NullString
+	if v.SubjectAID != "" {
+		subjectAID = sql.NullString{String: v.SubjectAID, Valid: true}
+	}
 	const q = `
         INSERT INTO identities (` + identityCols + `)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(identity_id) DO UPDATE SET
             value                    = excluded.value,
             status                   = excluded.status,
             proof_method             = excluded.proof_method,
             pending_value            = excluded.pending_value,
+            subject_aid              = excluded.subject_aid,
             challenge_nonce          = excluded.challenge_nonce,
             challenge_expires_at_ms  = excluded.challenge_expires_at_ms,
             challenge_consumed_at_ms = excluded.challenge_consumed_at_ms,
@@ -106,7 +113,7 @@ func (s *IdentityStore) Save(ctx context.Context, v *domain.VerifiedIdentity) er
             updated_at_ms            = excluded.updated_at_ms`
 	_, err := s.db.extx(ctx).ExecContext(ctx, q,
 		v.IdentityID, v.ProviderID, string(v.Kind), v.Value, string(v.Status),
-		v.ProofMethod, v.PendingValue,
+		v.ProofMethod, v.PendingValue, subjectAID,
 		nonce, expiresAt, consumedAt, verifiedAt,
 		v.CreatedAt.UnixMilli(), v.UpdatedAt.UnixMilli(),
 	)

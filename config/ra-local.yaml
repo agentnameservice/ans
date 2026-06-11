@@ -77,6 +77,27 @@ identity:
   # minute (each can trigger an outbound did:web fetch).
   register-rate-limit: 10
 
+vlei:
+  # The lei (vLEI) control verifier behind the `lei` identifier kind,
+  # mirroring the DNS verifier's and did:web resolver's noop/real split:
+  #   "noop"     — no I/O; runs REAL Ed25519 crypto over the served
+  #                signingInput, but waives the GLEIF/vlei-verifier
+  #                authorization binding (anyone can present any LEI).
+  #                Zero-infra quickstart only — NOT for production.
+  #   "verifier" — a hardened HTTP client for an internal GLEIF
+  #                vlei-verifier (present / authorize / verify). The RA
+  #                never parses KERI key state itself; the verifier is
+  #                the authoritative key-state oracle. REQUIRED for the
+  #                real end-to-end flow that scripts/demo/vlei/up.sh
+  #                brings up (keria, vlei-server, vlei-verifier,
+  #                witnesses, signify).
+  type: noop
+  # base-url: required when type is "verifier" — the internal
+  # vlei-verifier service URL.
+  # base-url: "http://localhost:7676"
+  # present-timeout bounds each verifier HTTP request (default 5s).
+  # present-timeout: 5s
+
 keys:
   type: file
   file:
