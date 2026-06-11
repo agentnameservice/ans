@@ -262,32 +262,71 @@ func (h *Handlers) GetBadge(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.identityBadge != nil {
-		identities, jerr := h.identityBadge.LinkedIdentitiesForAgent(r.Context(), agentID)
+		identities, jerr := h.identityBadge.LinkedIdentitiesForAgent(r.Context(), agentID, tl.Status)
 		if jerr != nil {
-			writeError(w, jerr)
-			return
+			// Join failure is explicit, never silent (§5.6.3): the
+			// badge still serves the agent's sealed material; the
+			// flag says the identities view could not be computed —
+			// an empty identities[] always means "no visible links".
+			tl.IdentitiesUnavailable = true
+		} else {
+			tl.IdentitiesTotal = len(identities)
+			if len(identities) > badgeIdentitiesCap {
+				identities = identities[:badgeIdentitiesCap]
+			}
+			tl.Identities = identities
 		}
-		tl.Identities = identities
 	}
 	writeJSON(w, http.StatusOK, tl)
 }
 
+// badgeIdentitiesCap bounds the badge's embedded identities[] —
+// identities-per-agent is realistically tiny, and the standalone
+// paginated /v1/agents/{agentId}/identities route is the overflow
+// target (§5.6.1). identitiesTotal always carries the full count.
+const badgeIdentitiesCap = 25
+
 // GetAgentIdentities handles GET /v1/agents/{agentId}/identities —
 // the computed list of identities currently linked to the agent.
 // Identical entries to the badge's identities[] field, served alone
-// for callers who don't need the full badge.
+// and paginated (TL limit/offset convention) — the overflow target
+// for the badge's embedded cap.
 func (h *Handlers) GetAgentIdentities(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	if agentID == "" {
 		writeError(w, domain.NewValidationError("MISSING_AGENT_ID", "agentId is required"))
 		return
 	}
-	identities, err := h.identityBadge.LinkedIdentitiesForAgent(r.Context(), agentID)
+	// The agent's computed status is the liveness conjunct of the
+	// visibility predicate — and resolving it 404s unknown agents,
+	// parity with the badge route.
+	agentTL, err := h.badge.Get(r.Context(), agentID)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"identities": identities})
+	identities, err := h.identityBadge.LinkedIdentitiesForAgent(r.Context(), agentID, agentTL.Status)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	limit, offset := parsePagination(r)
+	total := len(identities)
+	identities = paginateIdentityViews(identities, limit, offset)
+	writeJSON(w, http.StatusOK, map[string]any{"identities": identities, "total": total})
+}
+
+// paginateIdentityViews applies the TL limit/offset convention to a
+// computed (already fully materialized) view slice.
+func paginateIdentityViews[T any](views []T, limit, offset int) []T {
+	if offset >= len(views) {
+		return []T{}
+	}
+	views = views[offset:]
+	if limit > 0 && limit < len(views) {
+		views = views[:limit]
+	}
+	return views
 }
 
 // GetAgentIdentityHistory handles
@@ -395,7 +434,12 @@ func (h *Handlers) GetIdentityAgents(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"agents": agents})
+	// Paginated (TL limit/offset convention): the reverse join is the
+	// genuinely unbounded read — an identity links to unlimited agents.
+	limit, offset := parsePagination(r)
+	total := len(agents)
+	agents = paginateIdentityViews(agents, limit, offset)
+	writeJSON(w, http.StatusOK, map[string]any{"agents": agents, "total": total})
 }
 
 // GetAudit handles GET /v1/agents/{agentId}/audit. Matches the
@@ -650,7 +694,14 @@ func writeJSON(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	if body != nil {
-		_ = json.NewEncoder(w).Encode(body)
+		enc := json.NewEncoder(w)
+		// The TL serves SEALED bytes quoted verbatim (keys[], the
+		// echoed payload): Go's default HTML escaping would rewrite
+		// &, <, > inside json.RawMessage, breaking the byte-verbatim
+		// contract a verifier byte-compares against the seal. This
+		// is a pure-JSON API — HTML escaping protects nothing here.
+		enc.SetEscapeHTML(false)
+		_ = enc.Encode(body)
 	}
 }
 

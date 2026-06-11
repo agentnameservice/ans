@@ -311,6 +311,13 @@ func (s *LogService) LatestProofByIdentity(ctx context.Context, identityID strin
 	return s.events.GetLatestProofByIdentityID(ctx, identityID)
 }
 
+// IdentityRevoked reports whether the identity's stream contains an
+// IDENTITY_REVOKED event — the terminal read-time rule (§5.6.3):
+// once revoked, no later leaf changes the answer.
+func (s *LogService) IdentityRevoked(ctx context.Context, identityID string) (bool, error) {
+	return s.events.HasIdentityRevoked(ctx, identityID)
+}
+
 // LinkStatesByAgent returns the latest link/unlink fact per identity
 // that ever named this agent.
 func (s *LogService) LinkStatesByAgent(ctx context.Context, ansID string) ([]*sqlitetl.LinkState, error) {

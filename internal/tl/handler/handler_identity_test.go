@@ -22,7 +22,7 @@ const testIdentityID = "01HXKQTESTIDENTITY0000000A"
 // keyed to the testbed's identity fixture. timestamps vary per call
 // site so dedup never collides across events in one test; proof
 // events name their verification method by the given kid so the
-// read-join's provenKeyIds visibly flips on rotation.
+// read-join's quoted keys[] visibly flip on rotation.
 func identityInner(typ identityevent.Type, ts string, ansIDs []string, kid string) identityevent.Event {
 	ev := identityevent.Event{
 		EventType:  typ,
@@ -79,16 +79,29 @@ type badgeView struct {
 	SchemaVersion string `json:"schemaVersion"`
 	Status        string `json:"status"`
 	Signature     string `json:"signature"`
-	Identities    []struct {
-		IdentityID     string   `json:"identityId"`
-		Kind           string   `json:"kind"`
-		Value          string   `json:"value"`
-		IdentityStatus string   `json:"identityStatus"`
-		ProvenKeyIDs   []string `json:"provenKeyIds"`
-		LinkedAt       string   `json:"linkedAt"`
-		LinkLogID      string   `json:"linkLogId"`
-		IdentityLogID  string   `json:"identityLogId"`
+
+	// Identity badge only: the computed current attestation.
+	Keys      []verificationMethodView `json:"keys"`
+	KeysLogID string                   `json:"keysLogId"`
+
+	IdentitiesTotal       int  `json:"identitiesTotal"`
+	IdentitiesUnavailable bool `json:"identitiesUnavailable"`
+	Identities            []struct {
+		IdentityID     string                   `json:"identityId"`
+		Kind           string                   `json:"kind"`
+		Value          string                   `json:"value"`
+		IdentityStatus string                   `json:"identityStatus"`
+		Keys           []verificationMethodView `json:"keys"`
+		KeysLogID      string                   `json:"keysLogId"`
+		LinkedAt       string                   `json:"linkedAt"`
+		LinkLogID      string                   `json:"linkLogId"`
 	} `json:"identities"`
+}
+
+// verificationMethodView decodes the id member of a quoted verbatim
+// verification method — enough to assert which key is attested.
+type verificationMethodView struct {
+	ID string `json:"id"`
 }
 
 // auditView decodes the subset of audit responses the stages assert
@@ -141,6 +154,11 @@ func stageVerify(t *testing.T, tb *tlTestbed, agentID string) {
 	if idBadge.SchemaVersion != "V2" || idBadge.Signature == "" {
 		t.Fatalf("identity badge missing schema/attestation: %+v", idBadge)
 	}
+	// Computed current attestation (§5.6.3): the badge quotes the
+	// proven keys + the seal they came from.
+	if len(idBadge.Keys) != 1 || idBadge.Keys[0].ID != "did:web:identity.acme-corp.com#key-1" || idBadge.KeysLogID == "" {
+		t.Fatalf("identity badge keys quote: %+v", idBadge)
+	}
 
 	var agentBadge badgeView
 	if code := getJSON(t, tb, "/v1/agents/"+agentID, &agentBadge); code != http.StatusOK {
@@ -170,22 +188,33 @@ func stageLink(t *testing.T, tb *tlTestbed, agentID string) {
 		got.Kind != "did:web" || got.Value != "did:web:identity.acme-corp.com" {
 		t.Fatalf("join entry wrong: %+v", got)
 	}
-	if len(got.ProvenKeyIDs) != 1 || got.ProvenKeyIDs[0] != "did:web:identity.acme-corp.com#key-1" {
-		t.Fatalf("provenKeyIds = %v", got.ProvenKeyIDs)
+	if len(got.Keys) != 1 || got.Keys[0].ID != "did:web:identity.acme-corp.com#key-1" || got.KeysLogID == "" {
+		t.Fatalf("quoted keys = %+v", got)
 	}
-	if got.LinkedAt != "2026-06-10T11:00:00Z" || got.LinkLogID == "" || got.IdentityLogID == "" {
+	if got.LinkedAt != "2026-06-10T11:00:00Z" || got.LinkLogID == "" {
 		t.Fatalf("link evidence fields missing: %+v", got)
 	}
+	if agentBadge.IdentitiesTotal != 1 {
+		t.Fatalf("identitiesTotal = %d, want 1", agentBadge.IdentitiesTotal)
+	}
 
-	// The standalone computed view matches the badge join.
+	// The standalone computed view matches the badge join — and is
+	// paginated with a total (the badge-cap overflow target).
 	var identitiesResp struct {
 		Identities []json.RawMessage `json:"identities"`
+		Total      int               `json:"total"`
 	}
 	if code := getJSON(t, tb, "/v1/agents/"+agentID+"/identities", &identitiesResp); code != http.StatusOK {
 		t.Fatalf("agent identities view: %d", code)
 	}
-	if len(identitiesResp.Identities) != 1 {
-		t.Fatalf("agent identities view count = %d", len(identitiesResp.Identities))
+	if len(identitiesResp.Identities) != 1 || identitiesResp.Total != 1 {
+		t.Fatalf("agent identities view: %d of %d", len(identitiesResp.Identities), identitiesResp.Total)
+	}
+	if code := getJSON(t, tb, "/v1/agents/"+agentID+"/identities?limit=1&offset=1", &identitiesResp); code != http.StatusOK {
+		t.Fatalf("paged identities view: %d", code)
+	}
+	if len(identitiesResp.Identities) != 0 || identitiesResp.Total != 1 {
+		t.Fatalf("offset page must be empty with total intact: %d of %d", len(identitiesResp.Identities), identitiesResp.Total)
 	}
 
 	// Reverse join: identity → agents, with the agent's own status.
@@ -203,6 +232,13 @@ func stageLink(t *testing.T, tb *tlTestbed, agentID string) {
 		agentsResp.Agents[0].AgentStatus != "ACTIVE" {
 		t.Fatalf("reverse join: %+v", agentsResp.Agents)
 	}
+	// Reverse join is paginated too (the genuinely unbounded read).
+	if code := getJSON(t, tb, "/v1/identities/"+testIdentityID+"/agents?limit=1&offset=1", &agentsResp); code != http.StatusOK {
+		t.Fatalf("paged reverse join: %d", code)
+	}
+	if len(agentsResp.Agents) != 0 {
+		t.Fatalf("offset page of reverse join must be empty: %+v", agentsResp.Agents)
+	}
 }
 
 // stageRotate seals IDENTITY_UPDATED and checks the proven-key flip
@@ -216,8 +252,8 @@ func stageRotate(t *testing.T, tb *tlTestbed, agentID string) {
 	if code := getJSON(t, tb, "/v1/agents/"+agentID, &agentBadge); code != http.StatusOK {
 		t.Fatalf("agent badge after rotation: %d", code)
 	}
-	if ids := agentBadge.Identities[0].ProvenKeyIDs; len(ids) != 1 || ids[0] != "did:web:identity.acme-corp.com#key-2" {
-		t.Fatalf("rotation not visible on linked badge: %v", ids)
+	if keys := agentBadge.Identities[0].Keys; len(keys) != 1 || keys[0].ID != "did:web:identity.acme-corp.com#key-2" {
+		t.Fatalf("rotation not visible on linked badge: %+v", keys)
 	}
 
 	// The agent's own audit history stays purely AGENT_* — identity
@@ -239,6 +275,14 @@ func stageRotate(t *testing.T, tb *tlTestbed, agentID string) {
 	}
 	if audit.Records[0].Payload.Producer.Event.EventType != "IDENTITY_UPDATED" {
 		t.Fatalf("identity audit order: %+v", audit.Records[0])
+	}
+	// Pagination clamps apply on the audit too (newest-first: offset 1
+	// of the 3-event chain is the IDENTITY_LINKED leaf).
+	if code := getJSON(t, tb, "/v1/identities/"+testIdentityID+"/audit?limit=1&offset=1", &audit); code != http.StatusOK {
+		t.Fatalf("paged identity audit: %d", code)
+	}
+	if len(audit.Records) != 1 || audit.Records[0].Payload.Producer.Event.EventType != "IDENTITY_LINKED" {
+		t.Fatalf("paged identity audit: %+v", audit.Records)
 	}
 
 	// Association history for the agent: the standard audit envelope
@@ -272,6 +316,14 @@ func stageRevoke(t *testing.T, tb *tlTestbed, agentID string) {
 	if len(agentBadge.Identities) != 1 || agentBadge.Identities[0].IdentityStatus != "REVOKED" {
 		t.Fatalf("revocation not visible on linked badge: %+v", agentBadge.Identities)
 	}
+	// Visibility ≠ attestation (§5.6.3): the entry stays — a verifier
+	// must SEE the revocation — but the keys are withheld.
+	if len(agentBadge.Identities[0].Keys) != 0 || agentBadge.Identities[0].KeysLogID != "" {
+		t.Fatalf("revoked identity must carry no attested keys: %+v", agentBadge.Identities[0])
+	}
+	if len(idBadge.Keys) != 0 || idBadge.KeysLogID != "" {
+		t.Fatalf("revoked identity badge must carry no keys quote: %+v", idBadge)
+	}
 	// The agent itself is untouched (the what survives the who's
 	// revocation, and vice versa).
 	if agentBadge.Status != "ACTIVE" {
@@ -292,6 +344,20 @@ func stageUnlink(t *testing.T, tb *tlTestbed, agentID string) {
 	}
 	if len(unlinkedBadge.Identities) != 0 {
 		t.Fatalf("identities after unlink: %+v", unlinkedBadge.Identities)
+	}
+	// REVOKED is terminal at read time: this unlink leaf landed AFTER
+	// the revocation, and the identity badge must NOT flip back to
+	// VERIFIED on latest-event-wins — a late leaf can never resurrect
+	// a revoked identity (nor re-attach its keys).
+	var idBadge badgeView
+	if code := getJSON(t, tb, "/v1/identities/"+testIdentityID, &idBadge); code != http.StatusOK {
+		t.Fatalf("identity badge after post-revoke leaf: %d", code)
+	}
+	if idBadge.Status != "REVOKED" {
+		t.Fatalf("post-revoke leaf resurrected the identity: status=%q", idBadge.Status)
+	}
+	if len(idBadge.Keys) != 0 || idBadge.KeysLogID != "" {
+		t.Fatalf("post-revoke leaf re-attached keys: %+v", idBadge)
 	}
 	var audit auditView
 	if code := getJSON(t, tb, "/v1/agents/"+agentID+"/identities/history", &audit); code != http.StatusOK {
@@ -403,5 +469,74 @@ func TestIdentityReads_NotFound(t *testing.T) {
 	}
 	if code := getJSON(t, tb, "/v1/identities/unknown-id/audit", &audit); code != http.StatusOK || len(audit.Records) != 0 {
 		t.Errorf("unknown identity audit: code=%d records=%d", code, len(audit.Records))
+	}
+}
+
+// TestAgentLivenessConjunct pins the §5.6.3 visibility predicate's
+// agent leg on the TL: once the agent's stream goes terminal
+// (AGENT_REVOKED), its identities[] views empty out — the link
+// history stays recoverable — while the identity itself is untouched.
+func TestAgentLivenessConjunct(t *testing.T) {
+	tb := newTLTestbed(t)
+
+	agentBody := []byte(mustJSON(t, tb.inner))
+	tb.postEvent(t, agentBody, tb.signWithProducer(t, agentBody))
+	agentID := tb.inner.AnsID
+
+	postIdentityEvent(t, tb,
+		identityInner(identityevent.TypeIdentityVerified, "2026-06-10T10:00:00Z", nil, "did:web:identity.acme-corp.com#key-1"))
+	postIdentityEvent(t, tb,
+		identityInner(identityevent.TypeIdentityLinked, "2026-06-10T11:00:00Z", []string{agentID}, ""))
+
+	var badge badgeView
+	if code := getJSON(t, tb, "/v1/agents/"+agentID, &badge); code != http.StatusOK {
+		t.Fatalf("badge: %d", code)
+	}
+	if len(badge.Identities) != 1 {
+		t.Fatalf("pre-revoke identities: %+v", badge.Identities)
+	}
+
+	// Terminal agent event → the agent leg of the predicate fails.
+	revoked := tb.inner
+	revoked.EventType = "AGENT_REVOKED"
+	revoked.IssuedAt = "2026-06-10T12:00:00Z"
+	revBody := []byte(mustJSON(t, revoked))
+	tb.postEvent(t, revBody, tb.signWithProducer(t, revBody))
+
+	// Fresh struct: omitted fields (identities, identitiesTotal) must
+	// not inherit the pre-revoke read's values.
+	var afterBadge badgeView
+	if code := getJSON(t, tb, "/v1/agents/"+agentID, &afterBadge); code != http.StatusOK {
+		t.Fatalf("badge after agent revoke: %d", code)
+	}
+	if afterBadge.Status != "REVOKED" || len(afterBadge.Identities) != 0 || afterBadge.IdentitiesTotal != 0 {
+		t.Fatalf("terminal agent must show no identities: status=%s %+v total=%d",
+			afterBadge.Status, afterBadge.Identities, afterBadge.IdentitiesTotal)
+	}
+	// Reverse join drops the terminal agent too.
+	var agentsResp struct {
+		Agents []json.RawMessage `json:"agents"`
+	}
+	if code := getJSON(t, tb, "/v1/identities/"+testIdentityID+"/agents", &agentsResp); code != http.StatusOK {
+		t.Fatalf("reverse join after agent revoke: %d", code)
+	}
+	if len(agentsResp.Agents) != 0 {
+		t.Fatalf("terminal agent must drop from the reverse join: %+v", agentsResp.Agents)
+	}
+	// The identity itself is untouched (the who survives the what).
+	var idBadge badgeView
+	if code := getJSON(t, tb, "/v1/identities/"+testIdentityID, &idBadge); code != http.StatusOK {
+		t.Fatalf("identity badge: %d", code)
+	}
+	if idBadge.Status != "VERIFIED" || len(idBadge.Keys) != 1 {
+		t.Fatalf("identity must stay VERIFIED with keys: %+v", idBadge)
+	}
+	// History keeps the link evidence.
+	var audit auditView
+	if code := getJSON(t, tb, "/v1/agents/"+agentID+"/identities/history", &audit); code != http.StatusOK {
+		t.Fatalf("history: %d", code)
+	}
+	if len(audit.Records) != 1 {
+		t.Fatalf("history must keep the link: %+v", audit.Records)
 	}
 }

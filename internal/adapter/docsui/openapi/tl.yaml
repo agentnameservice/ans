@@ -332,11 +332,21 @@ paths:
       summary: Identity badge
       description: |
         The latest sealed identity event + inclusion proof + computed
-        status (`VERIFIED` | `REVOKED`). The proof events seal every
-        proven key self-verifyingly: any third party reads the key
-        out of the sealed verbatim `verificationMethod`, verifies the
-        sealed `signedProof` against it, and confirms the payload
-        binds this identityId — offline, without trusting the RA.
+        `{status, keys[], keysLogId}`: the latest entry may be a
+        link/unlink/revocation carrying no key material, so the badge
+        quotes the CURRENT proven key set verbatim from the latest
+        sealed proof event, with `keysLogId` pointing at that seal
+        (omitted when REVOKED — the keys are no longer attested).
+
+        Third-party verification is byte-recompute, not
+        parse-and-inspect: verify the sealed `signedProof` JWS
+        against the key inside the sealed `verificationMethod`; take
+        the nonce from the decoded payload; reconstruct the
+        IdentityProofInput from the sealed event plus that nonce;
+        JCS-serialize; and require the JWS payload segment to equal
+        those bytes verbatim. Verifiers MUST reject a JWS bearing
+        unrecognized `crit` headers (RFC 7515 §4.1.11). All offline,
+        without trusting the RA.
       operationId: getIdentityBadge
       parameters:
         - $ref: '#/components/parameters/IdentityIdPath'
@@ -425,13 +435,23 @@ paths:
       tags: [Transparency Log]
       summary: Agents currently linked to the identity (reverse join)
       description: |
-        Computed at query time from the link events' agent index:
-        every agent whose latest link/unlink fact naming it is
-        LINKED, each decorated with its own computed badge status so
-        a reader checks both ends of the link in one response.
+        Computed at query time from the link events' agent index
+        under the visibility predicate: every agent whose latest
+        link/unlink fact naming it is LINKED and whose own computed
+        status is live, decorated with that status. Paginated — the
+        reverse join is the genuinely unbounded read (an identity
+        links to unlimited agents).
       operationId: getIdentityAgents
       parameters:
         - $ref: '#/components/parameters/IdentityIdPath'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
       responses:
         '200':
           description: Currently-linked agents.
@@ -439,12 +459,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [agents]
+                required: [agents, total]
                 properties:
                   agents:
                     type: array
                     items:
                       $ref: '#/components/schemas/LinkedAgentView'
+                  total:
+                    type: integer
+                    description: Full visible-link count across all pages
         '404':
           description: No events for this identity.
           content:
@@ -458,11 +481,22 @@ paths:
       summary: Identities currently linked to the agent (computed)
       description: |
         The same entries as the agent badge's `identities[]` field,
-        served alone. Computed at read time — link live ∧ identity
-        stream state — never stored on, or sealed into, the agent.
+        served alone and paginated — the overflow target for the
+        badge's embedded safety cap. Computed at read time under the
+        visibility predicate (link LINKED ∧ agent live; a REVOKED
+        identity stays visible with no keys) — never stored on, or
+        sealed into, the agent.
       operationId: getAgentIdentities
       parameters:
         - $ref: '#/components/parameters/AgentIdPath'
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 50, minimum: 1, maximum: 200 }
+        - name: offset
+          in: query
+          required: false
+          schema: { type: integer, default: 0, minimum: 0 }
       responses:
         '200':
           description: Currently-linked identities.
@@ -470,12 +504,15 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [identities]
+                required: [identities, total]
                 properties:
                   identities:
                     type: array
                     items:
                       $ref: '#/components/schemas/LinkedIdentityView'
+                  total:
+                    type: integer
+                    description: Full visible-link count across all pages
 
   /v1/agents/{agentId}/identities/history:
     get:
@@ -1030,12 +1067,49 @@ components:
           type: array
           description: |
             Agent badges only — the COMPUTED read-time join of the
-            agent's currently-linked verified identities. Covered by
-            the TL's response signature, never by any seal; identity
-            rotation/revocation is visible here immediately with
-            zero agent-stream writes.
+            agent's currently-linked verified identities, under the
+            visibility predicate (link LINKED AND agent live). A
+            REVOKED identity stays visible with identityStatus
+            REVOKED and no keys[] — a verifier must see the who was
+            revoked. Covered by the TL's response signature, never by
+            any seal; identity rotation/revocation is visible here
+            immediately with zero agent-stream writes. Embeds at most
+            a small safety cap of entries; identitiesTotal carries
+            the full count and /v1/agents/{agentId}/identities is the
+            paginated overflow target.
           items:
             $ref: '#/components/schemas/LinkedIdentityView'
+        identitiesTotal:
+          type: integer
+          description: |
+            Agent badges only — the full count of visible links when
+            identities[] is present (the embedded array is capped).
+        identitiesUnavailable:
+          type: boolean
+          description: |
+            Agent badges only — set when the identities join could
+            not be computed. Join failure is explicit, never silent:
+            an absent or empty identities[] always means "no visible
+            links", never "the join failed".
+        keys:
+          type: array
+          description: |
+            Identity badges only — the CURRENT proven key set quoted
+            VERBATIM from the latest sealed proof event
+            (IDENTITY_VERIFIED / IDENTITY_UPDATED): the latest stream
+            entry may be a link/unlink/revocation carrying no key
+            material, so the badge answers "what are the attested
+            keys" directly. Verification methods only — the
+            signedProof evidence lives in the seal at keysLogId, one
+            hop away. Omitted when the identity is REVOKED.
+          items:
+            type: object
+            description: A sealed verification method, member-for-member verbatim
+        keysLogId:
+          type: string
+          description: |
+            Identity badges only — the sealed proof event keys[] is
+            quoted from. Omitted when the identity is REVOKED.
 
     TransparencyLogAudit:
       type: object
@@ -1151,7 +1225,12 @@ components:
 
     LinkedIdentityView:
       type: object
-      description: One computed identities[] entry on the agent badge.
+      description: |
+        One computed identities[] entry on the agent badge, under the
+        visibility predicate: the entry appears while the link is
+        LINKED and the agent is live; identityStatus reports the
+        identity's current stream state (a REVOKED identity stays
+        visible — the attestation rule withholds only its keys).
       required: [identityId, kind, value, identityStatus]
       properties:
         identityId:     { type: string }
@@ -1161,20 +1240,26 @@ components:
           type: string
           enum: [VERIFIED, REVOKED]
           description: Reflects the identity stream NOW
-        provenKeyIds:
+        keys:
           type: array
           description: |
-            Verification-method ids of the current proven key set
-            (post-rotation). The full verbatim methods live in the
-            sealed proof event.
-          items: { type: string }
+            The CURRENT proven key set quoted VERBATIM from the
+            latest sealed proof event — verification methods only,
+            member-for-member as sealed, so a verifier checks
+            operator signatures from the badge alone (no audit
+            walk). The signedProof evidence lives in the seal at
+            keysLogId. Omitted when identityStatus is REVOKED: the
+            keys are no longer attested.
+          items:
+            type: object
+            description: A sealed verification method, verbatim
+        keysLogId:
+          type: string
+          description: The sealed proof event keys[] is quoted from — fetch for signedProofs / offline evidence. Omitted when REVOKED.
         linkedAt:  { type: string, format: date-time }
         linkLogId:
           type: string
           description: The sealed IDENTITY_LINKED entry on the identity stream — fetch for link evidence
-        identityLogId:
-          type: string
-          description: Latest identity-stream entry — fetch for the identity evidence/history
 
     LinkedAgentView:
       type: object
@@ -1185,8 +1270,13 @@ components:
         linkedAt:    { type: string, format: date-time }
         agentStatus:
           type: string
-          enum: [ACTIVE, REVOKED, DEPRECATED, EXPIRED, WARNING]
-          description: The linked agent's own computed badge status — a link is effective only while both ends are live
+          enum: [ACTIVE, DEPRECATED, WARNING]
+          description: |
+            The linked agent's own computed badge status. The reverse
+            join applies the visibility predicate — only live agents
+            (ACTIVE / DEPRECATED / WARNING) appear; terminal agents'
+            links drop out of every "current" view (history stays in
+            the audit chain).
 
     # ── Admin: producer keys ───────────────────────────────────
     ProducerKeyRequest:

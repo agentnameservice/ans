@@ -323,6 +323,28 @@ func (s *EventStore) GetLatestProofByIdentityID(ctx context.Context, identityID 
 	return &r, nil
 }
 
+// HasIdentityRevoked reports whether the identity's stream contains
+// an IDENTITY_REVOKED event. Revocation is terminal at READ time
+// regardless of stream tail order: a racing operation's event can
+// land after the revocation leaf (the RA's seal spans a network
+// round trip), and a late leaf must never resurrect a revoked
+// identity on the public surface.
+func (s *EventStore) HasIdentityRevoked(ctx context.Context, identityID string) (bool, error) {
+	var one int
+	err := s.db.db.GetContext(ctx, &one, `
+        SELECT 1 FROM tl_events
+        WHERE identity_id = ? AND event_type = 'IDENTITY_REVOKED'
+        LIMIT 1`, identityID)
+	switch {
+	case err == nil:
+		return true, nil
+	case errors.Is(err, sql.ErrNoRows):
+		return false, nil
+	default:
+		return false, err
+	}
+}
+
 // LinkStatesByAgent returns, for one agent, the latest link/unlink
 // fact per identity that ever named it — the badge-join input. Rows
 // where Linked() is true are the agent's live links.

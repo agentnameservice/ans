@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
+	"github.com/godaddy/ans/internal/domain"
 )
 
 // Identity badge statuses. Identities have a two-state read-time
@@ -31,12 +32,21 @@ type LinkedIdentityView struct {
 	Value          string `json:"value"`
 	IdentityStatus string `json:"identityStatus"` // VERIFIED | REVOKED — reflects the identity stream NOW
 
-	// ProvenKeyIDs names the identity's current proven key set — the
-	// verification-method ids from the latest proof event
-	// (post-rotation). The full verbatim verification methods live in
-	// the sealed event; thumbprints are compute-at-read conveniences
-	// derivable from that sealed source.
-	ProvenKeyIDs []string `json:"provenKeyIds,omitempty"`
+	// Keys quotes the identity's CURRENT proven key set verbatim
+	// from the latest sealed proof event (IDENTITY_VERIFIED /
+	// IDENTITY_UPDATED) — the verification methods exactly as sealed,
+	// member-for-member (§5.6.3 "computed views carry the keys"): a
+	// verifier checks operator signatures from the badge alone, no
+	// audit walk. Methods only — the signedProof evidence lives in
+	// the seal at KeysLogID, one hop away. Omitted when the identity
+	// is REVOKED: the keys are no longer attested (the entry itself
+	// stays visible with identityStatus REVOKED while the link and
+	// agent are live).
+	Keys []json.RawMessage `json:"keys,omitempty"`
+
+	// KeysLogID points at the sealed proof event Keys is quoted from
+	// — fetch it for the signedProofs / offline evidence.
+	KeysLogID string `json:"keysLogId,omitempty"`
 
 	// LinkedAt is the producer timestamp of the sealed
 	// IDENTITY_LINKED event that bound this agent.
@@ -45,10 +55,6 @@ type LinkedIdentityView struct {
 	// LinkLogID points at the sealed IDENTITY_LINKED entry on the
 	// identity stream — fetch it for link evidence.
 	LinkLogID string `json:"linkLogId,omitempty"`
-
-	// IdentityLogID points at the latest identity-stream entry —
-	// fetch it (or the audit) for the identity evidence/history.
-	IdentityLogID string `json:"identityLogId,omitempty"`
 }
 
 // LinkedAgentView is one entry of the reverse join — the agents an
@@ -79,13 +85,60 @@ func NewIdentityBadgeService(log *LogService, badge *BadgeService) *IdentityBadg
 }
 
 // Get returns the TransparencyLog view of an identity's most recent
-// event — the identity badge.
+// event — the identity badge — plus the computed current attestation
+// (§5.6.3 "latest entry ≠ current attestation"): the latest entry may
+// be a link/unlink/revocation carrying no key material, so the badge
+// quotes the current proven key set verbatim from the latest sealed
+// proof event, with keysLogId pointing at that seal. Keys are omitted
+// when the identity is REVOKED — no longer attested.
 func (s *IdentityBadgeService) Get(ctx context.Context, identityID string) (*TransparencyLog, error) {
 	rec, err := s.log.LatestEventByIdentity(ctx, identityID)
 	if err != nil {
 		return nil, err
 	}
-	return s.buildTransparencyLog(ctx, rec)
+	tl, err := s.buildTransparencyLog(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	status, err := s.identityStatus(ctx, identityID, rec.EventType)
+	if err != nil {
+		return nil, err
+	}
+	tl.Status = status
+	if tl.Status == BadgeVerified {
+		proof, err := s.log.LatestProofByIdentity(ctx, identityID)
+		if err != nil {
+			return nil, err
+		}
+		_, _, keys := proofSummary(proof.RawEvent)
+		tl.Keys = keys
+		tl.KeysLogID = proof.LogID
+	}
+	return tl, nil
+}
+
+// identityStatus derives the identity's read-time status with the
+// TERMINAL rule: REVOKED iff ANY IDENTITY_REVOKED exists on the
+// stream, not merely when it is the tail. The RA's seal spans a
+// network round trip, so a racing operation's event can land after
+// the revocation leaf — a late leaf must never flip a revoked
+// identity's public answer back to VERIFIED. Sound because no
+// legitimate flow appends to a revoked identity's stream (every RA
+// write op gates on the REVOKED row; re-registration mints a new
+// identityId), so the fast path (latest event already REVOKED)
+// covers the common case and the EXISTS query the race.
+func (s *IdentityBadgeService) identityStatus(ctx context.Context, identityID, latestEventType string) (BadgeStatus, error) {
+	if identityStatusFromEventType(latestEventType) == BadgeIdentityRevoked {
+		return BadgeIdentityRevoked, nil
+	}
+	revoked, err := s.log.IdentityRevoked(ctx, identityID)
+	if err != nil {
+		return "", err
+	}
+	if revoked {
+		return BadgeIdentityRevoked, nil
+	}
+	return BadgeVerified, nil
 }
 
 // Audit returns the identity's full event chain, paginated, in the
@@ -147,12 +200,18 @@ func identityStatusFromEventType(eventType string) BadgeStatus {
 const sqlitetlIdentityRevoked = "IDENTITY_REVOKED"
 
 // LinkedIdentitiesForAgent computes the identities[] join for an
-// agent badge: every identity whose latest link/unlink fact naming
-// this agent is LINKED, decorated with that identity's current
-// stream state. Revoked identities stay in the list with
-// identityStatus REVOKED — the rotation/revocation visibility on
-// every linked badge is the point of the read-time join.
-func (s *IdentityBadgeService) LinkedIdentitiesForAgent(ctx context.Context, ansID string) ([]*LinkedIdentityView, error) {
+// agent badge under the §5.6.3 visibility predicate — link LINKED ∧
+// agent live — given the agent's already-computed badge status (the
+// caller has it; recomputing here would double the Merkle work).
+// A terminal agent's view is empty: its links are no longer visible.
+// Revoked IDENTITIES, by contrast, stay in the list with
+// identityStatus REVOKED and no keys — a verifier must see that the
+// who behind a still-linked agent was revoked, not have the fact
+// silently vanish (the attestation rule withholds only the keys).
+func (s *IdentityBadgeService) LinkedIdentitiesForAgent(ctx context.Context, ansID string, agentStatus BadgeStatus) ([]*LinkedIdentityView, error) {
+	if !agentLive(agentStatus) {
+		return []*LinkedIdentityView{}, nil
+	}
 	states, err := s.log.LinkStatesByAgent(ctx, ansID)
 	if err != nil {
 		return nil, err
@@ -171,10 +230,24 @@ func (s *IdentityBadgeService) LinkedIdentitiesForAgent(ctx context.Context, ans
 	return out, nil
 }
 
+// agentLive is the agent conjunct of the §5.6.3 visibility predicate:
+// ACTIVE and DEPRECATED are live (a deprecated agent still serves
+// during migration); WARNING is live too — it is the ACTIVE overlay
+// for an expiring attested cert, not a lifecycle exit. REVOKED,
+// EXPIRED, and UNKNOWN are not live.
+func agentLive(status BadgeStatus) bool {
+	switch status {
+	case BadgeActive, BadgeDeprecated, BadgeWarning:
+		return true
+	default:
+		return false
+	}
+}
+
 // linkedIdentityView decorates one live link with the identity's
-// current state: latest event (status + identityLogId), latest proof
-// (kind/value/thumbprints), and the sealed link event (linkedAt +
-// linkLogId).
+// current state: latest event (status), latest proof (kind/value +
+// the verbatim keys[] + keysLogId — withheld when REVOKED), and the
+// sealed link event (linkedAt + linkLogId).
 func (s *IdentityBadgeService) linkedIdentityView(ctx context.Context, st *sqlitetl.LinkState) (*LinkedIdentityView, error) {
 	view := &LinkedIdentityView{IdentityID: st.IdentityID}
 
@@ -189,17 +262,23 @@ func (s *IdentityBadgeService) linkedIdentityView(ctx context.Context, st *sqlit
 	if err != nil {
 		return nil, err
 	}
-	view.IdentityLogID = latest.LogID
-	view.IdentityStatus = string(identityStatusFromEventType(latest.EventType))
+	status, err := s.identityStatus(ctx, st.IdentityID, latest.EventType)
+	if err != nil {
+		return nil, err
+	}
+	view.IdentityStatus = string(status)
 
 	proof, err := s.log.LatestProofByIdentity(ctx, st.IdentityID)
 	if err != nil {
 		return nil, err
 	}
-	kind, value, keyIDs := proofSummary(proof.RawEvent)
+	kind, value, keys := proofSummary(proof.RawEvent)
 	view.Kind = kind
 	view.Value = value
-	view.ProvenKeyIDs = keyIDs
+	if view.IdentityStatus == string(BadgeVerified) {
+		view.Keys = keys
+		view.KeysLogID = proof.LogID
+	}
 	return view, nil
 }
 
@@ -221,12 +300,25 @@ func (s *IdentityBadgeService) LinkedAgentsForIdentity(ctx context.Context, iden
 		if !st.Linked() {
 			continue
 		}
-		view := &LinkedAgentView{AnsID: st.AnsID}
+		// Visibility predicate (§5.6.3): only live agents appear in
+		// any "current" view — a terminal agent's link history stays
+		// recoverable from the audit chain. Not-found is a liveness
+		// answer (the agent lane still seals via the async outbox, so
+		// a just-activated agent's leaf can lag); any OTHER failure
+		// propagates — join failure is explicit, never silent.
+		agentTL, err := s.badge.Get(ctx, st.AnsID)
+		if err != nil {
+			if errors.Is(err, domain.ErrNotFound) {
+				continue
+			}
+			return nil, err
+		}
+		if !agentLive(agentTL.Status) {
+			continue
+		}
+		view := &LinkedAgentView{AnsID: st.AnsID, AgentStatus: agentTL.Status}
 		if linkRec, err := s.log.EventByLeafIndex(ctx, st.LeafIndex); err == nil {
 			view.LinkedAt = innerTimestamp(linkRec.RawEvent)
-		}
-		if agentTL, err := s.badge.Get(ctx, st.AnsID); err == nil {
-			view.AgentStatus = agentTL.Status
 		}
 		out = append(out, view)
 	}
@@ -272,11 +364,13 @@ func innerTimestamp(rawEvent string) string {
 	return w.Payload.Producer.Event.Timestamp
 }
 
-// proofSummary drills kind, value, and the proven verification-method
-// ids out of a stored proof event (IDENTITY_VERIFIED /
-// IDENTITY_UPDATED). The ids come from the sealed verbatim
-// verification methods.
-func proofSummary(rawEvent string) (string, string, []string) {
+// proofSummary drills kind, value, and the proven verification
+// methods out of a stored proof event (IDENTITY_VERIFIED /
+// IDENTITY_UPDATED). The methods are returned as the RAW sealed
+// bytes, untouched — the computed views quote sealed material
+// verbatim, never re-encode it (the seal-verbatim rule extends to
+// the quote). The signedProof member stays behind in the seal.
+func proofSummary(rawEvent string) (string, string, []json.RawMessage) {
 	var w struct {
 		Payload struct {
 			Producer struct {
@@ -284,9 +378,7 @@ func proofSummary(rawEvent string) (string, string, []string) {
 					Kind  string `json:"kind"`
 					Value string `json:"value"`
 					Keys  []struct {
-						VerificationMethod struct {
-							ID string `json:"id"`
-						} `json:"verificationMethod"`
+						VerificationMethod json.RawMessage `json:"verificationMethod"`
 					} `json:"keys"`
 				} `json:"event"`
 			} `json:"producer"`
@@ -296,11 +388,11 @@ func proofSummary(rawEvent string) (string, string, []string) {
 		return "", "", nil
 	}
 	ev := w.Payload.Producer.Event
-	ids := make([]string, 0, len(ev.Keys))
+	methods := make([]json.RawMessage, 0, len(ev.Keys))
 	for _, k := range ev.Keys {
-		if k.VerificationMethod.ID != "" {
-			ids = append(ids, k.VerificationMethod.ID)
+		if len(k.VerificationMethod) > 0 {
+			methods = append(methods, k.VerificationMethod)
 		}
 	}
-	return ev.Kind, ev.Value, ids
+	return ev.Kind, ev.Value, methods
 }

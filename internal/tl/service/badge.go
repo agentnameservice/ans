@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -51,6 +52,28 @@ type TransparencyLog struct {
 	// single-purpose. Covered by the TL's response signature, not by
 	// any seal: link facts live on the identity stream.
 	Identities []*LinkedIdentityView `json:"identities,omitempty"`
+
+	// IdentitiesTotal counts every visible link when Identities is
+	// present — the badge embeds at most a small safety cap of
+	// entries (§5.6.1); the standalone, paginated
+	// /v1/agents/{agentId}/identities route is the overflow target.
+	IdentitiesTotal int `json:"identitiesTotal,omitempty"`
+
+	// IdentitiesUnavailable is set when the identities join could not
+	// be computed (design §5.6.3: join failure is explicit, never
+	// silent) — an absent/empty identities[] always means "no visible
+	// links", never "the join failed".
+	IdentitiesUnavailable bool `json:"identitiesUnavailable,omitempty"`
+
+	// Keys / KeysLogID are the identity badge's computed quote of the
+	// CURRENT proven key set (design §5.6.3 "computed views carry the
+	// keys"): the verification methods verbatim from the latest
+	// sealed proof event, with KeysLogID pointing at that seal (fetch
+	// it for the signedProof evidence). Populated on the identity
+	// badge only — never on audit entries — and omitted when the
+	// identity is REVOKED (the keys are no longer attested).
+	Keys      []json.RawMessage `json:"keys,omitempty"`
+	KeysLogID string            `json:"keysLogId,omitempty"`
 }
 
 // BadgeService computes the badge from the latest mirrored event
