@@ -3,6 +3,7 @@ package project
 import (
 	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/godaddy/ans/internal/finder/feed"
@@ -50,11 +51,28 @@ type Options struct {
 // exported entry point and the only place the lifecycle split is
 // decided.
 //
+// Validation is split along the lifecycle so the safety rule holds at
+// the validation layer too:
+//
+//   - The TOMBSTONE-KEY fields — logId, agentId (UUID), ansName (parses
+//     and binds to the lowercased agentHost), createdAt (RFC 3339) — are
+//     validated FIRST, before the switch. These are the only fields a
+//     tombstone reads. If they fail, no projection is possible at all,
+//     so this returns (Projection{}, error).
+//   - The FULL feed contract (which additionally requires version) is
+//     validated only on the ACTIVE path. A REVOKED/DEPRECATED event
+//     missing a non-key field such as version MUST still tombstone —
+//     validating version before the switch would be the exact fail-open
+//     the lifecycle split exists to prevent (a revocation silently
+//     dropped because of an Active-only field).
+//
 // Error vs Skip is pinned:
 //
-//   - A feed-contract violation (item.Validate fails) returns
+//   - A tombstone-key violation (validateIdentityKeys fails) returns
 //     (Projection{}, error). The caller must not advance its cursor past
 //     a structurally invalid event without deciding what to do.
+//   - On the Active path, the full feed.Validate failure also returns
+//     (Projection{}, error).
 //   - An UNRECOGNIZED eventType returns a Projection carrying a single
 //     alertable Skip{Kind: SkipUnknownEventType} and NO error. Returning
 //     an error here would wedge ingestion at the cursor the moment the
@@ -65,11 +83,12 @@ type Options struct {
 //     Skips with the surviving entries still returned.
 //
 // The lifecycle split is the safety rule: REVOKED and DEPRECATED events
-// mint an identity-only tombstone from required fields alone and never
-// touch label minting or URL policy, so a malformed display field can
-// never block a revocation from being recorded.
+// mint an identity-only tombstone from tombstone-key fields alone and
+// never touch label minting or URL policy, so a malformed display field
+// — or a missing Active-only field — can never block a revocation from
+// being recorded.
 func FromEvent(item feed.EventItem, opts Options) (Projection, error) {
-	if err := item.Validate(); err != nil {
+	if err := item.ValidateIdentityKeys(); err != nil {
 		return Projection{}, err
 	}
 
@@ -79,13 +98,16 @@ func FromEvent(item feed.EventItem, opts Options) (Projection, error) {
 	case feed.EventTypeAgentDeprecated:
 		return tombstone(item, LifecycleDeprecated), nil
 	case feed.EventTypeAgentRegistered, feed.EventTypeAgentRenewed:
+		if err := item.Validate(); err != nil {
+			return Projection{}, err
+		}
 		return projectActive(item, opts), nil
 	default:
 		return Projection{
 			Entries: []ProjectedEntry{},
 			Skipped: []Skip{{
 				Kind:   SkipUnknownEventType,
-				Detail: "unrecognized eventType " + quote(item.EventType),
+				Detail: "unrecognized eventType " + strconv.Quote(item.EventType),
 			}},
 		}, nil
 	}
@@ -98,11 +120,15 @@ func FromEvent(item feed.EventItem, opts Options) (Projection, error) {
 // the display name, never required (a display-less revocation still
 // tombstones). No url/data, no display metadata, no trust manifest.
 func tombstone(item feed.EventItem, lc Lifecycle) Projection {
+	// Normalize the host once so a best-effort tombstone URN matches the
+	// lowercased URN an Active entry for the same agent would mint —
+	// case-variant events must not produce byte-different identifiers.
+	host := strings.ToLower(item.AgentHost)
 	e := Entry{}
 	// Best-effort identifier so the index can correlate the tombstone
 	// with a prior Active entry by URN as well as by wrapper keys. A
 	// missing label is fine here — the wrapper keys are authoritative.
-	if urn, ok := mintURN(item.AgentHost, sanitizeText(item.AgentDisplayName)); ok {
+	if urn, ok := mintURN(host, sanitizeText(item.AgentDisplayName)); ok {
 		e.Identifier = urn
 	}
 	return Projection{
@@ -112,6 +138,7 @@ func tombstone(item feed.EventItem, lc Lifecycle) Projection {
 			AgentID:   item.AgentID,
 			AnsName:   item.AnsName,
 			LogID:     item.LogID,
+			CreatedAt: item.CreatedAt,
 			ExpiresAt: item.ExpiresAt,
 		}},
 	}
@@ -122,15 +149,19 @@ func tombstone(item feed.EventItem, lc Lifecycle) Projection {
 // whole event; if it won't mint, the entire event Skips (one
 // SkipMissingLabel) and no endpoints are projected.
 func projectActive(item feed.EventItem, opts Options) Projection {
+	// Normalize the host once so the URN, trustManifest.identity, and the
+	// well-known fallback URL all agree on a single lowercased host;
+	// case-variant events must not yield byte-different identities.
+	host := strings.ToLower(item.AgentHost)
 	displayName := sanitizeText(item.AgentDisplayName)
 
-	urn, ok := mintURN(item.AgentHost, displayName)
+	urn, ok := mintURN(host, displayName)
 	if !ok {
 		return Projection{
 			Entries: []ProjectedEntry{},
 			Skipped: []Skip{{
 				Kind:   SkipMissingLabel,
-				Detail: "agentDisplayName produced no URN label for agent " + quote(item.AgentID),
+				Detail: "agentDisplayName produced no URN label for agent " + strconv.Quote(item.AgentID),
 			}},
 		}
 	}
@@ -138,11 +169,12 @@ func projectActive(item feed.EventItem, opts Options) Projection {
 	ctx := activeContext{
 		item:        item,
 		opts:        opts,
+		host:        host,
 		urn:         urn,
 		displayName: displayName,
 		description: sanitizeText(item.AgentDescription),
 		version:     sanitizeText(item.Version),
-		trust:       buildTrustManifest(item, opts),
+		trust:       buildTrustManifest(host, item.AgentID, opts),
 	}
 
 	entries := make([]ProjectedEntry, 0, len(item.Endpoints))
@@ -173,6 +205,7 @@ func projectActive(item feed.EventItem, opts Options) Projection {
 type activeContext struct {
 	item        feed.EventItem
 	opts        Options
+	host        string // lowercased agentHost
 	urn         string
 	displayName string
 	description string
@@ -193,11 +226,11 @@ func projectEndpoint(ctx activeContext, ep feed.AgentEndpoint) (*ProjectedEntry,
 		}
 		return nil, &Skip{
 			Kind:   SkipUnknownProtocol,
-			Detail: "endpoint protocol " + quote(ep.Protocol) + " not recognized",
+			Detail: "endpoint protocol " + strconv.Quote(ep.Protocol) + " not recognized",
 		}
 	}
 
-	artifactURL, skip := selectURL(ep, ctx.item.AgentHost, wellKnown, ctx.opts)
+	artifactURL, skip := selectURL(ep, ctx.host, wellKnown, ctx.opts)
 	if skip != nil {
 		return nil, skip
 	}
@@ -212,7 +245,7 @@ func projectEndpoint(ctx activeContext, ep feed.AgentEndpoint) (*ProjectedEntry,
 		Tags:          tagsFrom(ep.Functions),
 		Version:       ctx.version,
 		UpdatedAt:     ctx.item.CreatedAt,
-		Metadata:      buildMetadata(ctx.item, ep, ctx.opts),
+		Metadata:      buildMetadata(ctx.host, ctx.item, ep, ctx.opts),
 		TrustManifest: ctx.trust,
 	}
 
@@ -222,6 +255,7 @@ func projectEndpoint(ctx activeContext, ep feed.AgentEndpoint) (*ProjectedEntry,
 		AgentID:   ctx.item.AgentID,
 		AnsName:   ctx.item.AnsName,
 		LogID:     ctx.item.LogID,
+		CreatedAt: ctx.item.CreatedAt,
 		ExpiresAt: ctx.item.ExpiresAt,
 	}, nil
 }
@@ -287,30 +321,30 @@ func selectURL(
 // already structurally validated by feed.Validate, so sanitizing them
 // is defense-in-depth, and agentUrl already passed the stricter URL
 // gate before it lands here.
-func buildMetadata(item feed.EventItem, ep feed.AgentEndpoint, opts Options) map[string]string {
+func buildMetadata(host string, item feed.EventItem, ep feed.AgentEndpoint, opts Options) map[string]string {
 	md := map[string]string{
 		"ansName": sanitizeText(item.AnsName),
 		"logId":   sanitizeText(item.LogID),
 	}
-	if agentURL, err := validateEmittedURL(ep.AgentURL, item.AgentHost, opts.AllowHTTP); err == nil {
+	if agentURL, err := validateEmittedURL(ep.AgentURL, host, opts.AllowHTTP); err == nil {
 		md["agentUrl"] = agentURL
 	}
 	return md
 }
 
 // buildTrustManifest builds the trust manifest for an Active entry. The
-// identity is the attested host as an https FQDN URI (host already
-// validated). The ANS-Registration attestation is included only when a
+// identity is the (already lowercased) attested host as an https FQDN
+// URI. The ANS-Registration attestation is included only when a
 // TLBaseURL is configured; an empty base URL omits attestations
 // entirely (there is nowhere to point the receipt URI).
-func buildTrustManifest(item feed.EventItem, opts Options) *TrustManifest {
+func buildTrustManifest(host, agentID string, opts Options) *TrustManifest {
 	tm := &TrustManifest{
-		Identity:     "https://" + item.AgentHost,
+		Identity:     "https://" + host,
 		IdentityType: "https",
 	}
 	if strings.TrimSpace(opts.TLBaseURL) != "" {
 		receiptURI := strings.TrimRight(opts.TLBaseURL, "/") +
-			"/v1/agents/" + url.PathEscape(item.AgentID) + "/receipt"
+			"/v1/agents/" + url.PathEscape(agentID) + "/receipt"
 		tm.Attestations = []Attestation{{
 			Type:      attestationType,
 			URI:       receiptURI,
@@ -385,7 +419,3 @@ func sortEntries(entries []ProjectedEntry) {
 		return a.URL < b.URL
 	})
 }
-
-// quote wraps s in double quotes for human-readable Skip detail. Kept
-// trivial and local so detail strings are consistent.
-func quote(s string) string { return "\"" + s + "\"" }

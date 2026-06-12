@@ -19,6 +19,14 @@
         {"id": "f1", "name": "Clean\u202eTool", "tags": ["safe\u0000tag", "tag\u200b"]},
         {"id": "f2", "name": "\u200b\u202e", "tags": ["ok"]}
       ]
+    },
+    {
+      "agentUrl": "https://evil.example.com/a2a",
+      "metaDataUrl": "https://evil.example.com/.well-known/\u202eagent-card.json",
+      "protocol": "A2A",
+      "functions": [
+        {"id": "g1", "name": "Skill", "tags": ["x"]}
+      ]
     }
   ]
 }

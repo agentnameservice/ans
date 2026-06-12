@@ -74,25 +74,30 @@ const (
 // ProjectedEntry wraps a wire Entry with index-side bookkeeping that
 // never reaches the search/explore wire. The wrapper fields carry
 // per-registration keys (AgentID/AnsName/LogID) the index uses to apply
-// tombstones and detect divergence, plus ExpiresAt for PR 3's
-// serve-time expiry policy (no AGENT_EXPIRED event exists).
+// tombstones and detect divergence, the event's CreatedAt (the
+// authoritative event time, carried verbatim from the feed), and
+// ExpiresAt for the index/server serve-time expiry policy (no
+// AGENT_EXPIRED event exists).
 //
 // For a tombstone (Lifecycle REVOKED/DEPRECATED) only the wrapper fields
 // and the Entry's identity fields are meaningful; the Entry carries no
-// url/data/display metadata.
+// url/data/display metadata. CreatedAt is the tombstone's timestamp —
+// the index applies a tombstone only when it is newer than the entry it
+// suppresses, so dropping it would break ordering.
 type ProjectedEntry struct {
 	Entry
 	Lifecycle Lifecycle `json:"-"`
 	AgentID   string    `json:"-"`
 	AnsName   string    `json:"-"`
 	LogID     string    `json:"-"`
+	CreatedAt string    `json:"-"`
 	ExpiresAt string    `json:"-"`
 }
 
 // SkipKind classifies why an event or endpoint produced no entry. The
-// kinds let PR 3 alert on the ones that signal a contract surprise
-// (UnknownEventType, UnknownProtocol) versus the ones that are routine
-// publisher-data issues (MissingLabel, InvalidURL).
+// kinds let the finder index/server alert on the ones that signal a
+// contract surprise (UnknownEventType, UnknownProtocol) versus the ones
+// that are routine publisher-data issues (MissingLabel, InvalidURL).
 type SkipKind string
 
 const (

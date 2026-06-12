@@ -36,6 +36,7 @@ type goldenEntry struct {
 	AgentID   string `json:"agentId"`
 	AnsName   string `json:"ansName"`
 	LogID     string `json:"logId"`
+	CreatedAt string `json:"createdAt"`
 	ExpiresAt string `json:"expiresAt"`
 	// Entry is the wire shape, marshaled exactly as it would appear on
 	// the discovery API.
@@ -58,6 +59,7 @@ func toGoldenView(p project.Projection) goldenView {
 			AgentID:   pe.AgentID,
 			AnsName:   pe.AnsName,
 			LogID:     pe.LogID,
+			CreatedAt: pe.CreatedAt,
 			ExpiresAt: pe.ExpiresAt,
 			Entry:     pe.Entry,
 		})
@@ -116,27 +118,31 @@ func TestFromEvent_Golden(t *testing.T) {
 func TestFromEvent_Tombstones(t *testing.T) {
 	t.Parallel()
 	cases := map[string]struct {
-		fixture   string
-		wantLC    project.Lifecycle
-		wantID    bool // identifier present (label minted)
-		wantAgent string
-		wantLog   string
-		wantTS    string // ExpiresAt expected on wrapper
+		fixture     string
+		wantLC      project.Lifecycle
+		wantID      bool // identifier present (label minted)
+		wantAgent   string
+		wantLog     string
+		wantCreated string // CreatedAt expected on wrapper (verbatim)
+		wantTS      string // ExpiresAt expected on wrapper
 	}{
 		"revoked with display": {
 			fixture: "testdata/event_revoked.json", wantLC: project.LifecycleRevoked,
 			wantID: true, wantAgent: "550e8400-e29b-41d4-a716-446655440000",
-			wantLog: "019a7a99-1111-7b5b-b048-d0b78f4b4c5f", wantTS: "2026-01-08T12:30:00Z",
+			wantLog:     "019a7a99-1111-7b5b-b048-d0b78f4b4c5f",
+			wantCreated: "2025-03-10T09:00:00Z", wantTS: "2026-01-08T12:30:00Z",
 		},
 		"revoked minimal (no display)": {
 			fixture: "testdata/event_revoked_minimal.json", wantLC: project.LifecycleRevoked,
 			wantID: false, wantAgent: "660e8400-e29b-41d4-a716-446655440111",
-			wantLog: "019a7aaa-2222-7b5b-b048-d0b78f4b4c5f", wantTS: "",
+			wantLog:     "019a7aaa-2222-7b5b-b048-d0b78f4b4c5f",
+			wantCreated: "2025-03-11T10:15:30Z", wantTS: "",
 		},
 		"deprecated": {
 			fixture: "testdata/event_deprecated.json", wantLC: project.LifecycleDeprecated,
 			wantID: true, wantAgent: "770e8400-e29b-41d4-a716-446655440222",
-			wantLog: "019a7acc-4444-7b5b-b048-d0b78f4b4c5f", wantTS: "2026-06-01T00:00:00Z",
+			wantLog:     "019a7acc-4444-7b5b-b048-d0b78f4b4c5f",
+			wantCreated: "2025-07-15T18:45:00Z", wantTS: "2026-06-01T00:00:00Z",
 		},
 	}
 	for name, tc := range cases {
@@ -163,8 +169,12 @@ func TestFromEvent_Tombstones(t *testing.T) {
 			if e.LogID != tc.wantLog {
 				t.Errorf("logId: got %q, want %q", e.LogID, tc.wantLog)
 			}
-			// timestamp on wrapper = createdAt verbatim is exercised by
-			// golden; ExpiresAt passthrough checked here.
+			// Tombstone timestamp = createdAt verbatim (the index orders
+			// suppression by it, so it MUST be carried), and ExpiresAt
+			// passes through too. Both asserted directly here.
+			if e.CreatedAt != tc.wantCreated {
+				t.Errorf("createdAt: got %q, want %q", e.CreatedAt, tc.wantCreated)
+			}
 			if e.ExpiresAt != tc.wantTS {
 				t.Errorf("expiresAt: got %q, want %q", e.ExpiresAt, tc.wantTS)
 			}
@@ -208,6 +218,53 @@ func TestFromEvent_TombstoneIgnoresBadDisplay(t *testing.T) {
 	}
 	if proj.Entries[0].Identifier != "" {
 		t.Errorf("unmintable label should leave identifier empty, got %q", proj.Entries[0].Identifier)
+	}
+}
+
+// TestFromEvent_TombstoneMissingActiveOnlyField is the inverse of
+// event_revoked_minimal: a REVOKED/DEPRECATED event missing a field that
+// only the Active path requires (version) MUST still tombstone. Before
+// the validation split this returned an error and dropped the
+// revocation entirely — the exact fail-open the lifecycle split exists
+// to prevent.
+func TestFromEvent_TombstoneMissingActiveOnlyField(t *testing.T) {
+	t.Parallel()
+	cases := map[string]struct {
+		eventType string
+		wantLC    project.Lifecycle
+	}{
+		"revoked missing version":    {feed.EventTypeAgentRevoked, project.LifecycleRevoked},
+		"deprecated missing version": {feed.EventTypeAgentDeprecated, project.LifecycleDeprecated},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			item := loadFixture(t, "testdata/event_revoked.json")
+			item.EventType = tc.eventType
+			item.Version = "" // Active-only required field, absent
+			proj, err := project.FromEvent(item, defaultOpts)
+			if err != nil {
+				t.Fatalf("missing version must NOT error for a tombstone: %v", err)
+			}
+			if len(proj.Entries) != 1 || proj.Entries[0].Lifecycle != tc.wantLC {
+				t.Fatalf("expected one %s tombstone, got %+v", tc.wantLC, proj)
+			}
+			if proj.Entries[0].AgentID == "" || proj.Entries[0].LogID == "" {
+				t.Errorf("tombstone wrapper keys missing: %+v", proj.Entries[0])
+			}
+		})
+	}
+}
+
+// TestFromEvent_ActiveMissingVersionErrors confirms the other half of
+// the split: an Active event missing version still fails (the full
+// contract runs only on the Active path).
+func TestFromEvent_ActiveMissingVersionErrors(t *testing.T) {
+	t.Parallel()
+	item := loadFixture(t, "testdata/event_registered.json")
+	item.Version = ""
+	if _, err := project.FromEvent(item, defaultOpts); err == nil {
+		t.Fatal("Active event missing version must error")
 	}
 }
 
@@ -433,6 +490,29 @@ func TestFromEvent_URLPolicy(t *testing.T) {
 			opts: defaultOpts,
 			mutate: func(e *feed.EventItem) {
 				e.Endpoints[0].MetaDataURL = "https://host.example.com/%zz"
+			},
+			want: want{entries: 0, skips: 1, skip0: project.SkipInvalidURL},
+		},
+		"metaDataUrl with bidi rune → Skip fail-closed": {
+			opts: defaultOpts,
+			mutate: func(e *feed.EventItem) {
+				// RLO inside the path — must be rejected, not stripped:
+				// stripping could silently change the effective path.
+				e.Endpoints[0].MetaDataURL = "https://host.example.com/\u202emeta.json"
+			},
+			want: want{entries: 0, skips: 1, skip0: project.SkipInvalidURL},
+		},
+		"metaDataUrl with zero-width rune → Skip fail-closed": {
+			opts: defaultOpts,
+			mutate: func(e *feed.EventItem) {
+				e.Endpoints[0].MetaDataURL = "https://host.example.com/me\u200bta.json"
+			},
+			want: want{entries: 0, skips: 1, skip0: project.SkipInvalidURL},
+		},
+		"metaDataUrl with bare trailing ? → Skip (ForceQuery)": {
+			opts: defaultOpts,
+			mutate: func(e *feed.EventItem) {
+				e.Endpoints[0].MetaDataURL = "https://host.example.com/meta.json?"
 			},
 			want: want{entries: 0, skips: 1, skip0: project.SkipInvalidURL},
 		},

@@ -4,19 +4,17 @@
 // projects each EventItem into a discovery catalog entry.
 //
 // The shapes here mirror the production ANS API swagger field-for-field
-// — the canonical schema is developer.godaddy.com's `swagger_ans.json`,
-// mirrored in this repo's sibling at
-// ~/Code/ans-registry-poc/swagger-docs/swagger_ans.json. PR 2 (the OSS
-// RA's feed route) owns a byte-equality and enum-value conformance test
-// against that swagger; these consumer types are the other half of that
-// contract, so JSON tags and field presence must not drift.
+// — the canonical schema is developer.godaddy.com's `swagger_ans.json`.
+// The OSS RA feed route owns a byte-equality and enum-value conformance
+// test against that swagger; these consumer types are the other half of
+// that contract, so JSON tags and field presence must not drift.
 //
 // Token values are the PRODUCTION HYPHENATED form (`HTTP-API`,
 // `STREAMABLE-HTTP`, `JSON-RPC`), not the OSS domain's underscored
 // constants (`HTTP_API`, `STREAMABLE_HTTP`, `JSON_RPC` in
 // internal/domain/protocol.go). The feed is the wire; the domain is the
-// internal representation. PR 2 owns the domain→wire token map that
-// bridges them.
+// internal representation. The OSS RA feed route owns the domain→wire
+// token map that bridges them.
 package feed
 
 import (
@@ -160,30 +158,27 @@ const (
 // Validate enforces the EventItem's contract rules — the structural
 // invariants the Finder relies on before projecting an event. Contract
 // rules live with the contract type so every consumer of the feed gets
-// the same gate. It checks:
+// the same gate. It checks the full contract:
 //
 //   - required-field presence (logId, eventType, createdAt, agentId,
 //     ansName, agentHost, version);
-//   - agentId is a UUID;
-//   - createdAt is an RFC 3339 timestamp;
-//   - ansName parses as an ANS name AND its FQDN equals the lowercased
-//     agentHost (binds the host to the ansName in one step, which also
-//     syntax-validates agentHost via domain.ParseAnsName's RFC 1123
-//     hostname check).
+//   - all the tombstone-key invariants below (ValidateIdentityKeys).
 //
 // Validate does NOT check eventType against the known enum — an
 // unrecognized eventType is a projection-time concern (the producer's
 // enum may grow), not a structural feed error.
+//
+// The lifecycle-aware caller runs ValidateIdentityKeys before deciding
+// whether an event tombstones, and only runs this full Validate on the
+// Active path. A field this method requires but ValidateIdentityKeys
+// does not (eventType, agentHost, version) is therefore an Active-path
+// requirement: a REVOKED/DEPRECATED event missing it still tombstones.
 func (e EventItem) Validate() error {
 	required := []struct {
 		name  string
 		value string
 	}{
-		{"logId", e.LogID},
 		{"eventType", e.EventType},
-		{"createdAt", e.CreatedAt},
-		{"agentId", e.AgentID},
-		{"ansName", e.AnsName},
 		{"agentHost", e.AgentHost},
 		{"version", e.Version},
 	}
@@ -191,6 +186,30 @@ func (e EventItem) Validate() error {
 		if strings.TrimSpace(f.value) == "" {
 			return fmt.Errorf("feed: EventItem missing required field %q", f.name)
 		}
+	}
+	return e.ValidateIdentityKeys()
+}
+
+// ValidateIdentityKeys checks only the tombstone-key fields — the
+// minimal set a tombstone is built from, and the only fields a
+// REVOKED/DEPRECATED event needs to be structurally sound:
+//
+//   - logId is present;
+//   - agentId is a UUID;
+//   - createdAt is an RFC 3339 timestamp;
+//   - ansName parses as an ANS name AND its FQDN equals the lowercased
+//     agentHost (binds the host to the ansName in one step, which also
+//     syntax-validates agentHost via domain.ParseAnsName's RFC 1123
+//     hostname check, so a present-and-bound agentHost is implied here).
+//
+// It deliberately does NOT require eventType, agentHost-presence, or
+// version: those are Active-path requirements (see Validate). Splitting
+// the checks this way is the validation-layer half of the lifecycle
+// safety rule — a revocation must not be dropped because of a field it
+// never reads.
+func (e EventItem) ValidateIdentityKeys() error {
+	if strings.TrimSpace(e.LogID) == "" {
+		return fmt.Errorf("feed: EventItem missing required field %q", "logId")
 	}
 
 	if !isUUID(e.AgentID) {

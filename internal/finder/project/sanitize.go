@@ -9,18 +9,24 @@ import (
 )
 
 // sanitizeText is the single chokepoint every emitted string passes
-// through before it enters a catalog entry. It strips two classes of
-// rune that turn publisher-asserted text into an attack on whoever
-// renders or parses the entry downstream (an LLM orchestrator, a
-// terminal, a web UI):
+// through before it enters a catalog entry. It strips two whole Unicode
+// general categories of rune that turn publisher-asserted text into an
+// attack on whoever renders or parses the entry downstream (an LLM
+// orchestrator, a terminal, a web UI):
 //
 //   - Cc — C0/C1 control characters (NUL, ESC, the C1 block). These can
 //     smuggle terminal escape sequences or terminate strings early.
-//   - bidirectional and zero-width Cf format characters — RLO (U+202E),
-//     the isolates (U+2066–U+2069), and the zero-width family (ZWSP
-//     U+200B, ZWNJ U+200C, ZWJ U+200D, BOM/ZWNBSP U+FEFF). These can
-//     visually reorder or hide text so a rendered string differs from
-//     its bytes (the "Trojan Source" class).
+//   - Cf — format characters. This is the superset that covers the
+//     bidirectional controls (the embeddings/overrides U+202A–U+202E,
+//     the isolates U+2066–U+2069, the marks U+200E/U+200F, and
+//     U+061C ARABIC LETTER MARK), the zero-width family (ZWSP U+200B,
+//     ZWNJ U+200C, ZWJ U+200D, WORD JOINER U+2060, BOM/ZWNBSP U+FEFF),
+//     and the invisible TAG block (U+E0000–U+E007F). These can visually
+//     reorder or hide text so a rendered string differs from its bytes
+//     (the "Trojan Source" class). Stripping the whole category rather
+//     than an enumerated list is deliberate: the wire format freezes
+//     now, so a strict superset is safer than a list that can fall
+//     behind new format characters.
 //
 // Ordinary printable runes — including legitimate non-ASCII letters and
 // emoji — pass through untouched. The function removes offending runes
@@ -41,33 +47,12 @@ func sanitizeText(s string) string {
 	return b.String()
 }
 
-// isDisallowedRune reports whether r must be stripped by sanitizeText.
-// Runes are named by code point rather than written literally so the
-// source stays readable and free of the very invisible characters it
-// guards against.
+// isDisallowedRune reports whether r is a control (Cc) or format (Cf)
+// character that must be stripped from emitted text and rejected in
+// emitted URLs. Both are full Unicode general categories; see
+// sanitizeText for the threat each covers.
 func isDisallowedRune(r rune) bool {
-	if unicode.Is(unicode.Cc, r) {
-		return true
-	}
-	switch r {
-	case 0x202A, // LEFT-TO-RIGHT EMBEDDING
-		0x202B, // RIGHT-TO-LEFT EMBEDDING
-		0x202C, // POP DIRECTIONAL FORMATTING
-		0x202D, // LEFT-TO-RIGHT OVERRIDE
-		0x202E, // RIGHT-TO-LEFT OVERRIDE
-		0x2066, // LEFT-TO-RIGHT ISOLATE
-		0x2067, // RIGHT-TO-LEFT ISOLATE
-		0x2068, // FIRST STRONG ISOLATE
-		0x2069, // POP DIRECTIONAL ISOLATE
-		0x200B, // ZERO WIDTH SPACE
-		0x200C, // ZERO WIDTH NON-JOINER
-		0x200D, // ZERO WIDTH JOINER
-		0x200E, // LEFT-TO-RIGHT MARK
-		0x200F, // RIGHT-TO-LEFT MARK
-		0xFEFF: // ZERO WIDTH NO-BREAK SPACE / BOM
-		return true
-	}
-	return false
+	return unicode.Is(unicode.Cc, r) || unicode.Is(unicode.Cf, r)
 }
 
 // validateEmittedURL is the single gate every URL passes through before
@@ -79,11 +64,17 @@ func isDisallowedRune(r rune) bool {
 // (internal/config/config.go validatePublicBaseURL) and the endpoint
 // host-match semantics (domain.AgentEndpoint.ValidateHostMatch):
 //
+//   - the raw string carries no control (Cc) or format (Cf) rune — the
+//     same hygiene sanitizeText applies to free text, but for a URL we
+//     REJECT fail-closed rather than strip: a URL is structural, and a
+//     silently-stripped bidi/zero-width rune would change which host the
+//     URL points at;
 //   - the URL parses;
 //   - it is absolute with an explicit scheme;
 //   - the scheme is https (http only when allowHTTP is set, a dev
 //     override);
-//   - no userinfo, no query string, no fragment;
+//   - no userinfo, no query string (including a bare trailing "?"), no
+//     fragment;
 //   - the hostname (port stripped, compared case-insensitively) equals
 //     the attested host.
 //
@@ -95,6 +86,11 @@ func isDisallowedRune(r rune) bool {
 func validateEmittedURL(raw, attestedHost string, allowHTTP bool) (string, error) {
 	if strings.TrimSpace(raw) == "" {
 		return "", errors.New("url is empty")
+	}
+	for _, r := range raw {
+		if isDisallowedRune(r) {
+			return "", fmt.Errorf("url %q contains a disallowed control/format rune U+%04X", raw, r)
+		}
 	}
 	u, err := url.Parse(raw)
 	if err != nil {
@@ -116,7 +112,10 @@ func validateEmittedURL(raw, attestedHost string, allowHTTP bool) (string, error
 	if u.User != nil {
 		return "", fmt.Errorf("url %q carries userinfo", raw)
 	}
-	if u.RawQuery != "" {
+	// RawQuery catches "?a=1"; ForceQuery catches a bare trailing "?"
+	// (which url.Parse records with an empty RawQuery), so both are
+	// rejected.
+	if u.RawQuery != "" || u.ForceQuery {
 		return "", fmt.Errorf("url %q carries a query string", raw)
 	}
 	if u.Fragment != "" {

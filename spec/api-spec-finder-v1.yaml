@@ -310,7 +310,15 @@ components:
         is optional.
       properties:
         query:
-          $ref: '#/components/schemas/Query'
+          # Search requires query.text (ARDS §7.2). The allOf overlay
+          # adds `required: [text]` on top of the shared Query schema so
+          # a schema validator rejects a text-less search, matching the
+          # prose. Explore reuses Query bare, where text is optional.
+          allOf:
+            - $ref: '#/components/schemas/Query'
+            - type: object
+              required:
+                - text
         federation:
           $ref: '#/components/schemas/Federation'
         pageSize:

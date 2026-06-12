@@ -259,9 +259,10 @@ func TestEventPageResponse_RoundTrip(t *testing.T) {
 	}
 }
 
-// TestTokenValues pins the production hyphenated token values. PR 2's
-// conformance test asserts these against the swagger; this guards
-// against an accidental switch to the OSS domain's underscored forms.
+// TestTokenValues pins the production hyphenated token values. The OSS
+// RA feed route's conformance test asserts these against the swagger;
+// this guards against an accidental switch to the OSS domain's
+// underscored forms.
 func TestTokenValues(t *testing.T) {
 	t.Parallel()
 	pins := map[string]string{
@@ -301,8 +302,8 @@ func TestTokenValues(t *testing.T) {
 	}
 }
 
-// TestJSONTags pins the exact JSON tag names against the swagger. PR 2's
-// byte-equality test depends on these not drifting.
+// TestJSONTags pins the exact JSON tag names against the swagger. The
+// OSS RA feed route's byte-equality test depends on these not drifting.
 func TestJSONTags(t *testing.T) {
 	t.Parallel()
 	it := feed.EventItem{
