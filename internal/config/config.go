@@ -188,17 +188,30 @@ type Log struct {
 	Format string `koanf:"format"` // "text" | "json"
 }
 
+// EventsFeed configures the public agent-events feed
+// (GET /v1/agents/events) the ANS Finder ingests (RA only).
+type EventsFeed struct {
+	// Retention bounds how far back the feed serves, anchored on each
+	// event's enqueue time. Events older than now-retention age out and
+	// become invisible to the feed. Defaults to 720h (30 days),
+	// matching the production feed's documented retention. A
+	// non-positive value disables the lower bound (serve everything
+	// delivered) — intended for tests only.
+	Retention time.Duration `koanf:"retention"`
+}
+
 // RAConfig is the full configuration for ans-ra.
 type RAConfig struct {
-	Server   Server    `koanf:"server"`
-	Auth     Auth      `koanf:"auth"`
-	CA       CA        `koanf:"ca"`
-	DNS      DNS       `koanf:"dns"`
-	Keys     Keys      `koanf:"keys"`
-	Store    Store     `koanf:"store"`
-	TLClient TLClient  `koanf:"tl-client"`
-	Signer   SignerCfg `koanf:"signer"`
-	Log      Log       `koanf:"log"`
+	Server     Server     `koanf:"server"`
+	Auth       Auth       `koanf:"auth"`
+	CA         CA         `koanf:"ca"`
+	DNS        DNS        `koanf:"dns"`
+	Keys       Keys       `koanf:"keys"`
+	Store      Store      `koanf:"store"`
+	TLClient   TLClient   `koanf:"tl-client"`
+	Signer     SignerCfg  `koanf:"signer"`
+	EventsFeed EventsFeed `koanf:"events-feed"`
+	Log        Log        `koanf:"log"`
 }
 
 // SignerCfg names the KeyManager-managed key the RA uses to sign
@@ -352,6 +365,9 @@ func (c *RAConfig) Validate() error {
 	}
 	if c.TLClient.Timeout <= 0 {
 		c.TLClient.Timeout = 10 * time.Second
+	}
+	if c.EventsFeed.Retention <= 0 {
+		c.EventsFeed.Retention = 720 * time.Hour
 	}
 	return nil
 }

@@ -148,3 +148,61 @@ type ByocCertificateStore interface {
 	FindByAgentID(ctx context.Context, agentID string) ([]*domain.ByocServerCertificate, error)
 	FindLatestValidByAgentID(ctx context.Context, agentID string) (*domain.ByocServerCertificate, error)
 }
+
+// FeedRow is the raw, store-shaped projection of one delivered outbox
+// row joined with its registration and endpoint rows. It is the read
+// model behind the agent-events feed (GET /v1/agents/events). The
+// service layer maps a FeedRow into the wire EventItem; the SQLite
+// adapter populates it.
+type FeedRow struct {
+	// LogID is the TL-assigned cursor (outbox.log_id). Non-empty by
+	// construction — the store filters log_id IS NOT NULL.
+	LogID string
+	// EventType is the outbox row's event_type column.
+	EventType string
+	// AgentID is the outbox row's agent_id column (the authoritative
+	// id — owner_id is never exposed through the feed).
+	AgentID string
+	// PayloadJSON is the outbox payload blob ({innerEventCanonical,
+	// producerSignature}); the inner event carries the producer's
+	// authoritative timestamps and identity.
+	PayloadJSON []byte
+	// RegAnsName / RegAgentHost / RegVersion are the registration-row
+	// identity columns, used as fallbacks when the inner event omits
+	// them.
+	RegAnsName   string
+	RegAgentHost string
+	RegVersion   string
+	// RegDisplayName / RegDescription are the registration-row display
+	// metadata columns.
+	RegDisplayName string
+	RegDescription string
+	// EndpointsJSON is the agent_endpoints.endpoints blob, or empty
+	// when the agent has no recorded endpoints.
+	EndpointsJSON []byte
+}
+
+// FeedQuery parameterizes a feed read.
+type FeedQuery struct {
+	// AfterLogID is the resolved cursor — rows strictly after the row
+	// carrying this logId are returned. Empty (or a cursor that
+	// resolves to no retained row) starts from the oldest retained row.
+	AfterLogID string
+	// Limit is the maximum number of rows to return. The service clamps
+	// it to the feed's [1, max] range before calling.
+	Limit int
+	// ProviderFilter, when non-empty, requests provider-scoped results.
+	// The OSS RA has no provider concept, so the store returns an empty
+	// page in that case.
+	ProviderFilter string
+}
+
+// FeedReader is the read port behind the agent-events feed. The SQLite
+// adapter implements it; the events service depends on it.
+type FeedReader interface {
+	// ReadFeed returns delivered, logged outbox rows within the
+	// retention window, ordered by outbox id ascending, starting after
+	// the cursor (or the oldest retained row when the cursor is empty
+	// or unknown). It returns at most q.Limit rows.
+	ReadFeed(ctx context.Context, q FeedQuery) ([]FeedRow, error)
+}

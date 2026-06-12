@@ -260,6 +260,41 @@ func TestRAConfig_Validate_AppliesDefaultTLClientTimeout(t *testing.T) {
 	}
 }
 
+func TestDefaultRAConfig_EventsFeedRetention(t *testing.T) {
+	c := defaultRAConfig()
+	if c.EventsFeed.Retention != 720*time.Hour {
+		t.Errorf("default events-feed retention: got %v, want 720h", c.EventsFeed.Retention)
+	}
+}
+
+func TestRAConfig_Validate_ClampsNonPositiveRetention(t *testing.T) {
+	dir := t.TempDir()
+	cases := []struct {
+		name string
+		set  time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -time.Hour},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := defaultRAConfig()
+			c.Auth.Static = &AuthStatic{APIKey: "x"}
+			c.CA.Self.DataDir = dir
+			c.Keys.File.Path = dir
+			c.Store.SQLite.Path = filepath.Join(dir, "db")
+			c.EventsFeed.Retention = tc.set
+
+			if err := c.Validate(); err != nil {
+				t.Fatalf("validate: %v", err)
+			}
+			if c.EventsFeed.Retention != 720*time.Hour {
+				t.Errorf("retention clamp not applied: got %v, want 720h", c.EventsFeed.Retention)
+			}
+		})
+	}
+}
+
 // ----- TLConfig.Validate error branches -----
 
 func TestTLConfig_Validate_Errors(t *testing.T) {

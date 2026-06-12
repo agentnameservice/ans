@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/adapter/auth"
 	"github.com/godaddy/ans/internal/domain"
@@ -47,12 +48,13 @@ import (
 // V1RegistrationHandler wires HTTP routes for the V1 `/v1/agents/*`
 // registration + detail surface.
 type V1RegistrationHandler struct {
+	responder
 	svc *service.RegistrationService
 }
 
 // NewV1RegistrationHandler constructs a V1RegistrationHandler.
-func NewV1RegistrationHandler(svc *service.RegistrationService) *V1RegistrationHandler {
-	return &V1RegistrationHandler{svc: svc}
+func NewV1RegistrationHandler(svc *service.RegistrationService, logger zerolog.Logger) *V1RegistrationHandler {
+	return &V1RegistrationHandler{responder: newResponder(logger), svc: svc}
 }
 
 // v1RegistrationRequest mirrors the `AgentRegistrationRequest`
@@ -180,30 +182,30 @@ func (h *V1RegistrationHandler) Register(w http.ResponseWriter, r *http.Request)
 
 	var req v1RegistrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
 		return
 	}
 
 	id, ok := auth.IdentityFromContext(r.Context())
 	if !ok {
-		WriteError(w, domain.NewUnauthorizedError("NO_IDENTITY", "authentication required"))
+		h.writeError(w, domain.NewUnauthorizedError("NO_IDENTITY", "authentication required"))
 		return
 	}
 
 	semver, err := domain.ParseSemVer(req.Version)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	ansName, err := domain.NewAnsName(semver, req.AgentHost)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
 	eps, err := mapV1EndpointsFromDTO(req.Endpoints)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
@@ -223,7 +225,7 @@ func (h *V1RegistrationHandler) Register(w http.ResponseWriter, r *http.Request)
 		SchemaVersion: "V1",
 	})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
@@ -238,12 +240,12 @@ func (h *V1RegistrationHandler) Register(w http.ResponseWriter, r *http.Request)
 func (h *V1RegistrationHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	if agentID == "" {
-		WriteError(w, domain.NewValidationError("MISSING_AGENT_ID", "agentId is required"))
+		h.writeError(w, domain.NewValidationError("MISSING_AGENT_ID", "agentId is required"))
 		return
 	}
 	res, err := h.svc.GetByAgentID(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mapV1AgentDetail(res.Registration, res.Endpoints, r, h.svc.TLPublicBaseURL()))

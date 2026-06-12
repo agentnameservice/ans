@@ -42,6 +42,9 @@ func defaultRAConfig() *RAConfig {
 			KeyID: "ans-ra-signer",
 			RaID:  "ans-ra-local",
 		},
+		EventsFeed: EventsFeed{
+			Retention: 720 * time.Hour, // 30 days — matches production feed retention.
+		},
 		Log: Log{Level: "info", Format: "text"},
 	}
 }

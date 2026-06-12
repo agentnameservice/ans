@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/ra/service"
@@ -37,12 +38,13 @@ import (
 // `ServerCertificateAuthority` port sign the cert, or
 // `serverCertificatePEM` + chain for BYOC. Exactly one required.
 type V1RenewalHandler struct {
+	responder
 	svc *service.RegistrationService
 }
 
 // NewV1RenewalHandler constructs a V1RenewalHandler.
-func NewV1RenewalHandler(svc *service.RegistrationService) *V1RenewalHandler {
-	return &V1RenewalHandler{svc: svc}
+func NewV1RenewalHandler(svc *service.RegistrationService, logger zerolog.Logger) *V1RenewalHandler {
+	return &V1RenewalHandler{responder: newResponder(logger), svc: svc}
 }
 
 // SubmitServerCertRenewal handles POST
@@ -52,7 +54,7 @@ func (h *V1RenewalHandler) SubmitServerCertRenewal(w http.ResponseWriter, r *htt
 	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
 	var req serverCertRenewalRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
 		return
 	}
 	res, err := h.svc.SubmitServerCertRenewal(r.Context(), agentID, service.SubmitRenewalInput{
@@ -61,7 +63,7 @@ func (h *V1RenewalHandler) SubmitServerCertRenewal(w http.ResponseWriter, r *htt
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
 	})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, mapV1RenewalSubmission(agentID, res))
@@ -73,7 +75,7 @@ func (h *V1RenewalHandler) GetServerCertRenewal(w http.ResponseWriter, r *http.R
 	agentID := chi.URLParam(r, "agentId")
 	ren, err := h.svc.GetServerCertRenewal(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mapV1RenewalStatus(agentID, ren))
@@ -84,7 +86,7 @@ func (h *V1RenewalHandler) GetServerCertRenewal(w http.ResponseWriter, r *http.R
 func (h *V1RenewalHandler) CancelServerCertRenewal(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	if err := h.svc.CancelServerCertRenewal(r.Context(), agentID); err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -96,7 +98,7 @@ func (h *V1RenewalHandler) VerifyRenewalACME(w http.ResponseWriter, r *http.Requ
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyRenewalACME(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	status := http.StatusAccepted

@@ -95,6 +95,7 @@ func run(cfgPath string) error {
 	byoc := sqlite.NewByocCertificateStore(db)
 	renewals := sqlite.NewRenewalStore(db)
 	outbox := sqlite.NewOutboxStore(db)
+	feedStore := sqlite.NewFeedStore(db, cfg.EventsFeed.Retention)
 
 	// Crypto.
 	km, err := keymanager.NewFileKeyManager(cfg.Keys.File.Path)
@@ -174,11 +175,26 @@ func run(cfgPath string) error {
 		WithServerCertificateAuthority(serverCA).
 		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL)
 
+	// Events feed service — projects delivered outbox rows into the
+	// public agent-events stream.
+	eventsSvc := service.NewEventsService(feedStore)
+
 	// HTTP.
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
 	r.Use(middleware.Timeout(30 * time.Second))
+	// Stop browsers/proxies from MIME-sniffing responses away from
+	// their declared Content-Type. Cheap defense-in-depth; matters most
+	// on the anonymous /v1/agents/events feed, which serves
+	// attacker-influenceable JSON (agent-supplied display names, URLs)
+	// to unauthenticated clients.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			next.ServeHTTP(w, req)
+		})
+	})
 	r.Use(middleware.AllowContentType("application/json"))
 	r.Use(authProvider.Middleware())
 
@@ -194,7 +210,7 @@ func run(cfgPath string) error {
 
 	// Registration (no ownership middleware — POST creates a new agent
 	// and the caller must be able to register their own).
-	regH := handler.NewRegistrationHandler(regSvc)
+	regH := handler.NewRegistrationHandler(regSvc, logger)
 	r.Post("/v2/ans/agents", regH.Register)
 
 	// Agent-scoped routes — ownership middleware gates every one. The
@@ -203,7 +219,7 @@ func run(cfgPath string) error {
 	// routes (GET) 404 on not-owned to hide existence; write routes
 	// (POST) 403 so authenticated operators understand it's an
 	// authorization failure (spec §26, §370).
-	lifeH := handler.NewLifecycleHandler(regSvc)
+	lifeH := handler.NewLifecycleHandler(regSvc, logger)
 	r.Get("/v2/ans/agents", lifeH.List)
 
 	readOwnership := ramiddleware.ReadOwnership(agents)
@@ -230,21 +246,34 @@ func run(cfgPath string) error {
 	// spec. Shares the same RegistrationService as the V2 routes;
 	// only the DTO marshalling + TL-emit schema version differ. See
 	// `internal/ra/handler/v1registration.go` and siblings.
-	v1regH := handler.NewV1RegistrationHandler(regSvc)
+	v1regH := handler.NewV1RegistrationHandler(regSvc, logger)
 	r.Post("/v1/agents/register", v1regH.Register)
 	r.With(readOwnership).Get("/v1/agents/{agentId}", v1regH.Detail)
 
 	// V1 lifecycle (verify-acme, verify-dns, revoke). V1 TL emits
 	// AGENT_REGISTERED on successful verify-dns and AGENT_REVOKED on
 	// revoke — the two terminal leaves V1 agents ever receive.
-	v1lifeH := handler.NewV1LifecycleHandler(regSvc)
+	v1lifeH := handler.NewV1LifecycleHandler(regSvc, logger)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/verify-acme", v1lifeH.VerifyACME)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/verify-dns", v1lifeH.VerifyDNS)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/revoke", v1lifeH.Revoke)
 
+	// Public agent-events feed. Anonymous via an EXACT-path exemption
+	// in buildAuth (WithAnonymousExactPath("/v1/agents/events")). The
+	// exemption matches only this exact path — not children, and not
+	// same-prefix siblings — because chi backtracks
+	// /v1/agents/events/<x> onto the authenticated
+	// /v1/agents/{agentId}/<x> routes (agentId="events"); a prefix
+	// exemption would silently disable auth for those write siblings.
+	// chi prefers the static `events` segment over the {agentId}
+	// wildcard, so the GET below does not clash with
+	// /v1/agents/{agentId}.
+	v1eventsH := handler.NewV1EventsHandler(eventsSvc, logger)
+	r.Get("/v1/agents/events", v1eventsH.List)
+
 	// V1 certificate operations. DTOs reuse V2 types (reference spec
 	// shares the schemas); only the URL prefix differs.
-	v1certH := handler.NewV1CertificatesHandler(regSvc)
+	v1certH := handler.NewV1CertificatesHandler(regSvc, logger)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/certificates/identity", v1certH.GetIdentityCerts)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/certificates/server", v1certH.GetServerCerts)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/csrs/{csrId}/status", v1certH.GetCSRStatus)
@@ -252,7 +281,7 @@ func run(cfgPath string) error {
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/certificates/server", v1certH.SubmitServerCSR)
 
 	// V1 server-cert renewal routes.
-	v1renH := handler.NewV1RenewalHandler(regSvc)
+	v1renH := handler.NewV1RenewalHandler(regSvc, logger)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/certificates/server/renewal", v1renH.SubmitServerCertRenewal)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/certificates/server/renewal", v1renH.GetServerCertRenewal)
 	r.With(writeOwnership).Delete("/v1/agents/{agentId}/certificates/server/renewal", v1renH.CancelServerCertRenewal)
@@ -372,6 +401,12 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithAnonymousPath("/v2/admin/health"),
 			auth.WithAnonymousPath("/v2/admin/ready"),
 			auth.WithAnonymousPath("/docs"),
+			// Public agent-events feed. EXACT match — a subtree
+			// exemption here would also exempt /v1/agents/events/revoke,
+			// which chi backtracks onto the authenticated
+			// /v1/agents/{agentId}/revoke route (agentId="events"),
+			// silently disabling auth for an existing write sibling.
+			auth.WithAnonymousExactPath("/v1/agents/events"),
 		), nil
 	case "oidc":
 		return auth.NewOIDCProvider(
@@ -382,6 +417,10 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithOIDCAnonymousPath("/v2/admin/health"),
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
 			auth.WithOIDCAnonymousPath("/docs"),
+			// Public agent-events feed. EXACT match — see the static
+			// provider's WithAnonymousExactPath above for the
+			// chi-backtracking rationale.
+			auth.WithOIDCAnonymousExactPath("/v1/agents/events"),
 			// Empty AdminGroups means no OIDC user is admin —
 			// preserves prior behaviour for operators who haven't
 			// opted in. Spreading nil/empty into a variadic is the
