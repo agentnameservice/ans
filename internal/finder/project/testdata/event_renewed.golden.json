@@ -1,0 +1,45 @@
+{
+  "entries": [
+    {
+      "lifecycle": "ACTIVE",
+      "agentId": "770e8400-e29b-41d4-a716-446655440222",
+      "ansName": "ans://v1.1.0.weather.example.net",
+      "logId": "019a7abb-3333-7b5b-b048-d0b78f4b4c5f",
+      "expiresAt": "2026-06-01T00:00:00Z",
+      "entry": {
+        "identifier": "urn:ai:weather.example.net:agents:Weather-Data-Node",
+        "displayName": "Weather Data Node",
+        "type": "application/mcp-server+json",
+        "url": "https://weather.example.net/.well-known/mcp.json",
+        "description": "Enterprise weather MCP server for live telemetry",
+        "tags": [
+          "forecast",
+          "weather"
+        ],
+        "capabilities": [
+          "Current Weather",
+          "Forecast"
+        ],
+        "version": "1.1.0",
+        "updatedAt": "2025-06-01T00:00:00Z",
+        "metadata": {
+          "agentUrl": "https://weather.example.net/mcp",
+          "ansName": "ans://v1.1.0.weather.example.net",
+          "logId": "019a7abb-3333-7b5b-b048-d0b78f4b4c5f"
+        },
+        "trustManifest": {
+          "identity": "https://weather.example.net",
+          "identityType": "https",
+          "attestations": [
+            {
+              "type": "ANS-Registration",
+              "uri": "https://tl.ans.example.org/v1/agents/770e8400-e29b-41d4-a716-446655440222/receipt",
+              "mediaType": "application/scitt-receipt+cose"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "skipped": []
+}

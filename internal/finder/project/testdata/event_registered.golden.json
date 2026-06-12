@@ -1,0 +1,85 @@
+{
+  "entries": [
+    {
+      "lifecycle": "ACTIVE",
+      "agentId": "550e8400-e29b-41d4-a716-446655440000",
+      "ansName": "ans://v1.0.0.myagent.example.com",
+      "logId": "019a7a52-e5bf-7b5b-b048-d0b78f4b4c5f",
+      "expiresAt": "2026-01-08T12:30:00Z",
+      "entry": {
+        "identifier": "urn:ai:myagent.example.com:agents:Sentiment-Analyzer",
+        "displayName": "Sentiment Analyzer",
+        "type": "application/a2a-agent-card+json",
+        "url": "https://myagent.example.com/.well-known/agent-card.json",
+        "description": "An agent that analyzes sentiment in text",
+        "tags": [
+          "nlp",
+          "sentiment",
+          "translation"
+        ],
+        "capabilities": [
+          "Analyze Sentiment",
+          "Translate Document"
+        ],
+        "version": "1.0.0",
+        "updatedAt": "2025-01-08T12:30:00Z",
+        "metadata": {
+          "agentUrl": "https://myagent.example.com/a2a",
+          "ansName": "ans://v1.0.0.myagent.example.com",
+          "logId": "019a7a52-e5bf-7b5b-b048-d0b78f4b4c5f"
+        },
+        "trustManifest": {
+          "identity": "https://myagent.example.com",
+          "identityType": "https",
+          "attestations": [
+            {
+              "type": "ANS-Registration",
+              "uri": "https://tl.ans.example.org/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt",
+              "mediaType": "application/scitt-receipt+cose"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "lifecycle": "ACTIVE",
+      "agentId": "550e8400-e29b-41d4-a716-446655440000",
+      "ansName": "ans://v1.0.0.myagent.example.com",
+      "logId": "019a7a52-e5bf-7b5b-b048-d0b78f4b4c5f",
+      "expiresAt": "2026-01-08T12:30:00Z",
+      "entry": {
+        "identifier": "urn:ai:myagent.example.com:agents:Sentiment-Analyzer",
+        "displayName": "Sentiment Analyzer",
+        "type": "application/mcp-server+json",
+        "url": "https://myagent.example.com/.well-known/mcp.json",
+        "description": "An agent that analyzes sentiment in text",
+        "tags": [
+          "domain",
+          "suggestion"
+        ],
+        "capabilities": [
+          "Domain Suggest"
+        ],
+        "version": "1.0.0",
+        "updatedAt": "2025-01-08T12:30:00Z",
+        "metadata": {
+          "agentUrl": "https://myagent.example.com/mcp",
+          "ansName": "ans://v1.0.0.myagent.example.com",
+          "logId": "019a7a52-e5bf-7b5b-b048-d0b78f4b4c5f"
+        },
+        "trustManifest": {
+          "identity": "https://myagent.example.com",
+          "identityType": "https",
+          "attestations": [
+            {
+              "type": "ANS-Registration",
+              "uri": "https://tl.ans.example.org/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt",
+              "mediaType": "application/scitt-receipt+cose"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "skipped": []
+}

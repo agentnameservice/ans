@@ -1,0 +1,17 @@
+{
+  "entries": [
+    {
+      "lifecycle": "REVOKED",
+      "agentId": "660e8400-e29b-41d4-a716-446655440111",
+      "ansName": "ans://v2.0.0.headless.example.org",
+      "logId": "019a7aaa-2222-7b5b-b048-d0b78f4b4c5f",
+      "expiresAt": "",
+      "entry": {
+        "identifier": "",
+        "displayName": "",
+        "type": ""
+      }
+    }
+  ],
+  "skipped": []
+}
