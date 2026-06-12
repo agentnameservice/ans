@@ -316,6 +316,10 @@ func (s *IdentityStore) StageChallenge(
 	if !v.Challenge.ExpiresAt.IsZero() {
 		expires = sql.NullInt64{Int64: v.Challenge.ExpiresAt.UnixMilli(), Valid: true}
 	}
+	var subjectAID sql.NullString
+	if v.SubjectAID != "" {
+		subjectAID = sql.NullString{String: v.SubjectAID, Valid: true}
+	}
 	res, err := s.db.extx(ctx).ExecContext(ctx, `
         UPDATE identities
         SET challenge_nonce          = ?,
@@ -323,12 +327,13 @@ func (s *IdentityStore) StageChallenge(
             challenge_consumed_at_ms = NULL,
             challenge_claimed_at_ms  = NULL,
             pending_value            = ?,
+            subject_aid              = ?,
             updated_at_ms            = ?
         WHERE identity_id = ?
           AND status = ?
           AND (challenge_nonce = ? OR (challenge_nonce IS NULL AND ? = ''))
           AND (challenge_claimed_at_ms IS NULL OR challenge_claimed_at_ms < ?)`,
-		v.Challenge.Nonce, expires, v.PendingValue, v.UpdatedAt.UnixMilli(),
+		v.Challenge.Nonce, expires, v.PendingValue, subjectAID, v.UpdatedAt.UnixMilli(),
 		v.IdentityID, string(expectedStatus), expectedNonce, expectedNonce,
 		staleBefore.UnixMilli())
 	if err != nil {

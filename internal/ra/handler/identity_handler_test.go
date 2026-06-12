@@ -89,7 +89,6 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 		didresolver.NewNoopResolver(),
 		okSealer{},
 		leiverifier.NewNoop(),
-		outbox,
 		db,
 	).WithChallengeTTL(30 * time.Minute)
 

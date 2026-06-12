@@ -96,11 +96,11 @@ func TestIdentityLifecycle_LEIHappy(t *testing.T) {
 		t.Fatalf("verified state: %+v", identity)
 	}
 
-	rows := fx.drainOutbox(t)
+	rows := fx.drainSealed(t)
 	if len(rows) != 1 {
 		t.Fatalf("outbox rows: %d", len(rows))
 	}
-	inner := fx.decodeOutboxEvent(t, rows[0])
+	inner := fx.decodeSealed(t, rows[0])
 	if inner.EventType != identityevent.TypeIdentityVerified || len(inner.Keys) != 1 {
 		t.Fatalf("sealed event: %+v", inner)
 	}

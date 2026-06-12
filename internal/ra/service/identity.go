@@ -326,7 +326,7 @@ func (s *IdentityService) Rotate(ctx context.Context, providerID, identityID, ra
 	if err := identity.StageRotation(rawValue, now); err != nil {
 		return nil, err
 	}
-	return s.challenge(ctx, identity, now, true, opt)
+	return s.challenge(ctx, identity, now, false, opt)
 }
 
 // challenge mints a fresh nonce on the identity, runs the kind's
