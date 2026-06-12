@@ -15,8 +15,9 @@
 #  11. GET    TL /v1/agents/{id}                                (badge)
 #  12. GET    TL /root-keys                                     (verifier PEMs)
 #  13. GET    TL /v1/agents/{id}/receipt                        (SCITT COSE)
-#  14. go test ./internal/tl/receipt -run TestSmokeVerifyDemoReceipt  (offline verify)
-#  15. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
+#  14. bin/ans-verify -url TL -agent {id}                      (offline verify)
+#  15. POST   FINDER /v1/search                                 (discover via ans-finder)
+#  16. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
 #
 # Usage:
 #   scripts/demo/run-lifecycle.sh                            # random host, version 1.0.0
@@ -294,7 +295,50 @@ else
   fail "unexpected receipt status $receipt_status; see $RECEIPT_FILE"
 fi
 
-# ----- 15. Admin producer-keys API -----
+# ----- 15. Discover via ans-finder -----
+#
+# The Finder polls the RA's events feed, projects the AGENT_REGISTERED
+# event into its FTS5 catalog, and serves it on POST /v1/search. Because
+# the event only enters the feed once the TL has acked it (which step 9
+# waited for), and the poll interval is ~2s, the entry appears within a
+# few seconds. We scope the query by the structured `publisher` filter to
+# THIS run's host so back-to-back demo runs (which all register an agent
+# named "demo-agent") don't collide — the text matches the display name,
+# the filter pins the exact registration. Then assert the projected
+# identifier + receipt attestation, closing the loop from registration
+# all the way to discovery.
+header "15. Discover via ans-finder (POST /v1/search)"
+if curl -sSf "$FINDER_URL/v1/admin/ready" >/dev/null 2>&1; then
+  SEARCH_BODY=$(jq -n --arg host "$AGENT_HOST" \
+    '{query:{text:"demo-agent", filter:{publisher:[$host]}}}')
+  MATCH=""
+  for i in $(seq 1 15); do
+    resp=$(curl -sS -X POST -H "Content-Type: application/json" \
+      --data "$SEARCH_BODY" "$FINDER_URL/v1/search" 2>/dev/null || true)
+    # Pull the result whose identifier is rooted at this run's host.
+    MATCH=$(printf '%s' "$resp" | \
+      jq -c --arg host "$AGENT_HOST" \
+      'first(.results[]? | select(.identifier | startswith("urn:ai:" + $host + ":agents:")))' \
+      2>/dev/null || true)
+    if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
+      printf '%s' "$resp" | pretty_json >&2
+      break
+    fi
+    MATCH=""
+    sleep 1
+  done
+  if [ -z "$MATCH" ]; then
+    fail "ans-finder did not surface ${AGENT_HOST} within 15s (check $DATA/finder.log)"
+  fi
+  IDENT=$(printf '%s' "$MATCH" | jq -r '.identifier')
+  RECEIPT_URI=$(printf '%s' "$MATCH" | jq -r '.trustManifest.attestations[0].uri // "none"')
+  ok "discovered $IDENT"
+  ok "ANS-Registration receipt: $RECEIPT_URI"
+else
+  warn "ans-finder not reachable at $FINDER_URL — skipping discovery step (start it via scripts/demo/start.sh)"
+fi
+
+# ----- 16. Admin producer-keys API -----
 #
 # Stage 4 moved the producer-key trust store from YAML-only to
 # SQLite with admin CRUD. The YAML producerKeys[] section still works
@@ -305,7 +349,7 @@ fi
 #       static API key, which maps to IsAdmin=true);
 #   (b) the bootstrapped RA signer is actually in SQLite;
 #   (c) the list response is the shape admin tooling will consume.
-header "15. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
+header "16. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
 curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
 
 # ----- summary -----

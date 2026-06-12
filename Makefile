@@ -1,4 +1,4 @@
-.PHONY: build build-ra build-tl build-verify build-dns \
+.PHONY: build build-ra build-tl build-verify build-dns build-finder \
        test test-cover test-race lint vet fmt \
        run-local run-ra run-tl \
        clean generate check docs-sync \
@@ -28,7 +28,7 @@ GOLANGCI_LINT         = $(GOBIN)/golangci-lint
 
 # ─── Build ──────────────────────────────────────────────────────────
 
-build: docs-sync build-ra build-tl build-verify build-dns
+build: docs-sync build-ra build-tl build-verify build-dns build-finder
 
 build-ra: docs-sync
 	@echo "Building ans-ra..."
@@ -46,6 +46,10 @@ build-dns:
 	@echo "Building ans-dns..."
 	@go build $(GOFLAGS) $(LDFLAGS) -o $(GOBIN)/ans-dns ./cmd/ans-dns
 
+build-finder: docs-sync
+	@echo "Building ans-finder..."
+	@go build $(GOFLAGS) $(LDFLAGS) -o $(GOBIN)/ans-finder ./cmd/ans-finder
+
 # docs-sync copies the canonical OpenAPI specs into the docsui
 # adapter's //go:embed directory. Running before every build keeps
 # the Swagger-UI-served spec in lockstep with spec/. A test in
@@ -54,6 +58,7 @@ build-dns:
 docs-sync:
 	@cp spec/api-spec-v2.yaml internal/adapter/docsui/openapi/ra.yaml
 	@cp spec/api-spec-tl-v2.yaml internal/adapter/docsui/openapi/tl.yaml
+	@cp spec/api-spec-finder-v1.yaml internal/adapter/docsui/openapi/finder.yaml
 
 # ─── Test ───────────────────────────────────────────────────────────
 

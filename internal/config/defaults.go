@@ -82,3 +82,34 @@ func defaultTLConfig() *TLConfig {
 		Log: Log{Level: "info", Format: "text"},
 	}
 }
+
+// defaultFinderConfig returns a FinderConfig pre-populated with sensible
+// defaults. Values from the YAML file and environment variables override
+// these.
+func defaultFinderConfig() *FinderConfig {
+	return &FinderConfig{
+		Server: Server{Host: "0.0.0.0", Port: 18082},
+		Store: Store{
+			Type:   "sqlite",
+			SQLite: &StoreSQLite{Path: "./data/finder/finder.db"},
+		},
+		Feed: FinderFeed{
+			BaseURL:      "https://localhost:18080",
+			AllowHTTP:    false,
+			PollInterval: 5 * time.Second,
+			PageSize:     100,
+			Timeout:      10 * time.Second,
+			StaleBound:   60 * time.Second,
+		},
+		TL: FinderTL{
+			PublicBaseURL: "https://localhost:18081",
+		},
+		Search: FinderSearch{
+			Rate:            50,
+			Burst:           100,
+			MaxPageSize:     100,
+			DefaultPageSize: 10,
+		},
+		Log: Log{Level: "info", Format: "text"},
+	}
+}

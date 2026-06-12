@@ -441,24 +441,41 @@ func validatePublicBaseURL(raw string) error {
 	if raw == "" {
 		return errors.New("tl-client.public-base-url is required")
 	}
+	// The RA→TL public base URL is always https (no dev override): it is
+	// woven into DNS _ans-badge records that third parties resolve.
+	return validateAbsoluteServiceURL(raw, false, "tl-client.public-base-url")
+}
+
+// validateAbsoluteServiceURL enforces the shared service-URL policy used
+// for base URLs the binaries fetch or advertise: absolute with an
+// explicit scheme, https (http permitted only under allowHTTP, a dev
+// override), and no userinfo, query string, or fragment. label names the
+// offending config field in error messages.
+func validateAbsoluteServiceURL(raw string, allowHTTP bool, label string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("tl-client.public-base-url: %w", err)
-	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("tl-client.public-base-url must use https scheme, got %q", u.Scheme)
+		return fmt.Errorf("%s: %w", label, err)
 	}
 	if u.Host == "" {
-		return errors.New("tl-client.public-base-url: missing host")
+		return fmt.Errorf("%s: missing host", label)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !allowHTTP {
+			return fmt.Errorf("%s must use https scheme, got %q", label, u.Scheme)
+		}
+	default:
+		return fmt.Errorf("%s scheme %q not permitted", label, u.Scheme)
 	}
 	if u.User != nil {
-		return errors.New("tl-client.public-base-url: userinfo not allowed")
+		return fmt.Errorf("%s: userinfo not allowed", label)
 	}
 	if u.RawQuery != "" {
-		return errors.New("tl-client.public-base-url: query string not allowed")
+		return fmt.Errorf("%s: query string not allowed", label)
 	}
 	if u.Fragment != "" {
-		return errors.New("tl-client.public-base-url: fragment not allowed")
+		return fmt.Errorf("%s: fragment not allowed", label)
 	}
 	return nil
 }

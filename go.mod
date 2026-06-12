@@ -19,6 +19,7 @@ require (
 	github.com/stretchr/testify v1.11.1
 	github.com/transparency-dev/tessera v1.0.2
 	golang.org/x/mod v0.36.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.51.0
 )
 
@@ -56,7 +57,6 @@ require (
 	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/sys v0.43.0 // indirect
 	golang.org/x/tools v0.44.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	k8s.io/klog/v2 v2.140.0 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

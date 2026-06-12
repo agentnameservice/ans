@@ -82,6 +82,7 @@ func TestEmbeddedSpecs_MatchCanonical(t *testing.T) {
 	}{
 		{filepath.Join(repoRoot, "spec", "api-spec-v2.yaml"), docsui.SpecRA.YAML, "ra"},
 		{filepath.Join(repoRoot, "spec", "api-spec-tl-v2.yaml"), docsui.SpecTL.YAML, "tl"},
+		{filepath.Join(repoRoot, "spec", "api-spec-finder-v1.yaml"), docsui.SpecFinder.YAML, "finder"},
 	}
 	for _, p := range pairs {
 		t.Run(p.label, func(t *testing.T) {
