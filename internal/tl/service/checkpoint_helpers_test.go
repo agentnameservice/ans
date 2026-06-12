@@ -31,23 +31,28 @@ func TestTreeHeight(t *testing.T) {
 	}
 }
 
-// ----- splitNoteBody -----
+// ----- checkpointSignatureViews -----
+//
+// The exhaustive note-parsing cases (lenient tokenization, keyhash hex
+// layering, c2sp/jws classification, malformed-line skipping) live in
+// the internal/lognote package tests. These smoke tests only confirm
+// the service-layer mapping on top of lognote.SplitNote: the "0x"
+// keyhash prefix, the origin fallback for an empty signer name, the
+// ES256 algorithm label, and the no-separator short-circuit.
 
-func TestSplitNoteBody_SingleSumdbSig(t *testing.T) {
+func TestCheckpointSignatureViews_SingleC2SP(t *testing.T) {
 	t.Parallel()
-	// Construct a sumdb-note-style body: 4 keyhash bytes followed by
-	// an ASN.1 DER ECDSA signature-shaped blob. The signature is not
-	// cryptographically validated in this parser test.
+	// 4 keyhash bytes followed by an ASN.1-DER-shaped (non-JWS) blob.
 	sigBytes := []byte{
 		0xde, 0xad, 0xbe, 0xef,
 		0x30, 0x06,
 		0x02, 0x01, 0x01,
 		0x02, 0x01, 0x02,
 	}
-	b64Sig := base64.StdEncoding.EncodeToString(sigBytes)
-	note := "ans-demo\n5\nhashhex\n\n\u2014 ans-demo " + b64Sig + "\n"
+	b64 := base64.StdEncoding.EncodeToString(sigBytes)
+	note := "ans-demo\n5\nhashhex\n\n— ans-demo " + b64 + "\n"
 
-	body, sigs := splitNoteBody(note, "ans-demo")
+	body, sigs := checkpointSignatureViews(note, "ans-demo")
 	if !strings.Contains(body, "ans-demo") {
 		t.Errorf("body should include header: %q", body)
 	}
@@ -56,7 +61,7 @@ func TestSplitNoteBody_SingleSumdbSig(t *testing.T) {
 	}
 	s := sigs[0]
 	if s.SignerName != "ans-demo" {
-		t.Errorf("signer: got %q", s.SignerName)
+		t.Errorf("signer: got %q, want ans-demo", s.SignerName)
 	}
 	if s.SignatureType != "c2sp" || s.Algorithm != "ES256" {
 		t.Errorf("type/alg: got %s/%s, want c2sp/ES256", s.SignatureType, s.Algorithm)
@@ -64,28 +69,22 @@ func TestSplitNoteBody_SingleSumdbSig(t *testing.T) {
 	if s.KeyHash != "0xdeadbeef" {
 		t.Errorf("keyhash: got %q, want 0xdeadbeef", s.KeyHash)
 	}
-}
-
-func TestSplitNoteBody_NoSeparatorReturnsFullTextNoSigs(t *testing.T) {
-	body, sigs := splitNoteBody("header only", "origin")
-	if body != "header only" {
-		t.Errorf("body: got %q", body)
-	}
-	if sigs != nil {
-		t.Errorf("sigs should be nil when no separator: %v", sigs)
+	if s.RawSignature != b64 {
+		t.Errorf("rawSignature: got %q, want %q", s.RawSignature, b64)
 	}
 }
 
-func TestSplitNoteBody_JWSClassification(t *testing.T) {
-	// JWS sig: 4 keyhash bytes + bytes starting with base64("{\"alg\":").
+func TestCheckpointSignatureViews_JWSClassification(t *testing.T) {
+	t.Parallel()
+	// 4 keyhash bytes + the JWS marker base64("{\"alg\":") + padding.
 	raw := make([]byte, 0, 4+10+20)
-	raw = append(raw, 0x01, 0x02, 0x03, 0x04)  // keyhash
-	raw = append(raw, []byte("eyJhbGciOi")...) // JWS marker
-	raw = append(raw, make([]byte, 20)...)     // padding
+	raw = append(raw, 0x01, 0x02, 0x03, 0x04)
+	raw = append(raw, []byte("eyJhbGciOi")...)
+	raw = append(raw, make([]byte, 20)...)
 	b64 := base64.StdEncoding.EncodeToString(raw)
-	note := "origin\n\n\u2014 origin " + b64 + "\n"
+	note := "origin\n\n— origin " + b64 + "\n"
 
-	_, sigs := splitNoteBody(note, "origin")
+	_, sigs := checkpointSignatureViews(note, "origin")
 	if len(sigs) != 1 {
 		t.Fatalf("want 1 sig, got %d", len(sigs))
 	}
@@ -94,63 +93,42 @@ func TestSplitNoteBody_JWSClassification(t *testing.T) {
 	}
 }
 
-func TestSplitNoteBody_SkipsMalformedLines(t *testing.T) {
-	note := "origin\n\n" +
-		"not a sig line\n" +
-		"\u2014 without-sig-segment\n" + // missing base64 part
-		"\u2014 name " + base64.StdEncoding.EncodeToString(make([]byte, 4+32)) + "\n"
-	_, sigs := splitNoteBody(note, "origin")
+func TestCheckpointSignatureViews_NoSeparatorReturnsRawNoSigs(t *testing.T) {
+	t.Parallel()
+	body, sigs := checkpointSignatureViews("header only", "origin")
+	if body != "header only" {
+		t.Errorf("body: got %q, want %q", body, "header only")
+	}
+	if sigs != nil {
+		t.Errorf("sigs should be nil when no separator: %v", sigs)
+	}
+}
+
+func TestCheckpointSignatureViews_SeparatorButNoSigs(t *testing.T) {
+	t.Parallel()
+	body, sigs := checkpointSignatureViews("origin\n5\nrh\n\n", "origin")
+	if body != "origin\n5\nrh\n" {
+		t.Errorf("body: got %q, want %q", body, "origin\n5\nrh\n")
+	}
+	if sigs != nil {
+		t.Errorf("sigs should be nil when no signature lines: %v", sigs)
+	}
+}
+
+func TestCheckpointSignatureViews_EmptyNameFallsBackToOrigin(t *testing.T) {
+	t.Parallel()
+	// A signature line whose name segment is empty: "—  <base64>"
+	// (em-dash, space, empty name token, space, base64). After stripping
+	// the "— " prefix the remainder is " <base64>"; LastIndex(" ")
+	// puts an empty string before the blob, so the view's signer name is
+	// empty and must fall back to the origin.
+	b64 := base64.StdEncoding.EncodeToString(make([]byte, 4+32))
+	note := "origin\n1\nrh\n\n—  " + b64 + "\n"
+	_, sigs := checkpointSignatureViews(note, "fallback-origin")
 	if len(sigs) != 1 {
-		t.Errorf("want 1 valid sig after filtering malformed, got %d", len(sigs))
+		t.Fatalf("want 1 sig, got %d", len(sigs))
 	}
-}
-
-// ----- keyhashFromSumdbSig -----
-
-func TestKeyhashFromSumdbSig(t *testing.T) {
-	t.Parallel()
-	// Construct a sig with known keyhash bytes. Production emits the
-	// keyhash with a `0x` prefix, matching what verifiers compare
-	// against the header `kid` and the /root-keys entry.
-	raw := []byte{0x12, 0x34, 0x56, 0x78, 0x99, 0x00, 0x00}
-	b64 := base64.StdEncoding.EncodeToString(raw)
-	if got := keyhashFromSumdbSig(b64); got != "0x12345678" {
-		t.Errorf("got %q, want 0x12345678", got)
-	}
-}
-
-func TestKeyhashFromSumdbSig_BadBase64(t *testing.T) {
-	if got := keyhashFromSumdbSig("!!!"); got != "" {
-		t.Errorf("bad base64: got %q, want empty", got)
-	}
-}
-
-func TestKeyhashFromSumdbSig_TooShort(t *testing.T) {
-	// 3 bytes < 4-byte prefix.
-	b64 := base64.StdEncoding.EncodeToString([]byte{0x01, 0x02, 0x03})
-	if got := keyhashFromSumdbSig(b64); got != "" {
-		t.Errorf("too-short: got %q, want empty", got)
-	}
-}
-
-// ----- classifySumdbSig -----
-
-func TestClassifySumdbSig_DefaultC2SP(t *testing.T) {
-	t.Parallel()
-	// Enough bytes, no JWS marker → c2sp.
-	raw := make([]byte, 4+64)
-	b64 := base64.StdEncoding.EncodeToString(raw)
-	if sigType := classifySumdbSig(b64); sigType != "c2sp" {
-		t.Errorf("got %s, want c2sp", sigType)
-	}
-}
-
-func TestClassifySumdbSig_ShortOrBadReturnsDefault(t *testing.T) {
-	// Too short → default (no classification possible).
-	if st := classifySumdbSig("AA=="); st != "c2sp" {
-		t.Errorf("short: got %s", st)
-	}
-	if st := classifySumdbSig("!!!"); st != "c2sp" {
-		t.Errorf("bad b64: got %s", st)
+	if sigs[0].SignerName != "fallback-origin" {
+		t.Errorf("signer: got %q, want fallback-origin", sigs[0].SignerName)
 	}
 }

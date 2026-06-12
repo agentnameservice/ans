@@ -7,18 +7,18 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/asn1"
 	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"sort"
 	"strings"
 	"sync"
 	"testing"
+
+	anscrypto "github.com/godaddy/ans/internal/crypto"
 )
 
 func TestProviderMatches(t *testing.T) {
@@ -687,132 +687,92 @@ func TestMakeReceiptVerifier_NoKeys(t *testing.T) {
 	}
 }
 
-// signTestCheckpoint produces a synthetic C2SP-shaped signed note
-// for use in the checkpoint-verify tests. Mirrors how the TL's
-// C2SPECDSASigner constructs the signature line (keyhash:4 || sig),
-// so verifyCheckpointNote exercises the same wire shape it does in
-// production.
-//
-// Signature format: ASN.1 DER ECDSA per godaddy/ans PR #38 (the
-// previous implementation emitted IEEE P1363 r||s, which the spec
-// — api-spec-tl-v2.yaml § CheckpointSignature.rawSignature — never
-// matched). VerifyC2SPECDSA still accepts P1363 as a legacy
-// fallback, but tests should pin the production format.
+// signTestCheckpoint produces a synthetic C2SP-shaped signed note for
+// the verifiedCheckpoint smoke test. Mirrors how the TL's
+// C2SPECDSASigner builds the signature line (keyhash:4 || DER-sig).
+// The exhaustive note parse/verify cases (tampered body, unknown key,
+// malformed body, adversarial collisions) live in the internal/lognote
+// package tests; this only proves the network half wires the fetch to
+// lognote.VerifyCheckpointNote.
 func signTestCheckpoint(t *testing.T, priv *ecdsa.PrivateKey, origin string, size uint64, rootHash []byte) []byte {
 	t.Helper()
 	body := []byte(fmt.Sprintf("%s\n%d\n%s\n",
 		origin, size, base64.StdEncoding.EncodeToString(rootHash)))
 	digest := sha256.Sum256(body)
-	r, s, err := ecdsa.Sign(rand.Reader, priv, digest[:])
+	sig, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
 	if err != nil {
 		t.Fatalf("sign: %v", err)
 	}
-	sig, err := asn1.Marshal(struct{ R, S *big.Int }{r, s})
-	if err != nil {
-		t.Fatalf("DER marshal: %v", err)
-	}
-
-	khex, err := keyHashHex(&priv.PublicKey)
+	kh4, err := anscrypto.SPKIKeyHash4(&priv.PublicKey)
 	if err != nil {
 		t.Fatalf("keyhash: %v", err)
 	}
-	var kh4 [4]byte
-	khRaw, err := hexDecode4(khex)
-	if err != nil {
-		t.Fatalf("hex decode: %v", err)
-	}
-	copy(kh4[:], khRaw)
-	blob := append(kh4[:], sig...)
+	blob := append(append([]byte{}, kh4...), sig...)
 	sigLine := fmt.Sprintf("— %s %s\n", origin, base64.StdEncoding.EncodeToString(blob))
 	return append(body, append([]byte("\n"), []byte(sigLine)...)...)
 }
 
-func hexDecode4(s string) ([]byte, error) {
-	if len(s) != 8 {
-		return nil, fmt.Errorf("want 8 hex chars, got %d", len(s))
-	}
-	v, ok := new(big.Int).SetString(s, 16)
-	if !ok {
-		return nil, errors.New("bad hex")
-	}
-	var out [4]byte
-	b := v.Bytes()
-	copy(out[4-len(b):], b)
-	return out[:], nil
-}
-
-func TestVerifyCheckpointNote_HappyPath(t *testing.T) {
+// TestVerifiedCheckpoint_FetchesAndVerifies is the thin smoke test that
+// verifiedCheckpoint fetches /checkpoint and returns the parsed,
+// signature-verified *lognote.Checkpoint. The keysByHash map key is the
+// plain 8-char hex keyhash from crypto.SPKIKeyIDHex4.
+func TestVerifiedCheckpoint_FetchesAndVerifies(t *testing.T) {
 	t.Parallel()
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("gen key: %v", err)
 	}
-	khex, _ := keyHashHex(&priv.PublicKey)
+	khex, err := anscrypto.SPKIKeyIDHex4(&priv.PublicKey)
+	if err != nil {
+		t.Fatalf("keyhash hex: %v", err)
+	}
 	rootHash := sha256.Sum256([]byte("synthetic root"))
 	note := signTestCheckpoint(t, priv, "demo.example", 42, rootHash[:])
 
-	cp, err := verifyCheckpointNote(note, map[string]*ecdsa.PublicKey{khex: &priv.PublicKey})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/checkpoint" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		_, _ = w.Write(note)
+	}))
+	defer srv.Close()
+
+	cp, err := verifiedCheckpoint(context.Background(), srv.Client(), srv.URL,
+		map[string]*ecdsa.PublicKey{khex: &priv.PublicKey})
 	if err != nil {
-		t.Fatalf("verify: %v", err)
+		t.Fatalf("verifiedCheckpoint: %v", err)
 	}
 	if cp.Origin != "demo.example" || cp.Size != 42 {
 		t.Errorf("got origin=%q size=%d, want demo.example/42", cp.Origin, cp.Size)
 	}
-	if string(cp.RootHash) != string(rootHash[:]) {
-		t.Errorf("rootHash mismatch")
+	if !bytes.Equal(cp.RootHash, rootHash[:]) {
+		t.Error("rootHash mismatch")
 	}
 }
 
-func TestVerifyCheckpointNote_TamperedBodyFails(t *testing.T) {
+// TestVerifiedCheckpoint_NoKeys rejects an empty verifier set before
+// any network fetch.
+func TestVerifiedCheckpoint_NoKeys(t *testing.T) {
+	t.Parallel()
+	if _, err := verifiedCheckpoint(context.Background(), http.DefaultClient,
+		"http://unused.invalid", nil); err == nil {
+		t.Fatal("want error for empty key map, got nil")
+	}
+}
+
+// TestVerifiedCheckpoint_FetchError surfaces a non-200 from /checkpoint.
+func TestVerifiedCheckpoint_FetchError(t *testing.T) {
 	t.Parallel()
 	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	khex, _ := keyHashHex(&priv.PublicKey)
-	rootHash := sha256.Sum256([]byte("v1"))
-	note := signTestCheckpoint(t, priv, "demo.example", 42, rootHash[:])
-	// Flip a digit in the size line — same length so signature
-	// remains the same length, but body is now wrong.
-	tampered := bytes.Replace(note, []byte("\n42\n"), []byte("\n99\n"), 1)
-	if _, err := verifyCheckpointNote(tampered,
+	khex, _ := anscrypto.SPKIKeyIDHex4(&priv.PublicKey)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	if _, err := verifiedCheckpoint(context.Background(), srv.Client(), srv.URL,
 		map[string]*ecdsa.PublicKey{khex: &priv.PublicKey}); err == nil {
-		t.Fatal("want error for tampered body, got nil")
-	}
-}
-
-func TestVerifyCheckpointNote_UnknownKey(t *testing.T) {
-	t.Parallel()
-	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	other, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	otherHex, _ := keyHashHex(&other.PublicKey)
-	rootHash := sha256.Sum256([]byte("rh"))
-	note := signTestCheckpoint(t, priv, "demo.example", 1, rootHash[:])
-	// Only the wrong key is in the map — signature was made with
-	// `priv`, but `priv` isn't a known verifier.
-	if _, err := verifyCheckpointNote(note,
-		map[string]*ecdsa.PublicKey{otherHex: &other.PublicKey}); err == nil {
-		t.Fatal("want unknown-key error, got nil")
-	}
-}
-
-func TestVerifyCheckpointNote_MalformedBody(t *testing.T) {
-	t.Parallel()
-	priv, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	khex, _ := keyHashHex(&priv.PublicKey)
-	keys := map[string]*ecdsa.PublicKey{khex: &priv.PublicKey}
-
-	cases := map[string][]byte{
-		"no separator":          []byte("just one line\n"),
-		"empty":                 nil,
-		"missing rootHash line": []byte("origin\n42\n\n— x AA==\n"),
-		"non-numeric size":      []byte("origin\nNaN\nAAAA\n\n— x AA==\n"),
-		"bad base64 rootHash":   []byte("origin\n1\n!!!notb64\n\n— x AA==\n"),
-	}
-	for name, body := range cases {
-		t.Run(name, func(t *testing.T) {
-			t.Parallel()
-			if _, err := verifyCheckpointNote(body, keys); err == nil {
-				t.Fatalf("want error for %s, got nil", name)
-			}
-		})
+		t.Fatal("want error for HTTP 500, got nil")
 	}
 }
 
