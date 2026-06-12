@@ -164,3 +164,55 @@ func TestRegisterAgent_BadIdentityCSR(t *testing.T) {
 		t.Fatal("RegisterAgent should reject a mismatched identity CSR")
 	}
 }
+
+// TestRegisterAgent_NoIdentityCSR_Succeeds covers the optional
+// identity-CSR path: a registration that omits identityCsrPEM (server
+// CSR still present) is accepted, lands PENDING_VALIDATION, and creates
+// no identity CSR row. The empty PEM must not reach ValidateIdentityCSR.
+func TestRegisterAgent_NoIdentityCSR_Succeeds(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	req := fx.req
+	req.IdentityCSRPEM = "" // omit the identity CSR
+
+	resp, err := fx.svc.RegisterAgent(context.Background(), req)
+	if err != nil {
+		t.Fatalf("register without identity CSR should succeed; got: %v", err)
+	}
+	if resp.Registration.IdentityCSR != nil {
+		t.Fatalf("registration without an identity CSR must have nil IdentityCSR; got %+v", resp.Registration.IdentityCSR)
+	}
+	if resp.Registration.Status != domain.StatusPendingValidation {
+		t.Fatalf("status got %q want PENDING_VALIDATION", resp.Registration.Status)
+	}
+	csr, err := fx.certs.FindLatestPendingCSRByType(context.Background(), resp.Registration.AgentID, domain.CSRTypeIdentity)
+	if err != nil {
+		t.Fatalf("FindLatestPendingCSRByType: %v", err)
+	}
+	if csr != nil {
+		t.Fatalf("no identity CSR row expected for an agent registered without an identity CSR; got %+v", csr)
+	}
+}
+
+// TestRegisterAgent_WithIdentityCSR_Unchanged is a regression pin: when
+// identityCsrPEM IS supplied, a pending identity CSR row is created.
+// Guards against an over-broad edit that drops the supplied-CSR case.
+func TestRegisterAgent_WithIdentityCSR_Unchanged(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	resp, err := fx.svc.RegisterAgent(context.Background(), fx.req)
+	if err != nil {
+		t.Fatalf("register with identity CSR must behave as before; got: %v", err)
+	}
+	if resp.Registration.IdentityCSR == nil {
+		t.Fatal("supplying identityCsrPEM must populate IdentityCSR")
+	}
+	csr, err := fx.certs.FindLatestPendingCSRByType(context.Background(), resp.Registration.AgentID, domain.CSRTypeIdentity)
+	if err != nil {
+		t.Fatalf("FindLatestPendingCSRByType: %v", err)
+	}
+	if csr == nil {
+		t.Fatal("a pending identity CSR row must exist")
+	}
+}
