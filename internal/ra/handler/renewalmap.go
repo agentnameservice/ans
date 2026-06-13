@@ -60,10 +60,14 @@ func nextStepFor(agentID, status string) nextStep {
 			Description: "Complete ACME challenges then POST to verify-acme endpoint",
 		}
 	case renewalStatusIssuingCertificate:
+		// Only re-POSTing verify-acme re-drives a pending order — GET
+		// /renewal never finalizes it, so pointing the operator there
+		// would livelock an async issuance. Mirror the registration
+		// lane's PENDING_CERTS guidance.
 		return nextStep{
 			Action:      "WAIT",
-			Endpoint:    base + "/renewal",
-			Description: "Certificate issuance in progress, poll GET /renewal for TLSA record",
+			Endpoint:    base + "/renewal/verify-acme",
+			Description: "Certificate issuance in progress — POST verify-acme again to drive the order to completion",
 		}
 	case renewalStatusCompleted:
 		return nextStep{
@@ -82,13 +86,64 @@ func nextStepFor(agentID, status string) nextStep {
 	}
 }
 
+// buildRenewalChallenges renders the renewal's domain-control
+// challenge set in the V2 challenges shape (dns01 / http01 keyed
+// object). The entries come verbatim from the certificate order —
+// provider-minted for external issuers, self-issued for the
+// in-process CA and BYOC validation. The owner publishes one of the
+// two artifacts; verify-acme accepts either.
+func buildRenewalChallenges(fqdn string, v domain.RenewalValidation) *renewalChallenges {
+	expires := v.ExpiresAt.UTC().Format(time.RFC3339)
+	out := &renewalChallenges{}
+	if ch, ok := v.ChallengeOfType(domain.ChallengeTypeDNS01); ok {
+		out.DNS01 = &challengeInfo{
+			Type:             string(domain.ChallengeTypeDNS01),
+			Token:            ch.Token,
+			KeyAuthorization: ch.KeyAuthorization,
+			DNSRecord: &challengeDNSRecordDTO{
+				Name:  ch.EffectiveDNSRecordName(fqdn),
+				Type:  "TXT",
+				Value: ch.EffectiveDNSRecordValue(),
+			},
+			ExpiresAt: expires,
+		}
+	}
+	if ch, ok := v.ChallengeOfType(domain.ChallengeTypeHTTP01); ok {
+		out.HTTP01 = &challengeInfo{
+			Type:             string(domain.ChallengeTypeHTTP01),
+			Token:            ch.Token,
+			KeyAuthorization: ch.KeyAuthorization,
+			HTTPPath:         ch.EffectiveHTTPPath(),
+			ExpiresAt:        expires,
+		}
+	}
+	if out.DNS01 == nil && out.HTTP01 == nil {
+		return nil
+	}
+	return out
+}
+
+// tlsaDTOFrom maps the domain TLSA record into the wire DTO. Nil in,
+// nil out — completed renewals carry it, pending ones don't.
+func tlsaDTOFrom(rec *domain.ExpectedDNSRecord) *dnsRecordDTO {
+	if rec == nil {
+		return nil
+	}
+	return &dnsRecordDTO{
+		Name:     rec.Name,
+		Type:     string(rec.Type),
+		Value:    rec.Value,
+		Purpose:  string(rec.Purpose),
+		Required: rec.Required,
+		TTL:      rec.TTL,
+	}
+}
+
 // mapRenewalSubmission builds the 202 RenewalSubmissionResponse body
-// from a successful submission. Matches reference `mapToSubmissionResponse`.
-//
-// Note: per the V2 spec, the status-GET response carries the
-// challenges[] block; the submission 202 omits it (the caller already
-// gets the same set from the response of the matching GET). This
-// mapper stays side-effect-free.
+// from a successful submission. Matches reference
+// `mapToSubmissionResponse`. The challenges block is the operator's
+// only copy of the artifacts they must publish before verify-acme —
+// it rides on both the submission 202 and the status GET.
 func mapRenewalSubmission(agentID string, res *service.SubmitRenewalResult) renewalSubmissionResponse {
 	r := res.Renewal
 	status := renewalStatusPendingValidation
@@ -96,6 +151,7 @@ func mapRenewalSubmission(agentID string, res *service.SubmitRenewalResult) rene
 		RenewalType: string(r.RenewalType),
 		Status:      status,
 		CsrID:       res.CsrID,
+		Challenges:  buildRenewalChallenges(res.FQDN, r.Validation),
 		ExpiresAt:   r.Validation.ExpiresAt.Format(time.RFC3339),
 		NextStep:    nextStepFor(agentID, status),
 		Links: []linkRef{{
@@ -105,21 +161,25 @@ func mapRenewalSubmission(agentID string, res *service.SubmitRenewalResult) rene
 	}
 }
 
-// mapRenewalStatus builds the 200 RenewalStatusResponse body. Needs
-// the agent FQDN for challenge record naming, which we look up via
-// the service layer — but the lifecycle handler already has the
-// agent in context, so we wire through the service by not taking
-// the FQDN here directly. The challenge-info population is best-
-// effort: when the service-layer contract evolves to return the
-// FQDN alongside the renewal, we can plumb it through.
-func mapRenewalStatus(agentID string, r *domain.ServerCertificateRenewal) renewalStatusResponse {
+// mapRenewalStatus builds the 200 RenewalStatusResponse body.
+// Pending-validation renewals carry the challenges block (the
+// operator may have lost the submission response); completed ones
+// carry the TLSA record for the new leaf instead — that record is
+// what the ISSUING_CERTIFICATE WAIT step tells the operator to poll
+// for.
+func mapRenewalStatus(agentID string, res *service.GetRenewalResult) renewalStatusResponse {
+	r := res.Renewal
 	status := deriveRenewalStatus(r, time.Now())
 	resp := renewalStatusResponse{
-		RenewalType: string(r.RenewalType),
-		Status:      status,
-		CsrID:       r.ServerCsrID,
-		ExpiresAt:   r.Validation.ExpiresAt.Format(time.RFC3339),
-		NextStep:    nextStepFor(agentID, status),
+		RenewalType:   string(r.RenewalType),
+		Status:        status,
+		CsrID:         r.ServerCsrID,
+		TlsaDNSRecord: tlsaDTOFrom(res.TLSARecord),
+		ExpiresAt:     r.Validation.ExpiresAt.Format(time.RFC3339),
+		NextStep:      nextStepFor(agentID, status),
+	}
+	if status == renewalStatusPendingValidation {
+		resp.Challenges = buildRenewalChallenges(res.FQDN, r.Validation)
 	}
 	if r.FailureReason != "" {
 		resp.FailureReason = r.FailureReason
@@ -128,8 +188,9 @@ func mapRenewalStatus(agentID string, r *domain.ServerCertificateRenewal) renewa
 }
 
 // mapRenewalVerification builds the 200/202 RenewalVerificationResponse
-// body. BYOC returns COMPLETED sync; CSR returns ISSUING_CERTIFICATE
-// async.
+// body. Completed renewals (200) include the new leaf's TLSA record so
+// the operator can update DNS immediately; ISSUING_CERTIFICATE (202)
+// points the operator back at verify-acme via the WAIT next step.
 func mapRenewalVerification(agentID string, res *service.VerifyRenewalACMEResult) renewalVerificationResponse {
 	r := res.Renewal
 	status := renewalStatusIssuingCertificate
@@ -137,8 +198,9 @@ func mapRenewalVerification(agentID string, res *service.VerifyRenewalACMEResult
 		status = renewalStatusCompleted
 	}
 	return renewalVerificationResponse{
-		Status:   status,
-		CsrID:    r.ServerCsrID,
-		NextStep: nextStepFor(agentID, status),
+		Status:        status,
+		CsrID:         r.ServerCsrID,
+		TlsaDNSRecord: tlsaDTOFrom(res.TLSARecord),
+		NextStep:      nextStepFor(agentID, status),
 	}
 }

@@ -61,9 +61,10 @@ type RegisterRequest struct {
 	// must be set (both set or neither set → 422):
 	//
 	//   - ServerCsrPEM: caller submits a CSR; the service validates
-	//     it against the agent FQDN and asks the configured
-	//     `ServerCertificateAuthority` port to sign it. Leaf + chain
-	//     are stored as an issued server cert.
+	//     it against the agent FQDN, opens a certificate order via
+	//     the configured `ServerCertificateIssuer` port, and the
+	//     order is finalized at verify-acme. Leaf + chain are stored
+	//     as an issued server cert.
 	//
 	//   - ServerCertificatePEM + ServerCertificateChainPEM: BYOC.
 	//     Caller supplies a cert already signed by a public or
@@ -111,6 +112,11 @@ type OutboxPayload struct {
 	ProducerSignature string `json:"producerSignature"`
 }
 
+// registrationChallengeWindow is how long the operator has to publish
+// a domain-control challenge artifact and call verify-acme before the
+// registration's challenge expires.
+const registrationChallengeWindow = 24 * time.Hour
+
 // RegistrationService is the aggregate-level service for the POST and
 // verify-* endpoints.
 //
@@ -130,11 +136,15 @@ type RegistrationService struct {
 	renewals    port.RenewalStore
 	validator   port.CertificateValidator
 	identityCA  port.IdentityCertificateAuthority
-	serverCA    port.ServerCertificateAuthority // optional; nil = CSR path rejected
+	serverCA    port.ServerCertificateIssuer // optional; nil = CSR path rejected
 	bus         port.EventBus
 	outbox      OutboxEnqueuer
 	uow         port.UnitOfWork
 	dnsVerifier port.DNSVerifier
+	// httpChallenge verifies HTTP-01 challenge artifacts. Optional —
+	// when nil, HTTP-01 challenges simply never verify and the gate
+	// relies on DNS-01. Production configs wire the default adapter.
+	httpChallenge port.HTTPChallengeVerifier
 	// tlPublicBaseURL is the externally-reachable Transparency Log URL
 	// used in _ans-badge DNS records (e.g. "https://tl.example.org").
 	tlPublicBaseURL string
@@ -191,12 +201,23 @@ func (s *RegistrationService) WithSigner(sig EventSigner) *RegistrationService {
 	return s
 }
 
-// WithServerCertificateAuthority wires the server CA used to sign
-// server CSRs submitted at registration or renewal time. When nil
+// WithServerCertificateIssuer wires the certificate issuer used for
+// server CSRs submitted at registration or renewal time. Orders are
+// created at submission (relaying the issuer's domain-control
+// challenges to the operator) and finalized at verify-acme. When nil
 // (or never called), the service rejects `serverCsrPEM` submissions
 // with SERVER_CA_DISABLED — operators deploy only the BYOC path.
-func (s *RegistrationService) WithServerCertificateAuthority(ca port.ServerCertificateAuthority) *RegistrationService {
-	s.serverCA = ca
+func (s *RegistrationService) WithServerCertificateIssuer(issuer port.ServerCertificateIssuer) *RegistrationService {
+	s.serverCA = issuer
+	return s
+}
+
+// WithHTTPChallengeVerifier wires the verifier used to check HTTP-01
+// challenge artifacts during verify-acme. When nil (or never called),
+// HTTP-01 challenges never verify and the challenge gate relies on
+// DNS-01 alone.
+func (s *RegistrationService) WithHTTPChallengeVerifier(v port.HTTPChallengeVerifier) *RegistrationService {
+	s.httpChallenge = v
 	return s
 }
 
@@ -248,70 +269,15 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		)
 	}
 
-	// Server certificate: exactly one of CSR / BYOC.
-	//
-	// - CSR path: validate + call ServerCertificateAuthority to sign.
-	//   The issued cert is stored as a BYOC cert downstream because
-	//   the domain model doesn't distinguish "we signed it" from
-	//   "the operator brought their own"; both end up in the
-	//   ByocServerCertificate aggregate. The issuer DN differs (our
-	//   self-signed root vs the operator's public CA), which is the
-	//   audit trail.
-	// - BYOC path: validator checks the cert.
-	// - Neither: 422 (we don't allow identity-cert-only registration).
-	// - Both:    422 (ambiguous).
-	csrSet := req.ServerCsrPEM != ""
-	byocSet := req.ServerCertificatePEM != ""
-	if csrSet == byocSet {
-		return nil, domain.NewValidationError(
-			"INVALID_SERVER_CERT_INPUT",
-			"exactly one of serverCsrPEM or serverCertificatePEM must be provided",
-		)
-	}
-
-	// Validate BYOC cert / server CSR input shape. Actual cert
-	// issuance (identity cert sign + CSR-path server cert sign)
-	// is deferred to verify-acme — at registration time we haven't
-	// proven domain control yet, so a cert handed out at register
-	// time wouldn't mean anything, and producing the TLSA record
-	// before the server cert exists would leave the 202 response
-	// shape incoherent.
-	var byocCert *domain.ByocServerCertificate
-	var pendingServerCSR *domain.AgentCSR
-	switch {
-	case byocSet:
-		v, err := s.validator.ValidateServerCertificate(ctx,
-			req.ServerCertificatePEM, req.ServerCertificateChainPEM, req.AnsName.FQDN())
-		if err != nil {
-			return nil, domain.NewCertificateError("INVALID_SERVER_CERT", err.Error())
-		}
-		byocCert = &domain.ByocServerCertificate{
-			LeafCertificatePEM:      v.LeafPEM,
-			ChainCertificatesPEM:    v.ChainPEM,
-			SubjectCommonName:       v.CN,
-			SubjectAlternativeNames: v.SANs,
-			IssuerDN:                v.IssuerDN,
-			ValidFromTimestamp:      v.ValidFrom,
-			ValidToTimestamp:        v.ValidTo,
-			Fingerprint:             v.Fingerprint,
-		}
-	case csrSet:
-		if s.serverCA == nil {
-			return nil, domain.NewValidationError(
-				"SERVER_CA_DISABLED",
-				"serverCsrPEM submitted but no server CA is configured — either configure one or use serverCertificatePEM (BYOC)",
-			)
-		}
-		if err := s.validator.ValidateServerCSR(ctx, req.ServerCsrPEM, req.AnsName.FQDN()); err != nil {
-			return nil, domain.NewValidationError("INVALID_SERVER_CSR", err.Error())
-		}
-		srvCSR := domain.NewServerCSR(uuid.NewString(), req.ServerCsrPEM, now)
-		pendingServerCSR = &srvCSR
-	}
-
-	// Validate identity CSR shape (optional). When supplied, signing is
-	// deferred to verify-acme and the CSR row stays PENDING until then.
-	// When omitted, the agent registers without an identity certificate.
+	// Validate identity CSR shape (optional) BEFORE the server-cert
+	// intake: resolveServerCertInput opens a certificate order with the
+	// configured issuer (a network round-trip for an ACME provider,
+	// counting against its order rate limits), so a request that will
+	// fail on a malformed identity CSR should be rejected with a cheap
+	// local 422 first, never after burning a provider order. When
+	// supplied, signing is deferred to verify-acme and the CSR row
+	// stays PENDING until then; when omitted, the agent registers
+	// without an identity certificate.
 	var identityCSR *domain.AgentCSR
 	if req.IdentityCSRPEM != "" {
 		if err := s.validator.ValidateIdentityCSR(ctx, req.IdentityCSRPEM, req.AnsName.String()); err != nil {
@@ -320,6 +286,16 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		csr := domain.NewIdentityCSR(uuid.NewString(), req.IdentityCSRPEM, now)
 		identityCSR = &csr
 	}
+
+	// Server certificate intake: exactly one of CSR / BYOC, plus the
+	// certificate order whose challenges ride in the 202 response. For
+	// the CSR path this opens the provider order, so it runs only
+	// after the cheap local validations above have passed.
+	in, err := s.resolveServerCertInput(ctx, req, now)
+	if err != nil {
+		return nil, err
+	}
+	byocCert, pendingServerCSR, order := in.byocCert, in.serverCSR, in.order
 
 	// Build aggregates.
 	agentID := uuid.NewString()
@@ -332,19 +308,7 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		return nil, err
 	}
 	reg.ServerCSR = pendingServerCSR
-
-	// Generate the ACME DNS-01 challenge token + expiry. The only
-	// DNS action the operator should take before verify-acme.
-	dns01, _, err := generateChallengeTokens()
-	if err != nil {
-		return nil, domain.NewInternalError(
-			"CHALLENGE_GEN_FAILED", "generate ACME challenge", err,
-		)
-	}
-	reg.ACMEChallenge = domain.ACMEChallenge{
-		DNS01Token: dns01,
-		ExpiresAt:  now.Add(24 * time.Hour),
-	}
+	reg.CertOrder = order
 
 	// Persist the aggregate + CSR rows + BYOC cert (if any) atomically.
 	// Each Save participates in the same transaction via the scoped
@@ -405,6 +369,102 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 		Registration: reg,
 		DNSRecords:   nil,
 	}, nil
+}
+
+// serverCertInput is the resolved server-certificate intake for a
+// registration: exactly one of byocCert / serverCSR is set, and order
+// carries the domain-control challenges relayed in the 202 response.
+type serverCertInput struct {
+	byocCert  *domain.ByocServerCertificate
+	serverCSR *domain.AgentCSR
+	order     domain.CertificateOrder
+}
+
+// resolveServerCertInput validates the server-certificate request
+// shape and produces the certificate order. Exactly one of CSR /
+// BYOC:
+//
+//   - CSR path: validate the CSR, then open a certificate order via
+//     the configured issuer (`CreateOrder`) — the relayed challenge
+//     tokens are the provider's own (self-issued by the in-process
+//     CA, provider-minted for ACME CAs like Let's Encrypt). Actual
+//     issuance is deferred to verify-acme: at registration time
+//     domain control isn't proven yet, so a cert handed out here
+//     wouldn't mean anything. The issued cert is stored as a BYOC
+//     cert downstream because the domain model doesn't distinguish
+//     "we signed it" from "the operator brought their own"; the
+//     issuer DN is the audit trail.
+//   - BYOC path: validate the operator's cert. No certificate is
+//     being issued, but domain control must still be proven, so the
+//     RA self-issues a validation order.
+//   - Neither: 422 (identity-cert-only registration not allowed).
+//   - Both:    422 (ambiguous).
+//
+// Either way the domain owner publishes the challenge artifacts
+// themselves — ANS never touches their DNS or web server.
+func (s *RegistrationService) resolveServerCertInput(
+	ctx context.Context, req RegisterRequest, now time.Time,
+) (serverCertInput, error) {
+	csrSet := req.ServerCsrPEM != ""
+	byocSet := req.ServerCertificatePEM != ""
+	if csrSet == byocSet {
+		return serverCertInput{}, domain.NewValidationError(
+			"INVALID_SERVER_CERT_INPUT",
+			"exactly one of serverCsrPEM or serverCertificatePEM must be provided",
+		)
+	}
+
+	if byocSet {
+		v, err := s.validator.ValidateServerCertificate(ctx,
+			req.ServerCertificatePEM, req.ServerCertificateChainPEM, req.AnsName.FQDN())
+		if err != nil {
+			return serverCertInput{}, domain.NewCertificateError("INVALID_SERVER_CERT", err.Error())
+		}
+		dns01, http01, err := generateChallengeTokens()
+		if err != nil {
+			return serverCertInput{}, domain.NewInternalError(
+				"CHALLENGE_GEN_FAILED", "generate ACME challenge", err,
+			)
+		}
+		return serverCertInput{
+			byocCert: &domain.ByocServerCertificate{
+				LeafCertificatePEM:      v.LeafPEM,
+				ChainCertificatesPEM:    v.ChainPEM,
+				SubjectCommonName:       v.CN,
+				SubjectAlternativeNames: v.SANs,
+				IssuerDN:                v.IssuerDN,
+				ValidFromTimestamp:      v.ValidFrom,
+				ValidToTimestamp:        v.ValidTo,
+				Fingerprint:             v.Fingerprint,
+			},
+			order: domain.NewSelfIssuedOrder(dns01, http01, now.Add(registrationChallengeWindow)),
+		}, nil
+	}
+
+	if s.serverCA == nil {
+		return serverCertInput{}, domain.NewValidationError(
+			"SERVER_CA_DISABLED",
+			"serverCsrPEM submitted but no server CA is configured — either configure one or use serverCertificatePEM (BYOC)",
+		)
+	}
+	if err := s.validator.ValidateServerCSR(ctx, req.ServerCsrPEM, req.AnsName.FQDN()); err != nil {
+		return serverCertInput{}, domain.NewValidationError("INVALID_SERVER_CSR", err.Error())
+	}
+	created, err := s.serverCA.CreateOrder(ctx, req.AnsName.FQDN())
+	if err != nil {
+		return serverCertInput{}, domain.NewInternalError(
+			"CERT_ORDER_FAILED", "create certificate order", err,
+		)
+	}
+	order := *created
+	// Clamp the challenge window to the registration's own deadline
+	// when the provider's order outlives it — relaying an expiry the
+	// registration flow won't honor would mislead the operator.
+	if deadline := now.Add(registrationChallengeWindow); order.ExpiresAt.IsZero() || deadline.Before(order.ExpiresAt) {
+		order.ExpiresAt = deadline
+	}
+	srvCSR := domain.NewServerCSR(uuid.NewString(), req.ServerCsrPEM, now)
+	return serverCertInput{serverCSR: &srvCSR, order: order}, nil
 }
 
 // baseInnerEvent populates the fields every event carries about its

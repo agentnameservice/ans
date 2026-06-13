@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"net"
 	"regexp"
 	"strings"
 )
@@ -120,6 +121,19 @@ func validateAgentHost(host string) error {
 		return NewValidationError(
 			"AGENT_HOST_TOO_LONG",
 			fmt.Sprintf("agent host exceeds %d characters: %d", maxHostnameLength, len(host)),
+		)
+	}
+
+	// Reject IP literals. An ANS name binds a DNS hostname; an IP
+	// (e.g. "169.254.169.254" or an IPv6 literal) is never a valid
+	// agent host, and accepting one would let a registrant point the
+	// HTTP-01 challenge gate at an internal address. The label checks
+	// below would otherwise pass a dotted-quad IPv4 as four numeric
+	// "labels".
+	if net.ParseIP(host) != nil {
+		return NewValidationError(
+			"INVALID_AGENT_HOST",
+			fmt.Sprintf("agent host must be a DNS hostname, not an IP address: %q", host),
 		)
 	}
 

@@ -9,8 +9,26 @@
 # inlined and starts the TL against it.
 #
 # Usage:
-#   scripts/demo/start.sh            # wipe data/demo, fresh start
-#   scripts/demo/start.sh --keep     # reuse existing data/demo
+#   scripts/demo/start.sh                # wipe data/demo, fresh start
+#   scripts/demo/start.sh --keep         # reuse existing data/demo
+#   scripts/demo/start.sh --with-dns     # bundled ans-dns + lookup verifier
+#   scripts/demo/start.sh --with-acme    # Let's Encrypt STAGING issues server certs
+#
+# --with-acme swaps the server certificate issuer from the demo's
+# self-signed CA to a real RFC 8555 provider (Let's Encrypt staging
+# by default). Registrations then relay the provider's real
+# challenges, and the agent's server cert is provider-issued. This
+# needs a public domain you control: register with your FQDN
+# (register.sh --v2 --register-only agent.yourdomain.com), publish
+# the relayed _acme-challenge TXT record, then drive verify-acme —
+# scripts/demo/acme-verify.sh walks that loop. The DNS verifier
+# defaults to "lookup" via the OS resolver in this mode so the RA
+# fail-fasts locally before answering the provider (a wrongly
+# answered challenge invalidates the provider order). Knobs:
+#   ANS_ACME_DIRECTORY_URL   default Let's Encrypt staging; set the
+#                            production directory only when you mean
+#                            it — its rate limits are unforgiving
+#   ANS_ACME_EMAIL           optional account contact for expiry mail
 #
 # Prerequisites: go, curl, jq, openssl (openssl only needed by
 # run-lifecycle.sh, but checked here for early-failure UX).
@@ -23,6 +41,7 @@ source "$SCRIPT_DIR/common.sh"
 # ----- args -----
 KEEP_DATA=0
 WITH_DNS=0
+WITH_ACME=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --keep) KEEP_DATA=1; shift ;;
@@ -36,13 +55,37 @@ while [ $# -gt 0 ]; do
       export ANS_DNS_SERVER="127.0.0.1:15353"
       shift
       ;;
+    --with-acme)
+      # Server certs come from a real RFC 8555 provider (Let's
+      # Encrypt staging unless ANS_ACME_DIRECTORY_URL overrides).
+      WITH_ACME=1
+      shift
+      ;;
     -h|--help)
-      sed -n '2,17p' "$0"
+      sed -n '2,35p' "$0"
       exit 0
       ;;
     *) fail "unknown arg: $1" ;;
   esac
 done
+
+if [ "$WITH_ACME" -eq 1 ] && [ "$WITH_DNS" -eq 1 ]; then
+  # --with-dns points the RA's lookup verifier at the local ans-dns
+  # server, which knows nothing about the public domain a real ACME
+  # provider validates — the two modes contradict each other.
+  fail "--with-acme and --with-dns are mutually exclusive (ACME needs real public DNS)"
+fi
+
+ACME_DIRECTORY_URL="${ANS_ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}"
+ACME_EMAIL="${ANS_ACME_EMAIL:-}"
+if [ "$WITH_ACME" -eq 1 ]; then
+  # The RA's challenge gate must check the real records the owner
+  # publishes — a noop gate would answer the provider's challenge
+  # before the artifact exists and invalidate the order. The OS
+  # resolver (empty ANS_DNS_SERVER) is the right default; honor an
+  # explicit ANS_DNS_TYPE if the caller insists.
+  export ANS_DNS_TYPE="${ANS_DNS_TYPE:-lookup}"
+fi
 
 # ----- preflight -----
 header "Preflight"
@@ -73,7 +116,19 @@ if [ "$KEEP_DATA" -eq 0 ]; then
   ok "cleared $DATA (kept log files)"
 else
   note "keeping existing data under $DATA"
+  # Guard against silently re-pointing in-flight certificate orders at
+  # a different issuer: a self-CA order ref or an ACME account/order
+  # under $DATA/ra means nothing to the other issuer, so re-using the
+  # data dir across an issuer-type switch leaves un-finalizable orders.
+  PRIOR_ISSUER=""
+  [ -f "$DATA/issuer-mode" ] && PRIOR_ISSUER="$(cat "$DATA/issuer-mode")"
+  CURRENT_ISSUER=$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)
+  if [ -n "$PRIOR_ISSUER" ] && [ "$PRIOR_ISSUER" != "$CURRENT_ISSUER" ]; then
+    fail "this data dir was last run with the '$PRIOR_ISSUER' server issuer but you requested '$CURRENT_ISSUER'; re-run without --keep to start fresh (in-flight orders can't move between issuers)"
+  fi
 fi
+# Record the issuer mode for the --keep guard above on the next run.
+echo "$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)" >"$DATA/issuer-mode"
 
 # Refuse to start if the ports already have something on them.
 for url in "$RA_URL/v2/admin/health" "$TL_URL/v2/admin/health"; do
@@ -84,6 +139,32 @@ done
 
 # ----- RA config -----
 header "Compose RA config"
+
+# Server certificate issuer block: the in-process self-signed CA by
+# default, or a real RFC 8555 provider with --with-acme. Either way
+# the serverCsrPEM registration/renewal path is enabled; the issuer
+# behind it is what changes.
+if [ "$WITH_ACME" -eq 1 ]; then
+  SERVER_ISSUER_BLOCK=$(cat <<YAML
+  server:
+    type: acme
+    acme:
+      directory-url: "$ACME_DIRECTORY_URL"
+      email: "$ACME_EMAIL"
+      data-dir: "$DATA/ra/acme"
+YAML
+)
+else
+  SERVER_ISSUER_BLOCK=$(cat <<YAML
+  server:
+    type: self
+    org: "ANS Demo Server CA"
+    validity-days: 365
+    data-dir: "$DATA/ra/server-ca"
+YAML
+)
+fi
+
 cat >"$DATA/demo-ra.yaml" <<YAML
 server:
   host: "127.0.0.1"
@@ -104,14 +185,10 @@ ca:
     org: "ANS Demo CA"
     validity-days: 365
     data-dir: "$DATA/ra/ca"
-  # Server CA: optional. When present, enables the serverCsrPEM
-  # registration/renewal path where the RA signs TLS server certs
-  # with this separate private CA. When absent, only BYOC works.
-  # Keep it configured in the demo so both paths are exercised.
-  server:
-    org: "ANS Demo Server CA"
-    validity-days: 365
-    data-dir: "$DATA/ra/server-ca"
+  # Server issuer: enables the serverCsrPEM registration/renewal
+  # path. "self" signs with a demo private CA; "acme" delegates to a
+  # real RFC 8555 provider (--with-acme).
+$SERVER_ISSUER_BLOCK
 
 dns:
   # Flip to "lookup" + set DNS_SERVER to point at ans-dns for
@@ -246,5 +323,11 @@ header "Ready"
 printf "  %s ans-ra   %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$RA_URL" "$RA_PID" "$DATA/ra.log" >&2
 printf "  %s ans-tl   %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$TL_URL" "$TL_PID" "$DATA/tl.log" >&2
 printf "\n" >&2
-printf "  next: %s\n" "scripts/demo/run-lifecycle.sh" >&2
+if [ "$WITH_ACME" -eq 1 ]; then
+  printf "  ACME issuer: %s\n" "$ACME_DIRECTORY_URL" >&2
+  printf "  next: %s\n" "scripts/demo/register.sh --v2 --register-only agent.yourdomain.com" >&2
+  printf "        %s\n" "publish the relayed _acme-challenge TXT, then scripts/demo/acme-verify.sh" >&2
+else
+  printf "  next: %s\n" "scripts/demo/run-lifecycle.sh" >&2
+fi
 printf "  stop: %s\n" "scripts/demo/stop.sh          (or --clean to wipe data)" >&2

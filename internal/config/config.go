@@ -65,15 +65,15 @@ type AuthOIDC struct {
 
 // CA holds identity certificate authority settings.
 //
-// `Server` is optional: when non-nil it configures an additional
-// server-auth CA used to sign server CSRs submitted at registration
+// `Server` is optional: when non-nil it configures the server
+// certificate issuer used for server CSRs submitted at registration
 // or renewal. When nil, the RA only supports the BYOC path for
 // server certs. The identity CA (`Self`) is always required — every
 // agent gets an RA-issued identity cert.
 type CA struct {
-	Type   string        `koanf:"type"`
-	Self   *CASelf       `koanf:"self"`
-	Server *CAServerSelf `koanf:"server"`
+	Type   string    `koanf:"type"`
+	Self   *CASelf   `koanf:"self"`
+	Server *CAServer `koanf:"server"`
 }
 
 // CASelf configures the in-process self-signed identity CA.
@@ -83,13 +83,45 @@ type CASelf struct {
 	DataDir      string `koanf:"data-dir"`
 }
 
-// CAServerSelf configures the in-process self-signed server CA. The
-// shape matches CASelf (org + validity + data-dir); kept distinct so
-// operators can rotate the identity and server roots independently.
-type CAServerSelf struct {
+// CAServer selects and configures the server certificate issuer
+// behind `port.ServerCertificateIssuer`.
+//
+//   - Type "self" (default, including when omitted — backwards
+//     compatible with pre-issuer configs): the in-process
+//     self-signed server CA. Same shape as the identity CA but kept
+//     distinct so operators can rotate the two roots independently.
+//   - Type "acme": an external RFC 8555 CA (Let's Encrypt et al.)
+//     configured by the nested `acme` block. Selecting this type is
+//     the operator's consent to the provider's terms of service —
+//     account registration auto-accepts them, per standard ACME
+//     automation practice.
+type CAServer struct {
+	Type string `koanf:"type"`
+
+	// Self-signed issuer settings (type "self").
 	Org          string `koanf:"org"`
 	ValidityDays int    `koanf:"validity-days"`
 	DataDir      string `koanf:"data-dir"`
+
+	// ACME issuer settings (type "acme").
+	ACME *CAServerACME `koanf:"acme"`
+}
+
+// IsACME reports whether the server issuer is the ACME adapter.
+func (s *CAServer) IsACME() bool { return s != nil && s.Type == "acme" }
+
+// CAServerACME configures the RFC 8555 issuer.
+type CAServerACME struct {
+	// DirectoryURL is the provider's directory endpoint, e.g.
+	// https://acme-staging-v02.api.letsencrypt.org/directory for
+	// Let's Encrypt staging. Use staging for testing — production
+	// rate limits are unforgiving.
+	DirectoryURL string `koanf:"directory-url"`
+	// Email becomes the ACME account contact for expiry and incident
+	// notices. Optional.
+	Email string `koanf:"email"`
+	// DataDir persists the ACME account key across restarts.
+	DataDir string `koanf:"data-dir"`
 }
 
 // DNS holds DNS verifier configuration.
@@ -324,19 +356,23 @@ func (c *RAConfig) Validate() error {
 	if c.CA.Self.ValidityDays <= 0 {
 		return errors.New("ca.self.validity-days must be positive")
 	}
-	// Server CA is optional but when configured must be valid.
-	if c.CA.Server != nil {
-		if c.CA.Server.DataDir == "" {
-			return errors.New("ca.server.data-dir is required when ca.server block is set")
-		}
-		if c.CA.Server.ValidityDays <= 0 {
-			return errors.New("ca.server.validity-days must be positive")
-		}
+	// Server issuer is optional but when configured must be valid.
+	if err := validateCAServer(c.CA.Server); err != nil {
+		return err
 	}
 	switch c.DNS.Type {
 	case "noop", "lookup":
 	default:
 		return fmt.Errorf("dns.type %q not supported (expected 'noop' or 'lookup')", c.DNS.Type)
+	}
+	// An ACME server issuer with the noop DNS verifier is a footgun:
+	// the noop gate "passes" every challenge, so the RA would answer
+	// the public provider's challenge before the owner published the
+	// artifact, and the provider would mark the authorization (and the
+	// order) invalid. A real provider needs the real lookup verifier.
+	if c.CA.Server.IsACME() && c.DNS.Type == "noop" {
+		return errors.New(
+			"ca.server.type 'acme' requires dns.type 'lookup': a noop challenge gate would answer the provider's challenge before the artifact exists and invalidate every order")
 	}
 	if err := validateKeys(&c.Keys); err != nil {
 		return err
@@ -381,6 +417,36 @@ func (c *TLConfig) Validate() error {
 	}
 	if c.Merkle.CheckpointInterval <= 0 {
 		c.Merkle.CheckpointInterval = 10 * time.Second
+	}
+	return nil
+}
+
+// validateCAServer checks the optional server-issuer block. Nil is
+// valid (BYOC-only deployment).
+func validateCAServer(s *CAServer) error {
+	if s == nil {
+		return nil
+	}
+	switch s.Type {
+	case "", "self":
+		if s.DataDir == "" {
+			return errors.New("ca.server.data-dir is required when ca.server block is set")
+		}
+		if s.ValidityDays <= 0 {
+			return errors.New("ca.server.validity-days must be positive")
+		}
+	case "acme":
+		if s.ACME == nil {
+			return errors.New("ca.server.acme block is required when ca.server.type is 'acme'")
+		}
+		if s.ACME.DirectoryURL == "" {
+			return errors.New("ca.server.acme.directory-url is required")
+		}
+		if s.ACME.DataDir == "" {
+			return errors.New("ca.server.acme.data-dir is required")
+		}
+	default:
+		return fmt.Errorf("ca.server.type %q not supported (expected 'self' or 'acme')", s.Type)
 	}
 	return nil
 }

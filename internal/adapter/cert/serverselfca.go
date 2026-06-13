@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -17,18 +18,38 @@ import (
 	"time"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
+	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 )
 
-// ServerSelfCA implements port.ServerCertificateAuthority with an
+// randomToken returns a base64url-encoded 32-byte crypto/rand token —
+// the same shape RFC 8555 providers mint for challenge tokens. Used
+// for self-issued challenge tokens and order refs.
+func randomToken() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// ServerSelfCA implements port.ServerCertificateIssuer with an
 // in-process ECDSA P-256 root CA that signs TLS server-auth
 // certificates.
 //
 // This is the local / LF-submittable implementation. The reference
 // RA delegates to an internal ACME-style cert service, and any cloud
-// adapter (AWS Private CA, GCP CAS, hosted ACME CA) can replace
-// ServerSelfCA without touching the service layer — the port
-// (ServerCertificateAuthority) is the stable contract.
+// adapter (a hosted ACME CA such as Let's Encrypt, AWS Private CA,
+// GCP CAS) can replace ServerSelfCA without touching the service
+// layer — the port (ServerCertificateIssuer) is the stable contract.
+//
+// Because this CA is its own trust root, it plays the provider role
+// in the order lifecycle itself: CreateOrder self-issues the
+// domain-control challenge tokens (the same tokens an external ACME
+// provider would mint), and FinalizeOrder signs synchronously,
+// trusting the RA's challenge-presence gate as the authoritative
+// domain validation. Orders carry no server-side state — the order
+// ref exists so the lifecycle is uniform across providers.
 //
 // Kept distinct from SelfCA (the identity CA) so operators can
 // rotate the two roots independently and publish the server-CA
@@ -41,6 +62,7 @@ type ServerSelfCA struct {
 	org       string
 	validity  time.Duration
 	serverTTL time.Duration
+	orderTTL  time.Duration
 	mu        sync.RWMutex
 	rootCert  *x509.Certificate
 	rootKey   crypto.Signer
@@ -54,6 +76,14 @@ type ServerSelfCAOption func(*ServerSelfCA)
 // validity.
 func WithServerCertTTL(d time.Duration) ServerSelfCAOption {
 	return func(c *ServerSelfCA) { c.serverTTL = d }
+}
+
+// WithOrderTTL sets the lifetime of certificate orders (the window
+// the domain owner has to publish a challenge artifact). Default is
+// 7 days, matching ACME-provider order lifetimes; the registration
+// and renewal flows clamp their own shorter windows on top.
+func WithOrderTTL(d time.Duration) ServerSelfCAOption {
+	return func(c *ServerSelfCA) { c.orderTTL = d }
 }
 
 // NewServerSelfCA opens (or creates) a self-signed server CA in the
@@ -72,6 +102,7 @@ func NewServerSelfCA(dataDir, org string, validityDays int, opts ...ServerSelfCA
 		org:       org,
 		validity:  time.Duration(validityDays) * 24 * time.Hour,
 		serverTTL: 90 * 24 * time.Hour,
+		orderTTL:  7 * 24 * time.Hour,
 	}
 	for _, opt := range opts {
 		opt(c)
@@ -85,15 +116,54 @@ func NewServerSelfCA(dataDir, org string, validityDays int, opts ...ServerSelfCA
 	return c, nil
 }
 
-// IssueServerCertificate signs the given server CSR. The resulting
-// certificate has the provided FQDN as a DNS SAN and the standard
-// TLS server-auth EKU, and is valid for serverTTL.
-func (c *ServerSelfCA) IssueServerCertificate(
+// CreateOrder opens a certificate order for the FQDN, self-issuing
+// the domain-control challenge tokens. Because this CA is its own
+// trust root there is no remote order to track — the order ref is a
+// random handle that exists so the lifecycle (and its persistence)
+// is identical to external providers'. Both DNS-01 and HTTP-01
+// challenges are offered; the owner satisfies whichever is easier to
+// publish, exactly as with an ACME provider.
+func (c *ServerSelfCA) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
+	if fqdn == "" {
+		return nil, errors.New("cert: create order: fqdn is required")
+	}
+	dns01, err := randomToken()
+	if err != nil {
+		return nil, fmt.Errorf("cert: dns01 token: %w", err)
+	}
+	http01, err := randomToken()
+	if err != nil {
+		return nil, fmt.Errorf("cert: http01 token: %w", err)
+	}
+	ref, err := randomToken()
+	if err != nil {
+		return nil, fmt.Errorf("cert: order ref: %w", err)
+	}
+	return &domain.CertificateOrder{
+		OrderRef: "selfca-" + ref,
+		State:    domain.OrderStatePending,
+		Challenges: []domain.Challenge{
+			{Type: domain.ChallengeTypeDNS01, Token: dns01},
+			{Type: domain.ChallengeTypeHTTP01, Token: http01},
+		},
+		ExpiresAt: time.Now().Add(c.orderTTL),
+	}, nil
+}
+
+// FinalizeOrder signs the order's server CSR. The resulting
+// certificate has the request FQDN as a DNS SAN and the standard TLS
+// server-auth EKU, and is valid for serverTTL. Signing is synchronous
+// and never returns port.ErrOrderPending.
+//
+// Domain validation: the RA's challenge-presence gate runs before
+// every FinalizeOrder call and is authoritative for this CA (it IS
+// the CA's validation — there is no separate provider to convince),
+// so req.Verified is not re-checked here.
+func (c *ServerSelfCA) FinalizeOrder(
 	ctx context.Context,
-	csrPEM string,
-	fqdn string,
+	req port.FinalizeOrderRequest,
 ) (*port.IssuedCert, error) {
-	csr, err := anscrypto.ValidateServerCSR(csrPEM, fqdn)
+	csr, err := anscrypto.ValidateServerCSR(req.CSRPEM, req.FQDN)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +188,7 @@ func (c *ServerSelfCA) IssueServerCertificate(
 		// (browsers, curl) demand before trusting a cert for HTTPS.
 		// Differs from the identity CA's ClientAuth EKU.
 		ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		DNSNames:    []string{fqdn},
+		DNSNames:    []string{req.FQDN},
 		// Subject is lifted from the CSR; some SDK-generated CSRs set
 		// CN to a placeholder rather than the FQDN. We keep CN for
 		// back-compat but the DNS SAN is the authoritative binding.
@@ -175,7 +245,7 @@ func (c *ServerSelfCA) loadRoot(keyPath, certPath string) error {
 		return fmt.Errorf("cert: read server-root key: %w", err)
 	}
 	keyBlock, _ := pem.Decode(keyBytes)
-	if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
+	if keyBlock == nil || keyBlock.Type != pemTypePrivateKey {
 		return errors.New("cert: server-root key is not a PKCS#8 PRIVATE KEY PEM")
 	}
 	key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
@@ -242,7 +312,7 @@ func (c *ServerSelfCA) createRoot(keyPath, certPath string) error {
 		return fmt.Errorf("cert: marshal server-root key: %w", err)
 	}
 	if err := os.WriteFile(keyPath,
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER}), 0o600); err != nil {
+		pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: privDER}), 0o600); err != nil {
 		return fmt.Errorf("cert: write server-root key: %w", err)
 	}
 	// 0o644 (world-readable) is intentional: the server-root cert

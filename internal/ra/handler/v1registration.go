@@ -35,14 +35,16 @@ import (
 //
 // ans deviations from the reference that apply here:
 //
-//   - **No HTTP-01 challenge.** ans verifies domain control via DNS
-//     only; the `challenges` array in RegistrationPending therefore
-//     contains only a DNS-01 entry.
+//   - **DNS-01-only on the V1 wire.** The V1 `challenges` array
+//     carries a single DNS_01 entry. The verify-acme gate itself
+//     accepts either artifact (DNS-01 TXT or HTTP-01 resource) —
+//     HTTP-01 challenge info is simply not relayed on this lane;
+//     V2 surfaces both.
 //
 // Server-cert handling matches the reference byte-for-byte: either
-// `serverCsrPEM` (→ the RA signs via its `ServerCertificateAuthority`
-// port) or `serverCertificatePEM` + chain (BYOC path). Exactly one
-// must be set.
+// `serverCsrPEM` (→ the order is finalized via the configured
+// `ServerCertificateIssuer` port) or `serverCertificatePEM` + chain
+// (BYOC path). Exactly one must be set.
 
 // V1RegistrationHandler wires HTTP routes for the V1 `/v1/agents/*`
 // registration + detail surface.
@@ -57,13 +59,9 @@ func NewV1RegistrationHandler(svc *service.RegistrationService) *V1RegistrationH
 
 // v1RegistrationRequest mirrors the `AgentRegistrationRequest`
 // schema in the reference V1 API spec. Field names and JSON tags
-// match byte-for-byte.
-//
-// Difference from V2's `registrationRequest`: the reference permits
-// `serverCsrPEM` OR `serverCertificatePEM`; ans accepts only the
-// latter (BYOC-only per deviation table). A non-empty
-// `serverCsrPEM` returns 422 UNSUPPORTED_FIELD so SDK clients get a
-// clear error.
+// match byte-for-byte. Like the reference, exactly one of
+// `serverCsrPEM` / `serverCertificatePEM` must be set; both or
+// neither is 422.
 type v1RegistrationRequest struct {
 	AgentDisplayName          string          `json:"agentDisplayName"`
 	AgentDescription          string          `json:"agentDescription,omitempty"`
@@ -328,7 +326,7 @@ func mapV1RegistrationResponse(resp *service.RegisterResponse, r *http.Request) 
 				Description: "Call POST /v1/agents/{agentId}/verify-acme once the challenge record is live",
 				Endpoint:    base + "/verify-acme"},
 		},
-		ExpiresAt: rfc3339Zero(resp.Registration.ACMEChallenge.ExpiresAt),
+		ExpiresAt: rfc3339Zero(resp.Registration.CertOrder.ExpiresAt),
 		Links: []v1LinkDTO{
 			{Rel: "self", Href: base},
 		},
@@ -336,24 +334,28 @@ func mapV1RegistrationResponse(resp *service.RegisterResponse, r *http.Request) 
 }
 
 // buildV1Challenges builds the ChallengeInfo array for the V1
-// RegistrationPending response. ans emits DNS_01 only.
+// RegistrationPending response. The V1 wire contract carries a single
+// DNS_01 entry (the documented V1 deviation — HTTP_01 is V2-only on
+// the wire even though the gate accepts either artifact), so only the
+// order's DNS-01 challenge is relayed here.
 //
 // Returns nil (omitted on the wire via the `omitempty` tag) when no
 // challenge has been issued — e.g., for an agent past PENDING_DNS or
-// a registration pre-dating the challenge-persistence migration.
+// a registration pre-dating order persistence.
 func buildV1Challenges(reg *domain.AgentRegistration) []v1ChallengeDTO {
-	if reg.ACMEChallenge.IsZero() {
+	ch, ok := reg.CertOrder.ChallengeOfType(domain.ChallengeTypeDNS01)
+	if !ok {
 		return nil
 	}
 	c := v1ChallengeDTO{
 		Type:  "DNS_01",
-		Token: reg.ACMEChallenge.DNS01Token,
+		Token: ch.Token,
 		DNSRecord: &v1ChallengeDNSRecordDTO{
-			Name:  "_acme-challenge." + reg.FQDN(),
+			Name:  ch.EffectiveDNSRecordName(reg.FQDN()),
 			Type:  "TXT",
-			Value: reg.ACMEChallenge.DNS01Token,
+			Value: ch.EffectiveDNSRecordValue(),
 		},
-		ExpiresAt: rfc3339Zero(reg.ACMEChallenge.ExpiresAt),
+		ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
 	}
 	return []v1ChallengeDTO{c}
 }
@@ -448,6 +450,42 @@ func buildV1RegistrationPending(reg *domain.AgentRegistration, r *http.Request, 
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		base := schemeOf(r) + "://" + r.Host + "/v1/agents/" + reg.AgentID
+		if reg.CertOrder.State == domain.OrderStateFailed {
+			// Terminal provider failure — relaying the dead challenge
+			// with CONFIGURE_DNS would loop the operator into a
+			// verify-acme that only returns CERT_ORDER_FAILED.
+			return &v1RegistrationPendingResponse{
+				Status:  string(reg.Status),
+				AnsName: reg.AnsName.String(),
+				NextSteps: []v1NextStepDTO{
+					{Action: "CANCEL",
+						Description: "Certificate issuance failed — cancel this registration (POST /revoke) and register a new version",
+						Endpoint:    base + "/revoke"},
+				},
+				ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
+				Links: []v1LinkDTO{
+					{Rel: "self", Href: base},
+				},
+			}
+		}
+		if reg.CertOrder.State == domain.OrderStateIssuing {
+			// Domain control proven; the issuer is still finalizing.
+			// The challenge is already answered — relaying it again
+			// with CONFIGURE_DNS guidance would mislead the operator.
+			return &v1RegistrationPendingResponse{
+				Status:  string(reg.Status),
+				AnsName: reg.AnsName.String(),
+				NextSteps: []v1NextStepDTO{
+					{Action: "WAIT",
+						Description: "Certificate issuance in progress — POST verify-acme again to check for completion",
+						Endpoint:    base + "/verify-acme"},
+				},
+				ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
+				Links: []v1LinkDTO{
+					{Rel: "self", Href: base},
+				},
+			}
+		}
 		// PENDING_VALIDATION carries no production DNS records — those
 		// don't materialize until verify-acme issues the certs that the
 		// TLSA record fingerprints. The only record the operator needs
@@ -467,7 +505,7 @@ func buildV1RegistrationPending(reg *domain.AgentRegistration, r *http.Request, 
 					Description: "Call POST /v1/agents/{agentId}/verify-acme once the challenge record is live",
 					Endpoint:    base + "/verify-acme"},
 			},
-			ExpiresAt: rfc3339Zero(reg.ACMEChallenge.ExpiresAt),
+			ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
 			Links: []v1LinkDTO{
 				{Rel: "self", Href: base},
 			},
@@ -495,7 +533,7 @@ func buildV1RegistrationPending(reg *domain.AgentRegistration, r *http.Request, 
 					Description: "Verify that all required DNS records are configured",
 					Endpoint:    base + "/verify-dns"},
 			},
-			ExpiresAt: rfc3339Zero(reg.ACMEChallenge.ExpiresAt),
+			ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
 			Links: []v1LinkDTO{
 				{Rel: "self", Href: base},
 			},

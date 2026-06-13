@@ -13,6 +13,35 @@ ca:
     org: "ANS Local Dev CA"
     validity-days: 365
     data-dir: "./data/ra/ca"
+  # server: optional server certificate issuer. When omitted the RA
+  # accepts only BYOC server certs (serverCertificatePEM). Two
+  # adapter types implement the same order lifecycle:
+  #
+  # In-process self-signed CA (type self, the default):
+  # server:
+  #   type: self
+  #   org: "ANS Local Dev Server CA"
+  #   validity-days: 365
+  #   data-dir: "./data/ra/server-ca"
+  #
+  # External RFC 8555 CA — Let's Encrypt et al. (type acme). Use the
+  # staging directory for testing; production rate limits are
+  # unforgiving. Selecting this type auto-accepts the provider's
+  # terms of service on account registration. The relayed challenges
+  # in pending responses become the provider's own (token + key
+  # authorization + computed DNS digest) — the domain owner publishes
+  # them, exactly as with the self-signed issuer.
+  #
+  # REQUIRES dns.type: lookup (below). With a real public CA the
+  # verify-acme gate must check the owner's published artifact before
+  # answering the provider; the noop verifier would answer blindly and
+  # invalidate every order, so config validation rejects acme + noop.
+  # server:
+  #   type: acme
+  #   acme:
+  #     directory-url: "https://acme-staging-v02.api.letsencrypt.org/directory"
+  #     email: "ops@example.com"
+  #     data-dir: "./data/ra/acme"
 
 dns:
   # "noop" (default) accepts any DNS state — the quickstart demo uses

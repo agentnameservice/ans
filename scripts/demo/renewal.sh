@@ -146,7 +146,8 @@ openssl ecparam -name prime256v1 -genkey -noout -out "$CERT_DIR/key.pem" 2>/dev/
 
 if [ "$PATH_MODE" = "csr" ]; then
   # CSR path: produce a PEM CSR with DNS SAN matching the agent FQDN.
-  # The RA's configured ServerCertificateAuthority signs it.
+  # The RA's configured ServerCertificateIssuer finalizes the order
+  # and returns the cert at renewal verify-acme.
   openssl req -new -key "$CERT_DIR/key.pem" \
     -config "$CERT_DIR/openssl.cnf" \
     -out "$CERT_DIR/csr.pem" 2>/dev/null

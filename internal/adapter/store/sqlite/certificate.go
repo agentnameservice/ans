@@ -15,7 +15,10 @@ type CertificateStore struct{ db *DB }
 // NewCertificateStore returns a new SQLite-backed CertificateStore.
 func NewCertificateStore(db *DB) *CertificateStore { return &CertificateStore{db: db} }
 
-// certRow maps an issued_certificates row.
+// certRow maps an issued_certificates row. serial_number /
+// certificate_ref are NULL on rows persisted before migration 007 —
+// readers surface them as empty strings and the revocation flow falls
+// back to parsing the PEM for the serial.
 type certRow struct {
 	ID                    int64          `db:"id"`
 	AgentID               string         `db:"agent_id"`
@@ -23,6 +26,8 @@ type certRow struct {
 	CertificateType       string         `db:"certificate_type"`
 	CertificatePEM        string         `db:"certificate_pem"`
 	ChainPEM              sql.NullString `db:"chain_pem"`
+	SerialNumber          sql.NullString `db:"serial_number"`
+	CertificateRef        sql.NullString `db:"certificate_ref"`
 	Status                string         `db:"status"`
 	IssueTimestampMs      int64          `db:"issue_timestamp_ms"`
 	ExpirationTimestampMs int64          `db:"expiration_timestamp_ms"`
@@ -35,6 +40,8 @@ func (r certRow) toDomain() *domain.StoredCertificate {
 		CertificateType:     domain.CertificateType(r.CertificateType),
 		CertificatePEM:      r.CertificatePEM,
 		ChainPEM:            r.ChainPEM.String,
+		SerialNumber:        r.SerialNumber.String,
+		CertificateRef:      r.CertificateRef.String,
 		Status:              domain.CertificateStatus(r.Status),
 		IssueTimestamp:      msToTime(r.IssueTimestampMs),
 		ExpirationTimestamp: msToTime(r.ExpirationTimestampMs),
@@ -50,14 +57,16 @@ func (s *CertificateStore) SaveIdentityCertificate(
 	const q = `
         INSERT INTO issued_certificates(
             agent_id, csr_id, certificate_type, certificate_pem, chain_pem,
+            serial_number, certificate_ref,
             status, issue_timestamp_ms, expiration_timestamp_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 	chain := sql.NullString{}
 	if cert.ChainPEM != "" {
 		chain = sql.NullString{String: cert.ChainPEM, Valid: true}
 	}
 	res, err := s.db.extx(ctx).ExecContext(ctx, q,
 		agentID, cert.CSRID, string(cert.CertificateType), cert.CertificatePEM, chain,
+		nullableString(cert.SerialNumber), nullableString(cert.CertificateRef),
 		string(cert.Status), cert.IssueTimestamp.UnixMilli(), cert.ExpirationTimestamp.UnixMilli(),
 	)
 	if err != nil {

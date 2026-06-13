@@ -119,10 +119,57 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request, tlPublicBaseURL
 // buildV1RegistrationPending. Agents still driving validation/DNS
 // expose the outstanding challenges + DNS records needed to
 // progress; terminal states omit the block.
+//
+// The block's status is a registration-flow status, NOT the agent
+// lifecycle status: while an asynchronous issuer finalizes the
+// certificate order the lifecycle stays PENDING_VALIDATION but the
+// flow reports PENDING_CERTS (per the spec's RegistrationPending
+// enum), with WAIT guidance pointing back at verify-acme.
 func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Request, tlPublicBaseURL string) *registrationPendingResponse {
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		base := schemeOf(r) + "://" + r.Host + "/v2/ans/agents/" + reg.AgentID
+		if reg.CertOrder.State == domain.OrderStateFailed {
+			// Terminal provider failure. The dead challenges are not
+			// worth relaying, and CONFIGURE_DNS/VALIDATE_DOMAIN would
+			// loop the operator into a verify-acme that only returns
+			// CERT_ORDER_FAILED. The actionable step is to cancel and
+			// register a new version (the ANS name is immutable once
+			// used).
+			return &registrationPendingResponse{
+				AgentID: reg.AgentID,
+				Status:  registrationStatusPendingCerts,
+				AnsName: reg.AnsName.String(),
+				NextSteps: []nextStepDTO{
+					{Action: "CANCEL",
+						Description: "Certificate issuance failed — cancel this registration (POST /revoke) and register a new version",
+						Endpoint:    base + "/revoke"},
+				},
+				ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
+				Links: []linkDTO{
+					{Rel: "self", Href: base},
+				},
+			}
+		}
+		if reg.CertOrder.State == domain.OrderStateIssuing {
+			// Domain control proven; the issuer is still finalizing.
+			// No challenges (already answered), no production DNS
+			// records (the TLSA value needs the cert).
+			return &registrationPendingResponse{
+				AgentID: reg.AgentID,
+				Status:  registrationStatusPendingCerts,
+				AnsName: reg.AnsName.String(),
+				NextSteps: []nextStepDTO{
+					{Action: "WAIT",
+						Description: "Certificate issuance in progress — POST verify-acme again to check for completion",
+						Endpoint:    base + "/verify-acme"},
+				},
+				ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
+				Links: []linkDTO{
+					{Rel: "self", Href: base},
+				},
+			}
+		}
 		// PENDING_VALIDATION carries no production DNS records — those
 		// only materialize after verify-acme issues the certs that the
 		// TLSA record fingerprints. The ACME challenge itself rides in
@@ -131,19 +178,20 @@ func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Reques
 		// should publish production records too, which they can't
 		// without certs in hand.
 		return &registrationPendingResponse{
+			AgentID:    reg.AgentID,
 			Status:     string(reg.Status),
 			AnsName:    reg.AnsName.String(),
 			Challenges: buildRegistrationChallenges(reg),
 			DNSRecords: nil,
 			NextSteps: []nextStepDTO{
 				{Action: "CONFIGURE_DNS",
-					Description: "Publish the ACME DNS-01 challenge TXT record listed in challenges[]",
+					Description: "Publish one challenge artifact from challenges[]: the DNS-01 TXT record, or the HTTP-01 resource at its httpPath",
 					Endpoint:    base + "/verify-acme"},
 				{Action: "VALIDATE_DOMAIN",
-					Description: "Call POST /v2/ans/agents/{agentId}/verify-acme once the challenge record is live",
+					Description: "Call POST /v2/ans/agents/{agentId}/verify-acme once the challenge artifact is live",
 					Endpoint:    base + "/verify-acme"},
 			},
-			ExpiresAt: rfc3339Zero(reg.ACMEChallenge.ExpiresAt),
+			ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
 			Links: []linkDTO{
 				{Rel: "self", Href: base},
 			},
@@ -163,6 +211,7 @@ func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Reques
 			})
 		}
 		return &registrationPendingResponse{
+			AgentID:    reg.AgentID,
 			Status:     string(reg.Status),
 			AnsName:    reg.AnsName.String(),
 			DNSRecords: dnsRecords,
@@ -171,7 +220,7 @@ func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Reques
 					Description: "Verify that all required DNS records are configured",
 					Endpoint:    base + "/verify-dns"},
 			},
-			ExpiresAt: rfc3339Zero(reg.ACMEChallenge.ExpiresAt),
+			ExpiresAt: rfc3339Zero(reg.CertOrder.ExpiresAt),
 			Links: []linkDTO{
 				{Rel: "self", Href: base},
 			},
@@ -180,6 +229,12 @@ func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Reques
 		return nil
 	}
 }
+
+// registrationStatusPendingCerts is the registration-flow status
+// reported while a certificate order is finalizing. It exists only in
+// the RegistrationPending view (spec `RegistrationPending.status`
+// enum) — the agent lifecycle enum deliberately does not contain it.
+const registrationStatusPendingCerts = "PENDING_CERTS"
 
 // ----- Certificate DTO (matches V2 spec CertificateResponse §1324) -----
 
@@ -278,18 +333,19 @@ type serverCertRenewalRequest struct {
 	ServerCertificateChainPEM string `json:"serverCertificateChainPEM,omitempty"`
 }
 
-// challengeInfo mirrors V2 `ChallengeInfo` — the parts the client
-// needs to publish the DNS-01 or HTTP-01 challenge. Minimal shape;
-// the reference has more knobs but the V2 spec only requires
-// recordName/recordType/recordValue/url/expectedResponse/expiresAt.
-// We omit-empty so DNS-01-only vs HTTP-01-only responses stay clean.
+// challengeInfo mirrors the V2 `ChallengeInfo` schema — the same
+// shape the registration lane's challenges[] carries: type, token,
+// keyAuthorization, dnsRecord, httpPath, expiresAt. The renewal
+// responses reference ChallengeInfo via $ref, so the field names
+// must match it exactly. We omit-empty so DNS-01 entries don't carry
+// an httpPath and vice versa.
 type challengeInfo struct {
-	RecordName       string `json:"recordName,omitempty"`
-	RecordType       string `json:"recordType,omitempty"`
-	RecordValue      string `json:"recordValue,omitempty"`
-	URL              string `json:"url,omitempty"`
-	ExpectedResponse string `json:"expectedResponse,omitempty"`
-	ExpiresAt        string `json:"expiresAt"`
+	Type             string                 `json:"type"`
+	Token            string                 `json:"token"`
+	KeyAuthorization string                 `json:"keyAuthorization,omitempty"`
+	DNSRecord        *challengeDNSRecordDTO `json:"dnsRecord,omitempty"`
+	HTTPPath         string                 `json:"httpPath,omitempty"`
+	ExpiresAt        string                 `json:"expiresAt"`
 }
 
 type renewalChallenges struct {
@@ -381,12 +437,19 @@ type agentStatus struct {
 	ExpiresAt      string   `json:"expiresAt,omitempty"`
 }
 
-// phaseFromStatus maps a lifecycle status to the closest-matching
-// V2 phase. Reference semantics: PENDING_VALIDATION → DOMAIN_VALIDATION,
-// PENDING_DNS → DNS_PROVISIONING, ACTIVE → COMPLETED.
-func phaseFromStatus(s domain.RegistrationStatus) string {
-	switch s {
+// phaseFor derives the V2 AgentStatus phase from (lifecycle status ×
+// certificate-order state). Reference semantics: PENDING_VALIDATION →
+// DOMAIN_VALIDATION, PENDING_DNS → DNS_PROVISIONING, ACTIVE →
+// COMPLETED — plus CERTIFICATE_ISSUANCE, which is not a lifecycle
+// state at all: it is the window where domain validation passed but
+// an asynchronous issuer hasn't produced the certificate yet, tracked
+// on the order while the lifecycle stays PENDING_VALIDATION.
+func phaseFor(reg *domain.AgentRegistration) string {
+	switch reg.Status {
 	case domain.StatusPendingValidation:
+		if reg.CertOrder.State == domain.OrderStateIssuing {
+			return "CERTIFICATE_ISSUANCE"
+		}
 		return "DOMAIN_VALIDATION"
 	case domain.StatusPendingDNS:
 		return "DNS_PROVISIONING"
@@ -397,22 +460,28 @@ func phaseFromStatus(s domain.RegistrationStatus) string {
 	}
 }
 
-func completedStepsFor(s domain.RegistrationStatus) []string {
-	switch s {
-	case domain.StatusPendingDNS:
+func completedStepsFor(reg *domain.AgentRegistration) []string {
+	switch {
+	case reg.Status == domain.StatusPendingValidation && reg.CertOrder.State == domain.OrderStateIssuing:
 		return []string{"DOMAIN_VALIDATION"}
-	case domain.StatusActive:
+	case reg.Status == domain.StatusPendingDNS:
+		// The cert exists by PENDING_DNS — issuance completes in the
+		// same transaction that advances the lifecycle.
+		return []string{"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE"}
+	case reg.Status == domain.StatusActive:
 		return []string{"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE", "DNS_PROVISIONING"}
 	default:
 		return nil
 	}
 }
 
-func pendingStepsFor(s domain.RegistrationStatus) []string {
-	switch s {
-	case domain.StatusPendingValidation:
+func pendingStepsFor(reg *domain.AgentRegistration) []string {
+	switch {
+	case reg.Status == domain.StatusPendingValidation && reg.CertOrder.State == domain.OrderStateIssuing:
+		return []string{"CERTIFICATE_ISSUANCE"}
+	case reg.Status == domain.StatusPendingValidation:
 		return []string{"DOMAIN_VALIDATION"}
-	case domain.StatusPendingDNS:
+	case reg.Status == domain.StatusPendingDNS:
 		return []string{"DNS_PROVISIONING"}
 	default:
 		return nil

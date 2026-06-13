@@ -63,14 +63,22 @@ test:
 
 test-cover:
 	@echo "Running tests with coverage..."
-	@# Exclude cmd/* from the instrumented set. The three command
-	@# binaries (ans-ra, ans-tl, ans-verify) are thin glue: flag
-	@# parsing, config loading, dependency wiring, then hand off to
-	@# library code under internal/. We don't write unit tests for
+	@# Exclude cmd/* from the instrumented set. The four command
+	@# binaries (ans-ra, ans-tl, ans-verify, ans-dns) are thin glue:
+	@# flag parsing, config loading, dependency wiring, then hand off
+	@# to library code under internal/. We don't write unit tests for
 	@# main() — counting those ~30 unexercised statements toward the
 	@# 90% gate would only penalize real logic coverage. The library
 	@# packages under internal/ are where the gate has teeth.
-	@pkgs=$$(go list ./... | grep -v '/cmd/' | tr '\n' ',' | sed 's/,$$//'); \
+	@#
+	@# Exclude acmetest for the same reason: it is a test double (an
+	@# in-process fake RFC 8555 server) imported only by _test.go
+	@# files and never compiled into a production binary. Its fault-
+	@# injection knobs are exercised selectively per test, so counting
+	@# its unused branches as "production" statements would penalize
+	@# real coverage exactly the way main() would. Test scaffolding is
+	@# not the system under test.
+	@pkgs=$$(go list ./... | grep -v -e '/cmd/' -e '/acmetest' | tr '\n' ',' | sed 's/,$$//'); \
 	go test ./... -count=1 -coverpkg=$$pkgs -coverprofile=coverage.out -covermode=atomic
 	@go tool cover -func=coverage.out
 	@echo ""

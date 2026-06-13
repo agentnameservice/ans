@@ -147,8 +147,9 @@ boundary without touching the service layer.
 |---|---|---|
 | Auth | Static API key (`Authorization: Bearer <apiKey>` and `Authorization: sso-key <apiKey>:<apiSecret>`) and OIDC | `port.Authenticator` |
 | Identity certificate issuance | File-backed self-signed CA | `port.IdentityCertificateAuthority` |
-| Server certificate issuance | File-backed self-signed CA (`serverCsrPEM` path) and BYOC (`serverCertificatePEM` + chain). Exactly one per registration/renewal. | `port.ServerCertificateAuthority` |
+| Server certificate issuance | File-backed self-signed CA (`ca.server.type: self`) or external RFC 8555 ACME CA such as Let's Encrypt (`ca.server.type: acme`) for the `serverCsrPEM` path, plus BYOC (`serverCertificatePEM` + chain). Exactly one of CSR/BYOC per registration/renewal. Issuance runs through a certificate-order lifecycle: `CreateOrder` (at registration/renewal submission) returns the provider's domain-control challenges, which are relayed verbatim to the domain owner — ANS never writes DNS or serves challenge files on their behalf; `FinalizeOrder` (at verify-acme, gated on a verified challenge artifact) returns the cert, or `ErrOrderPending` for asynchronous providers (ACME CAs such as Let's Encrypt), in which case re-POSTing verify-acme re-drives the order. | `port.ServerCertificateIssuer` |
 | DNS verification | `noop` (quickstart; accepts any state) and `lookup` (real miekg/dns queries with TXT / TLSA / HTTPS support; TLSA responses carry the resolver's DNSSEC AuthenticatedData bit through to the TL attestation as `dnsRecordsProvisioned[].dnssecVerified`) | `port.DNSVerifier` |
+| HTTP-01 challenge verification | Plain-HTTP fetch of the owner-published challenge artifact (`/.well-known/acme-challenge/<token>` by default). The verify-acme gate passes when either the DNS-01 TXT record or the HTTP-01 resource verifies. | `port.HTTPChallengeVerifier` |
 | Signing keys | File-based ECDSA P-256 PEM | `port.KeyManager` |
 | Storage (RA) | SQLite | `port.AgentStore`, `port.CertificateStore`, `port.RenewalStore`, `port.OutboxStore`, `port.UnitOfWork` |
 | Storage (TL) | SQLite + Tessera POSIX tile storage | `tl/event` codec interfaces |
@@ -197,7 +198,7 @@ verify-dns flow without touching real DNS infrastructure.
 - `internal/domain/` + `internal/crypto/` — pure logic; 100%
   coverage expected.
 - `internal/port/` — adapter interfaces (KeyManager, AgentStore,
-  DNSVerifier, ServerCertificateAuthority, …).
+  DNSVerifier, ServerCertificateIssuer, …).
 - `internal/adapter/` — concrete adapters (SQLite, file-KMS, OIDC,
   static-key auth, miekg/dns, self-signed CA, docsui, …).
 - `internal/ra/` + `internal/tl/` — service layer and HTTP

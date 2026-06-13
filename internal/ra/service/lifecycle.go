@@ -96,10 +96,16 @@ func (s *RegistrationService) GetByAgentID(ctx context.Context, agentID string) 
 		epSlice = eps.Endpoints
 	}
 	// BYOC server cert is optional — absent on CSR-path registrations
-	// where the RA signs the server cert itself. A nil result from
-	// the store is fine; ComputeRequiredDNSRecords skips the TLSA
-	// record when reg.ServerCert is nil.
-	if byoc, berr := s.byoc.FindLatestValidByAgentID(ctx, agentID); berr == nil && byoc != nil {
+	// where the RA signs the server cert itself. A genuinely-absent
+	// cert is fine; ComputeRequiredDNSRecords skips the TLSA record
+	// when reg.ServerCert is nil. A transient store failure, however,
+	// must not masquerade as "no cert" — that would silently drop the
+	// TLSA record from the detail response.
+	byoc, berr := s.loadServerCert(ctx, agentID)
+	if berr != nil {
+		return nil, berr
+	}
+	if byoc != nil {
 		reg.ServerCert = byoc
 	}
 	return &DetailResult{
@@ -139,10 +145,21 @@ func (s *RegistrationService) ServerCertificates(ctx context.Context, agentID st
 // ----- CSR submission + status -----
 
 // SubmitIdentityCSR accepts a new identity CSR for an already-ACTIVE
-// agent (identity-cert rotation). Validates the CSR against the
-// agent's ANS name, updates the aggregate's embedded IdentityCSR
-// slot, and persists the row in the csrs table so the status endpoint
-// can find it.
+// agent (identity-cert rotation), signs it via the private identity
+// CA, and persists the SIGNED CSR row plus the new certificate
+// atomically. The previous identity cert stays VALID until it expires
+// or the agent is revoked — rotation is additive, matching the
+// rotation-array model the TL envelopes carry.
+//
+// Trust basis: the identity CA is a private root with no validation
+// of its own, and rotation deliberately performs no fresh
+// domain-control challenge. Ownership of the (unchanged) ANS name was
+// proven when the agent reached ACTIVE — the RA's challenge gate plus
+// the public provider's own validation on the ACME path — and the
+// ACTIVE + identity-bearing guards below scope rotation to exactly
+// that population. A recency-bounded revalidation would require
+// relaying a fresh challenge through CsrSubmissionResponse, which has
+// no challenge surface in the spec.
 //
 // Per the reference RA's `CertificateManagementService.submitIdentityCsr`,
 // identity CSRs are gated on status == ACTIVE. The aggregate method
@@ -187,10 +204,26 @@ func (s *RegistrationService) SubmitIdentityCSR(ctx context.Context, agentID, cs
 	if err != nil {
 		return "", err
 	}
-	if err := s.agents.Save(ctx, reg); err != nil {
+
+	// Issue before the tx (CA work doesn't need the SQLite write
+	// lock), persist atomically after: the SIGNED CSR row, the new
+	// certificate, and the aggregate's embedded slot commit together
+	// so a crash can never leave a SIGNED CSR without its cert.
+	signedID, storedID, err := s.signIdentityCSR(ctx, reg, newCSR, now)
+	if err != nil {
 		return "", err
 	}
-	if err := s.certs.SaveCSR(ctx, agentID, newCSR); err != nil {
+	reg.IdentityCSR = signedID
+
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		if err := s.agents.Save(txCtx, reg); err != nil {
+			return err
+		}
+		if err := s.certs.SaveCSR(txCtx, agentID, signedID); err != nil {
+			return err
+		}
+		return s.certs.SaveIdentityCertificate(txCtx, agentID, storedID)
+	}); err != nil {
 		return "", err
 	}
 	return csrID, nil
@@ -251,10 +284,16 @@ func (s *RegistrationService) GetCSRStatus(ctx context.Context, agentID, csrID s
 // ----- Write: VerifyACME, VerifyDNS, Revoke -----
 
 // VerifyACMEResult is returned by VerifyACME; the handler maps this
-// into an AgentStatus response (status=PENDING_DNS, phase=DNS_PROVISIONING).
+// into an AgentStatus response.
 type VerifyACMEResult struct {
 	Registration *domain.AgentRegistration
 	Now          time.Time // propagated so handler timestamps match the outbox row
+	// Pending is true when domain validation passed but the
+	// certificate provider is finalizing the order asynchronously.
+	// The lifecycle status stays PENDING_VALIDATION with the order in
+	// ISSUING; the handler reports phase=CERTIFICATE_ISSUANCE and the
+	// client re-POSTs verify-acme to drive the order to completion.
+	Pending bool
 }
 
 // VerifyACME advances the registration from PENDING_VALIDATION to
@@ -265,20 +304,31 @@ type VerifyACMEResult struct {
 //
 // Steps:
 //
-//  1. Verify the ACME DNS-01 challenge TXT record resolves to the
-//     expected token. (Skipped when dnsVerifier is nil — local dev.)
-//  2. Sign the identity CSR via identityCA. Persist the resulting
+//  1. Challenge gate: confirm at least one of the order's
+//     domain-control challenge artifacts (DNS-01 TXT record or
+//     HTTP-01 resource) is published. Unconditional while the order
+//     awaits validation — the issuer is never invoked before the
+//     gate passes, regardless of which issuer adapter is wired.
+//  2. If a server CSR was submitted at registration (CSR path),
+//     finalize the certificate order via the issuer port and persist
+//     the resulting cert through the BYOC store (same struct covers
+//     both paths downstream). Asynchronous providers may leave the
+//     order ISSUING — the call returns Pending (nothing signed) and
+//     a later verify-acme re-drives the finalize. BYOC registrations
+//     skip this step — the operator's cert was saved at register
+//     time.
+//  3. Sign the identity CSR via the private identityCA — only after
+//     ownership is fully proven (the public provider's validation on
+//     the CSR path, the RA's gate for BYOC). Persist the resulting
 //     cert + mark the CSR SIGNED.
-//  3. If a server CSR was submitted at registration (CSR path),
-//     sign it via serverCA and persist the resulting cert through
-//     the BYOC store (same struct covers both paths downstream).
-//     BYOC registrations skipped this step — the operator's cert
-//     was saved at register time.
-//  4. Transition the aggregate to PENDING_DNS.
+//  4. Transition the aggregate to PENDING_DNS (the order reaches
+//     COMPLETED in the same transaction).
 //
 // Idempotent: if the registration is already past PENDING_VALIDATION,
 // return the current state without erroring — matches the reference's
-// "if already progressed, succeed silently" semantics.
+// "if already progressed, succeed silently" semantics. Re-driven
+// calls on an ISSUING order skip the gate (the provider already
+// accepted the challenge answer) and only re-attempt the finalize.
 func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in VerifyInput) (*VerifyACMEResult, error) {
 	now := s.clock()
 	reg, err := s.agents.FindByAgentID(ctx, agentID)
@@ -302,34 +352,64 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 		reg.Endpoints = eps.Endpoints
 	}
 
-	// 1. Verify the ACME DNS-01 challenge record. The expected
-	//    value is the token the RA generated at register time; the
-	//    record name is `_acme-challenge.<fqdn>`.
-	if s.dnsVerifier != nil && !reg.ACMEChallenge.IsZero() {
-		acmeRec := domain.ExpectedDNSRecord{
-			Name:     "_acme-challenge." + reg.FQDN(),
-			Type:     domain.DNSRecordTXT,
-			Value:    reg.ACMEChallenge.DNS01Token,
-			Purpose:  "DOMAIN_VALIDATION",
-			Required: true,
-		}
-		res, verr := s.dnsVerifier.VerifyRecords(ctx, reg.FQDN(), []domain.ExpectedDNSRecord{acmeRec})
-		if verr != nil {
-			return nil, fmt.Errorf("acme verify: %w", verr)
-		}
-		if res != nil && !res.AllRequired {
-			return nil, domain.NewInvalidStateError(
-				"ACME_CHALLENGE_MISSING",
-				fmt.Sprintf("_acme-challenge.%s TXT record is not published or doesn't match the issued token", reg.FQDN()),
-			)
-		}
+	// 1. Domain-control challenge gate.
+	verified, err := s.gateOrderChallenges(ctx, reg, now)
+	if err != nil {
+		return nil, err
 	}
 
-	// 2. Sign the identity CSR (when the agent registered with one).
-	//    Issuance + signing are CPU-bound and do not touch the DB; we
-	//    run them outside the tx so the SQLite write lock isn't held
-	//    during work that doesn't need it. Same pattern below for the
-	//    server CSR path.
+	// 2. CSR-path server cert: finalize the certificate order via the
+	//    issuer port — validate + mark up front, persist below inside
+	//    the tx. Asynchronous providers may report the order still
+	//    pending: persist only the ISSUING order state without
+	//    advancing the lifecycle, and let a later verify-acme re-drive
+	//    the finalize. Nothing is signed on the pending path — on the
+	//    ACME path the provider's own validation is the authoritative
+	//    ownership proof, and the identity cert below is provisioned
+	//    only once it succeeds.
+	serverCSR, err := s.certs.FindLatestPendingCSRByType(ctx, agentID, domain.CSRTypeServer)
+	if err != nil {
+		return nil, err
+	}
+	var byocCert *domain.ByocServerCertificate
+	var signedSrv domain.AgentCSR
+	// Finalize only the server CSR that belongs to this registration's
+	// certificate order — one created via the issuer's CreateOrder,
+	// which always stamps an OrderRef (the self-CA uses a "selfca-…"
+	// handle, ACME the order URL). A BYOC registration's order is
+	// self-issued with an empty ref and its cert already exists; a
+	// stray server CSR submitted out-of-band to such an agent (the
+	// POST /certificates/server route accepts CSRs in any state) must
+	// NOT be finalized here — doing so would issue a second cert over
+	// the operator's BYOC cert, and against an ACME issuer would 500
+	// on the empty order ref. Leave it untouched; the agent advances.
+	if serverCSR != nil && reg.CertOrder.OrderRef != "" {
+		outcome, err := s.finalizeServerOrder(ctx, reg, serverCSR, verified, now)
+		if err != nil {
+			return nil, err
+		}
+		if outcome.pending {
+			if err := s.agents.Save(ctx, reg); err != nil {
+				return nil, err
+			}
+			return &VerifyACMEResult{Registration: reg, Now: now, Pending: true}, nil
+		}
+		byocCert = outcome.cert
+		signedSrv = outcome.signedCSR
+		reg.ServerCert = byocCert
+	}
+
+	// 3. Sign the identity CSR (when the agent registered with one).
+	//    The identity CA is a private trust root with no challenge
+	//    lifecycle of its own — it signs on the strength of the
+	//    ownership proof already established: the RA's gate for BYOC
+	//    (no public CA involved), plus the provider's own validation
+	//    on the CSR path (the order completed above). That ordering
+	//    is deliberate: a terminally failed public-CA order must never
+	//    leave a signed identity cert behind.
+	//
+	//    Issuance + signing run outside the tx so the SQLite write
+	//    lock isn't held during work that doesn't need it.
 	//
 	//    A nil pending identity CSR is NOT an error: an agent may
 	//    register without an identity CSR (identityCsrPEM optional), in
@@ -343,45 +423,23 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 	var signedID *domain.AgentCSR
 	var storedID *domain.StoredCertificate
 	if identityCSR != nil {
-		issuedID, err := s.identityCA.IssueIdentityCertificate(ctx, identityCSR.CSRContent, reg.AnsName.String())
-		if err != nil {
-			return nil, domain.NewInternalError("CERT_ISSUE_FAILED", "failed to issue identity cert", err)
-		}
-		signed, err := identityCSR.MarkSigned(now)
+		signedID, storedID, err = s.signIdentityCSR(ctx, reg, identityCSR, now)
 		if err != nil {
 			return nil, err
 		}
-		reg.IdentityCSR = &signed
-		signedID = &signed
-		storedID = &domain.StoredCertificate{
-			CSRID:               identityCSR.CSRID,
-			CertificateType:     domain.CertTypeIdentity,
-			CertificatePEM:      issuedID.CertPEM,
-			ChainPEM:            issuedID.ChainPEM,
-			Status:              domain.CertStatusValid,
-			IssueTimestamp:      issuedID.IssuedAt,
-			ExpirationTimestamp: issuedID.ExpiresAt,
-		}
-	}
-
-	// 3. CSR-path server cert: same shape — sign + validate up
-	//    front, persist below inside the tx.
-	serverCSR, err := s.certs.FindLatestPendingCSRByType(ctx, agentID, domain.CSRTypeServer)
-	if err != nil {
-		return nil, err
-	}
-	var byocCert *domain.ByocServerCertificate
-	var signedSrv domain.AgentCSR
-	if serverCSR != nil {
-		var err error
-		byocCert, signedSrv, err = s.signServerCSRForVerifyACME(ctx, reg, serverCSR, now)
-		if err != nil {
-			return nil, err
-		}
-		reg.ServerCert = byocCert
+		reg.IdentityCSR = signedID
 	}
 
 	// 4. Transition to PENDING_DNS in-memory; the tx below commits it.
+	//    The order completes in the same step: for the CSR path the
+	//    certificate landed, for BYOC domain control was proven — the
+	//    only thing its self-issued order tracks. Legacy registrations
+	//    without a persisted order have nothing to complete.
+	if !reg.CertOrder.IsZero() {
+		if err := reg.CertOrder.MarkCompleted(); err != nil {
+			return nil, err
+		}
+	}
 	if err := reg.AdvanceToPendingDNS(); err != nil {
 		return nil, err
 	}
@@ -422,30 +480,195 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 	return &VerifyACMEResult{Registration: reg, Now: now}, nil
 }
 
-// signServerCSRForVerifyACME signs the pending server CSR via the
-// configured server CA, validates the issued cert, and returns the
-// BYOC-shape cert struct + the SIGNED CSR row so the caller can
-// commit both inside its uow transaction. Extracted from VerifyACME
-// to keep the orchestrator under the funlen bound; the issuance +
-// validation are CPU-only and don't need to hold the SQLite write
-// lock.
-func (s *RegistrationService) signServerCSRForVerifyACME(
-	ctx context.Context, reg *domain.AgentRegistration,
-	serverCSR *domain.AgentCSR, now time.Time,
-) (*domain.ByocServerCertificate, domain.AgentCSR, error) {
-	if s.serverCA == nil {
-		return nil, domain.AgentCSR{}, domain.NewInternalError("SERVER_CA_DISABLED",
-			"server CSR pending but no server CA configured — inconsistent state", nil)
+// gateOrderChallenges is the domain-control challenge gate. It runs
+// before every issuer invocation, regardless of which issuer adapter
+// is wired:
+//
+//   - PENDING order → at least one challenge artifact must be
+//     verified as published (DNS-01 TXT or HTTP-01 resource);
+//     otherwise 422 ACME_CHALLENGE_MISSING. Expired challenge
+//     windows are 422 ACME_CHALLENGE_EXPIRED.
+//   - ISSUING order → gate skipped: the provider already accepted a
+//     challenge answer on an earlier call, and the operator may have
+//     legitimately removed the artifact since. The re-driven call
+//     only re-attempts the finalize.
+//   - FAILED order → 422 CERT_ORDER_FAILED; the operator cancels and
+//     re-registers.
+//
+// Returns the challenge types found published so ACME-style issuers
+// can answer exactly the satisfied challenge (answering an
+// unsatisfied one would invalidate the authorization).
+//
+// NOTE: zero-value orders (registrations predating order persistence)
+// skip the gate — no challenge was ever issued to the operator, so
+// there is nothing that could be verified. Every registration created
+// since order persistence carries one.
+func (s *RegistrationService) gateOrderChallenges(
+	ctx context.Context, reg *domain.AgentRegistration, now time.Time,
+) ([]domain.ChallengeType, error) {
+	order := reg.CertOrder
+	switch {
+	case order.IsZero():
+		return nil, nil
+	case order.State == domain.OrderStateIssuing:
+		return nil, nil
+	case order.State == domain.OrderStateFailed:
+		// 422 (validation), not 409: the spec documents only 422 on
+		// verify-acme. Recovery is to cancel (POST /revoke — cancel
+		// permits a failed order) then register a new version; the
+		// ANS name is immutable once used.
+		return nil, domain.NewValidationError("CERT_ORDER_FAILED",
+			"certificate order failed terminally; cancel this registration (POST /revoke) and register a new version")
+	case order.State != domain.OrderStatePending:
+		// COMPLETED while still PENDING_VALIDATION is unreachable —
+		// the order completes in the same transaction that advances
+		// the lifecycle. Tolerate rather than brick the row.
+		return nil, nil
 	}
-	issued, err := s.serverCA.IssueServerCertificate(ctx, serverCSR.CSRContent, reg.FQDN())
-	if err != nil {
-		return nil, domain.AgentCSR{}, domain.NewInternalError("SERVER_CERT_ISSUE_FAILED",
+	if order.IsExpired(now) {
+		// A lapsed-window order stays PENDING (expiry doesn't change
+		// State), so cancel refuses it — the agent-expiry sweeper
+		// retires it instead. Guide the operator to the action that
+		// actually works.
+		return nil, domain.NewValidationError("ACME_CHALLENGE_EXPIRED",
+			"the domain-control challenge window has expired; this registration will auto-expire — register a new version to retry")
+	}
+	verified, verr := s.verifyChallengeArtifacts(ctx, reg.FQDN(), order.Challenges)
+	if len(verified) > 0 {
+		return verified, nil
+	}
+	if verr != nil {
+		return nil, fmt.Errorf("acme verify: %w", verr)
+	}
+	return nil, domain.NewValidationError(
+		"ACME_CHALLENGE_MISSING",
+		fmt.Sprintf("no domain-control challenge artifact found for %s — publish the DNS-01 TXT record or the HTTP-01 resource from challenges[]", reg.FQDN()),
+	)
+}
+
+// verifyChallengeArtifacts checks the challenge set and returns the
+// type of the FIRST artifact found published. The gate is any-of: the
+// owner satisfies whichever challenge is easiest, so the first
+// success is sufficient and the loop short-circuits — no point making
+// a second (network) probe, and for HTTP-01 that probe is an outbound
+// fetch we'd rather not issue needlessly. A configuration with no
+// verifier at all is an error — silently passing the gate would
+// reopen the very hole this exists to close.
+func (s *RegistrationService) verifyChallengeArtifacts(
+	ctx context.Context, fqdn string, challenges []domain.Challenge,
+) ([]domain.ChallengeType, error) {
+	if len(challenges) == 0 {
+		return nil, nil
+	}
+	if s.dnsVerifier == nil && s.httpChallenge == nil {
+		return nil, domain.NewInternalError("CHALLENGE_VERIFIER_MISSING",
+			"no challenge verifier configured — wire a DNS verifier and/or an HTTP challenge verifier", nil)
+	}
+	var firstErr error
+	for _, ch := range challenges {
+		ok, err := s.verifyChallengeArtifact(ctx, fqdn, ch)
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+		if ok {
+			return []domain.ChallengeType{ch.Type}, nil
+		}
+	}
+	return nil, firstErr
+}
+
+// verifyChallengeArtifact dispatches a single challenge to the
+// matching verifier. Challenges with no wired verifier (or of an
+// unknown type) report unverified rather than erroring — the any-of
+// gate lets a sibling challenge still pass.
+func (s *RegistrationService) verifyChallengeArtifact(
+	ctx context.Context, fqdn string, ch domain.Challenge,
+) (bool, error) {
+	switch ch.Type {
+	case domain.ChallengeTypeDNS01:
+		if s.dnsVerifier == nil {
+			return false, nil
+		}
+		rec := domain.ExpectedDNSRecord{
+			Name:     ch.EffectiveDNSRecordName(fqdn),
+			Type:     domain.DNSRecordTXT,
+			Value:    ch.EffectiveDNSRecordValue(),
+			Purpose:  "DOMAIN_VALIDATION",
+			Required: true,
+		}
+		res, err := s.dnsVerifier.VerifyRecords(ctx, fqdn, []domain.ExpectedDNSRecord{rec})
+		if err != nil {
+			return false, err
+		}
+		return res != nil && res.AllRequired, nil
+	case domain.ChallengeTypeHTTP01:
+		if s.httpChallenge == nil {
+			return false, nil
+		}
+		return s.httpChallenge.VerifyHTTPChallenge(ctx, fqdn, ch.EffectiveHTTPPath(), ch.ExpectedHTTPContent())
+	default:
+		return false, nil
+	}
+}
+
+// serverOrderOutcome is the result of finalizeServerOrder: either the
+// issued cert + SIGNED CSR row, or pending=true when an asynchronous
+// provider is still processing.
+type serverOrderOutcome struct {
+	pending   bool
+	cert      *domain.ByocServerCertificate
+	signedCSR domain.AgentCSR
+}
+
+// finalizeServerOrder asks the issuer to complete the certificate
+// order for the pending server CSR, validates the issued cert, and
+// returns the BYOC-shape cert struct + the SIGNED CSR row so the
+// caller can commit both inside its uow transaction. Extracted from
+// VerifyACME to keep the orchestrator under the funlen bound; the
+// issuance + validation don't need to hold the SQLite write lock.
+//
+// Pending orders (port.ErrOrderPending) flip the order to ISSUING and
+// report pending. Terminal provider failures (port.ErrOrderFailed)
+// mark the order FAILED, persist it, and surface 422 — the lifecycle
+// status stays PENDING_VALIDATION so the operator can cancel and
+// re-register without the ANS name being burned by a FAILED agent.
+func (s *RegistrationService) finalizeServerOrder(
+	ctx context.Context, reg *domain.AgentRegistration,
+	serverCSR *domain.AgentCSR, verified []domain.ChallengeType, now time.Time,
+) (serverOrderOutcome, error) {
+	if s.serverCA == nil {
+		return serverOrderOutcome{}, domain.NewInternalError("SERVER_CA_DISABLED",
+			"server CSR pending but no certificate issuer configured — inconsistent state", nil)
+	}
+	issued, err := s.serverCA.FinalizeOrder(ctx, port.FinalizeOrderRequest{
+		OrderRef: reg.CertOrder.OrderRef,
+		CSRPEM:   serverCSR.CSRContent,
+		FQDN:     reg.FQDN(),
+		Verified: verified,
+	})
+	switch {
+	case errors.Is(err, port.ErrOrderPending):
+		if merr := reg.CertOrder.MarkIssuing(); merr != nil {
+			return serverOrderOutcome{}, merr
+		}
+		return serverOrderOutcome{pending: true}, nil
+	case errors.Is(err, port.ErrOrderFailed):
+		if merr := reg.CertOrder.MarkFailed(); merr != nil {
+			return serverOrderOutcome{}, merr
+		}
+		if perr := s.agents.Save(ctx, reg); perr != nil {
+			return serverOrderOutcome{}, perr
+		}
+		return serverOrderOutcome{}, domain.NewValidationError("CERT_ORDER_FAILED",
+			"certificate provider reported a terminal order failure; cancel this registration (POST /revoke) and register a new version")
+	case err != nil:
+		return serverOrderOutcome{}, domain.NewInternalError("SERVER_CERT_ISSUE_FAILED",
 			"failed to issue server cert", err)
 	}
 	v, err := s.validator.ValidateServerCertificate(ctx,
 		issued.CertPEM, issued.ChainPEM, reg.FQDN())
 	if err != nil {
-		return nil, domain.AgentCSR{}, domain.NewInternalError("SERVER_CERT_SELFVERIFY_FAILED",
+		return serverOrderOutcome{}, domain.NewInternalError("SERVER_CERT_SELFVERIFY_FAILED",
 			"issued server cert failed self-validation", err)
 	}
 	byocCert := &domain.ByocServerCertificate{
@@ -460,9 +683,41 @@ func (s *RegistrationService) signServerCSRForVerifyACME(
 	}
 	signed, err := serverCSR.MarkSigned(now)
 	if err != nil {
-		return nil, domain.AgentCSR{}, err
+		return serverOrderOutcome{}, err
 	}
-	return byocCert, signed, nil
+	return serverOrderOutcome{cert: byocCert, signedCSR: signed}, nil
+}
+
+// signIdentityCSR asks the private identity CA to sign the pending
+// CSR and returns the SIGNED CSR row plus the stored-certificate row
+// (carrying the issuer's serial and provider handle for later
+// CA-side revocation) for the caller to persist inside its own
+// transaction. Callers invoke this only after domain ownership is
+// fully proven — the identity CA performs no validation of its own.
+func (s *RegistrationService) signIdentityCSR(
+	ctx context.Context, reg *domain.AgentRegistration,
+	identityCSR *domain.AgentCSR, now time.Time,
+) (*domain.AgentCSR, *domain.StoredCertificate, error) {
+	issued, err := s.identityCA.IssueIdentityCertificate(ctx, identityCSR.CSRContent, reg.AnsName.String())
+	if err != nil {
+		return nil, nil, domain.NewInternalError("CERT_ISSUE_FAILED", "failed to issue identity cert", err)
+	}
+	signed, err := identityCSR.MarkSigned(now)
+	if err != nil {
+		return nil, nil, err
+	}
+	stored := &domain.StoredCertificate{
+		CSRID:               identityCSR.CSRID,
+		CertificateType:     domain.CertTypeIdentity,
+		CertificatePEM:      issued.CertPEM,
+		ChainPEM:            issued.ChainPEM,
+		SerialNumber:        issued.SerialNumber,
+		CertificateRef:      issued.CertificateRef,
+		Status:              domain.CertStatusValid,
+		IssueTimestamp:      issued.IssuedAt,
+		ExpirationTimestamp: issued.ExpiresAt,
+	}
+	return &signed, stored, nil
 }
 
 // isV1Lane reports whether the caller asked for V1 TL emission.
@@ -531,7 +786,16 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// TLSA `_443._tcp.<fqdn>` record — without the cert in hand, the
 	// record set would omit TLSA and an operator running the CSR path
 	// would never be asked to publish the cert-binding record.
-	if byoc, berr := s.byoc.FindLatestValidByAgentID(ctx, agentID); berr == nil && byoc != nil {
+	//
+	// A transient store failure must abort: this transition activates
+	// the agent and signs the terminal AGENT_REGISTERED leaf, so a
+	// swallowed error here would emit an immutable attestation missing
+	// the TLSA record / serverCerts[] from a recoverable fault.
+	byoc, berr := s.loadServerCert(ctx, agentID)
+	if berr != nil {
+		return nil, berr
+	}
+	if byoc != nil {
 		reg.ServerCert = byoc
 	}
 
@@ -725,15 +989,21 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 		})
 	}
 
-	// BYOC server certs: if the operator provided one at registration.
+	// Server cert (BYOC or CSR-signed): folded into the terminal
+	// attestation's serverCerts[]. A transient store error must abort
+	// the build — this leaf is signed and appended to an append-only
+	// log, so silently emitting empty serverCerts[] would be a
+	// permanently wrong artifact from a recoverable fault.
 	var serverCertInfos []event.CertificateInfo
-	var byocCert *domain.ByocServerCertificate
-	if byoc, berr := s.byoc.FindLatestValidByAgentID(ctx, reg.AgentID); berr == nil && byoc != nil {
-		byocCert = byoc
+	byocCert, berr := s.loadServerCert(ctx, reg.AgentID)
+	if berr != nil {
+		return nil, berr
+	}
+	if byocCert != nil {
 		serverCertInfos = []event.CertificateInfo{{
-			Fingerprint: "SHA256:" + byoc.Fingerprint,
+			Fingerprint: "SHA256:" + byocCert.Fingerprint,
 			CertType:    "X509-DV-SERVER",
-			NotAfter:    byoc.ValidToTimestamp.UTC().Format(time.RFC3339),
+			NotAfter:    byocCert.ValidToTimestamp.UTC().Format(time.RFC3339),
 		}}
 	}
 
@@ -783,16 +1053,24 @@ type RevokeResult struct {
 	DNSRecordsToRemove []domain.ExpectedDNSRecord
 }
 
-// Revoke transitions the registration to REVOKED, marks every active
-// identity certificate REVOKED, and emits an AGENT_REVOCATION event.
+// Revoke terminates a registration through the single revoke route,
+// per the spec's contract:
 //
-// Reference parity note: the reference RA refuses revocation from
-// PENDING_VALIDATION with a dedicated error (application must
-// complete ACME first or expire). We delegate to the domain
-// aggregate's own Revoke/Cancel split — Revoke works on ACTIVE or
-// DEPRECATED, Cancel works on pending states. Here we wire Revoke
-// semantically; callers who want to cancel a pending registration
-// should hit a separate endpoint (not in Stage 2).
+//   - ACTIVE / DEPRECATED agents are revoked: lifecycle → REVOKED,
+//     every valid identity certificate revoked at the issuing CA and
+//     flipped in the store, and an AGENT_REVOKED event emitted.
+//   - PENDING registrations in the PENDING_CERTS phase (order
+//     issuing/failed) or PENDING_DNS are cancelled: same certificate
+//     cleanup, but NO TL emit — under the terminal-only event model
+//     no leaf was ever written for an agent that never reached
+//     ACTIVE, so there is nothing in the log to terminate.
+//   - PENDING_VALIDATION registrations still awaiting their challenge
+//     are neither: they auto-expire when the challenge window lapses
+//     (the agent-expiry sweeper) — matching the spec's "not
+//     cancellable and will auto-expire".
+//
+// The domain aggregate's Revoke/Cancel split enforces the state
+// rules; this method routes to whichever applies.
 func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in RevokeInput) (*RevokeResult, error) {
 	now := s.clock()
 
@@ -813,6 +1091,10 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 			reg.Endpoints = eps.Endpoints
 		}
 	}
+	// Hydrate the server cert so DNSRecordsToRemove includes the TLSA
+	// binding on every return path (idempotent early-return, cancel,
+	// and active revoke all compute it).
+	s.hydrateServerCert(ctx, reg)
 
 	// Idempotent: already revoked → return current state without
 	// re-emitting the event.
@@ -835,6 +1117,13 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		}, nil
 	}
 
+	// Pending registrations route to the cancel path: same
+	// certificate cleanup as a revoke, no TL emit. The domain
+	// aggregate enforces which pending states are cancellable.
+	if reg.Status.IsPending() {
+		return s.cancelPending(ctx, reg, in, now)
+	}
+
 	// Domain aggregate validates the reason + state transition.
 	// Done in-memory before opening the tx so a precondition failure
 	// (ErrInvalidState) doesn't open and immediately roll back a tx.
@@ -847,21 +1136,24 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return nil, err
 	}
 
-	// Hydrate the server cert for the same reason — the
-	// AGENT_REVOKED event's `expiresAt` needs the server cert's
-	// notAfter alongside the identity certs', and `FindLatestValid`
-	// returns nothing once the cert has been marked revoked.
-	if reg.ServerCert == nil {
-		if all, berr := s.byoc.FindByAgentID(ctx, reg.AgentID); berr == nil && len(all) > 0 {
-			reg.ServerCert = all[0]
-		}
-	}
+	// (Server cert already hydrated above — the AGENT_REVOKED event's
+	// `expiresAt` needs its notAfter alongside the identity certs'.)
 
 	// Read every identity cert before the tx. Pre-revoke status is
 	// what the AGENT_REVOKED event captures; the in-tx update flips
 	// each currently-valid one to REVOKED.
 	certs, err := s.certs.FindIdentityCertificatesByAgent(ctx, reg.AgentID)
 	if err != nil {
+		return nil, err
+	}
+
+	// Revoke at the issuing CA before our own transaction so private
+	// CRL/OCSP distribution reflects the revocation — flipping only
+	// our database row would leave the certificate valid on the
+	// trust plane. External side effects can't roll back with the
+	// tx; the port's idempotency contract means a crash between CA
+	// revocation and the commit is healed by retrying the call.
+	if err := s.revokeIdentityCertsAtCA(ctx, certs, in.Reason); err != nil {
 		return nil, err
 	}
 
@@ -896,46 +1188,9 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 			}
 			return s.enqueueTLEventV1(txCtx, string(eventv1.TypeAgentRevoked), reg, v1Inner, now)
 		}
-		inner := s.baseInnerEvent(reg, event.TypeAgentRevoked, now)
-		inner.RevokedAt = now.UTC().Format(time.RFC3339)
-		inner.RevocationReasonCode = string(in.Reason)
-		idCertInfos := make([]event.CertificateInfo, 0, len(certs))
-		for _, c := range certs {
-			fp, ferr := fingerprintOf(c.CertificatePEM)
-			if ferr != nil {
-				return ferr
-			}
-			idCertInfos = append(idCertInfos, event.CertificateInfo{
-				Fingerprint: fp,
-				CertType:    "X509-OV-CLIENT",
-				NotAfter:    c.ExpirationTimestamp.UTC().Format(time.RFC3339),
-			})
-		}
-		// `expiresAt` is required at event level per the reference TL
-		// spec, including on terminal events. Use the certs that WERE
-		// valid at the point of revocation — `IsValid(now)` returns
-		// false post-revocation but at this exact moment we still
-		// have the original notAfter values, so feed them through
-		// directly.
-		var minExpiry time.Time
-		for _, c := range certs {
-			if c.ExpirationTimestamp.IsZero() {
-				continue
-			}
-			if minExpiry.IsZero() || c.ExpirationTimestamp.Before(minExpiry) {
-				minExpiry = c.ExpirationTimestamp
-			}
-		}
-		if reg.ServerCert != nil && !reg.ServerCert.ValidToTimestamp.IsZero() {
-			if minExpiry.IsZero() || reg.ServerCert.ValidToTimestamp.Before(minExpiry) {
-				minExpiry = reg.ServerCert.ValidToTimestamp
-			}
-		}
-		if !minExpiry.IsZero() {
-			inner.ExpiresAt = minExpiry.UTC().Format(time.RFC3339)
-		}
-		inner.Attestations = &event.Attestations{
-			IdentityCerts: idCertInfos,
+		inner, err := s.buildAgentRevokedV2Event(reg, certs, in.Reason, now)
+		if err != nil {
+			return err
 		}
 		return s.enqueueTLEvent(txCtx, string(event.TypeAgentRevoked), reg, inner, now)
 	}); err != nil {
@@ -947,4 +1202,157 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		RevokedAt:          now,
 		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
 	}, nil
+}
+
+// buildAgentRevokedV2Event assembles the V2 AGENT_REVOKED inner
+// event: the revoked identity-cert fingerprints as attestations plus
+// the event-level `expiresAt`, which is required per the reference TL
+// spec even on terminal events. Uses the certs that WERE valid at the
+// point of revocation — at this exact moment the original notAfter
+// values are still in hand, so they feed through directly.
+func (s *RegistrationService) buildAgentRevokedV2Event(
+	reg *domain.AgentRegistration, certs []*domain.StoredCertificate,
+	reason domain.RevocationReason, now time.Time,
+) (*event.Event, error) {
+	inner := s.baseInnerEvent(reg, event.TypeAgentRevoked, now)
+	inner.RevokedAt = now.UTC().Format(time.RFC3339)
+	inner.RevocationReasonCode = string(reason)
+	idCertInfos := make([]event.CertificateInfo, 0, len(certs))
+	for _, c := range certs {
+		fp, ferr := fingerprintOf(c.CertificatePEM)
+		if ferr != nil {
+			return nil, ferr
+		}
+		idCertInfos = append(idCertInfos, event.CertificateInfo{
+			Fingerprint: fp,
+			CertType:    "X509-OV-CLIENT",
+			NotAfter:    c.ExpirationTimestamp.UTC().Format(time.RFC3339),
+		})
+	}
+	var minExpiry time.Time
+	for _, c := range certs {
+		if c.ExpirationTimestamp.IsZero() {
+			continue
+		}
+		if minExpiry.IsZero() || c.ExpirationTimestamp.Before(minExpiry) {
+			minExpiry = c.ExpirationTimestamp
+		}
+	}
+	if reg.ServerCert != nil && !reg.ServerCert.ValidToTimestamp.IsZero() {
+		if minExpiry.IsZero() || reg.ServerCert.ValidToTimestamp.Before(minExpiry) {
+			minExpiry = reg.ServerCert.ValidToTimestamp
+		}
+	}
+	if !minExpiry.IsZero() {
+		inner.ExpiresAt = minExpiry.UTC().Format(time.RFC3339)
+	}
+	inner.Attestations = &event.Attestations{
+		IdentityCerts: idCertInfos,
+	}
+	return inner, nil
+}
+
+// cancelPending terminates a pending registration through the revoke
+// route: the aggregate's Cancel transition (which enforces the
+// spec's eligibility rule), CA-side revocation of any
+// already-issued identity certificates, and the store flips —
+// committed atomically. Deliberately NO TL emit: under the
+// terminal-only event model no leaf was ever written for an agent
+// that never reached ACTIVE, so there is nothing in the log to
+// terminate; emitting AGENT_REVOKED for an agent the log has never
+// seen would strand verifiers on an unresolvable reference.
+func (s *RegistrationService) cancelPending(
+	ctx context.Context, reg *domain.AgentRegistration,
+	in RevokeInput, now time.Time,
+) (*RevokeResult, error) {
+	if !in.Reason.IsValid() {
+		return nil, domain.NewValidationError(
+			"INVALID_REVOCATION_REASON", fmt.Sprintf("invalid reason: %q", in.Reason))
+	}
+	if err := reg.Cancel(now); err != nil {
+		return nil, err
+	}
+
+	certs, err := s.certs.FindIdentityCertificatesByAgent(ctx, reg.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.revokeIdentityCertsAtCA(ctx, certs, in.Reason); err != nil {
+		return nil, err
+	}
+
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		if err := s.agents.Save(txCtx, reg); err != nil {
+			return err
+		}
+		for _, c := range certs {
+			if c.Status == domain.CertStatusValid {
+				revoked := c.Revoke()
+				if err := s.certs.UpdateCertificateStatus(txCtx, &revoked); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+
+	return &RevokeResult{
+		Registration:       reg,
+		RevokedAt:          now,
+		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
+	}, nil
+}
+
+// hydrateServerCert loads the agent's most-recent server certificate
+// onto the aggregate when it isn't already populated, so the revoke
+// flow can fingerprint it for the AGENT_REVOKED event and include its
+// TLSA binding in DNSRecordsToRemove. Best-effort: a missing cert
+// (BYOC never submitted, CSR order never finalized) leaves ServerCert
+// nil and the TLSA record is simply omitted. FindByAgentID (not
+// FindLatestValid) is used because a cert already flipped to REVOKED
+// must still be fingerprinted here.
+func (s *RegistrationService) hydrateServerCert(ctx context.Context, reg *domain.AgentRegistration) {
+	if reg.ServerCert != nil {
+		return
+	}
+	if all, err := s.byoc.FindByAgentID(ctx, reg.AgentID); err == nil && len(all) > 0 {
+		reg.ServerCert = all[0]
+	}
+}
+
+// revokeIdentityCertsAtCA revokes every still-valid identity
+// certificate at the issuing CA. Runs BEFORE the caller's
+// transaction — CA revocation is an external side effect that cannot
+// roll back, and the port contract makes it idempotent, so a crash
+// between CA revocation and the commit heals on retry. The serial
+// comes from the stored row when present; rows persisted before
+// serial tracking fall back to parsing the certificate PEM.
+func (s *RegistrationService) revokeIdentityCertsAtCA(
+	ctx context.Context, certs []*domain.StoredCertificate, reason domain.RevocationReason,
+) error {
+	for _, c := range certs {
+		if c.Status != domain.CertStatusValid {
+			continue
+		}
+		serial := c.SerialNumber
+		if serial == "" {
+			parsed, err := serialFromCertPEM(c.CertificatePEM)
+			if err != nil {
+				return domain.NewInternalError("CERT_REVOKE_FAILED",
+					"derive certificate serial for CA revocation", err)
+			}
+			serial = parsed
+		}
+		if err := s.identityCA.RevokeCertificate(ctx, port.RevokeCertificateRequest{
+			SerialNumber:   serial,
+			CertificateRef: c.CertificateRef,
+			Reason:         reason,
+		}); err != nil {
+			return domain.NewInternalError("CERT_REVOKE_FAILED",
+				"revoke identity certificate at issuing CA", err)
+		}
+	}
+	return nil
 }

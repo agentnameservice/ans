@@ -255,6 +255,10 @@ type fakeAgentStore struct {
 }
 
 func (f *fakeAgentStore) Save(_ context.Context, _ *domain.AgentRegistration) error { return nil }
+
+func (f *fakeAgentStore) ExpireLapsedPendingValidation(_ context.Context, _ time.Time) (int64, error) {
+	return 0, nil
+}
 func (f *fakeAgentStore) FindByID(_ context.Context, _ int64) (*domain.AgentRegistration, error) {
 	return nil, domain.NewNotFoundError("AGENT_NOT_FOUND", "not found")
 }
