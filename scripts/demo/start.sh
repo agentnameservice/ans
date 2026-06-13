@@ -210,10 +210,7 @@ vlei:
   # The lei (vLEI) control verifier behind the "lei" identifier kind.
   # "noop" runs real Ed25519 crypto but waives the GLEIF authorization
   # binding; "verifier" routes CESR/KERI questions to a real
-  # vlei-verifier (scripts/demo/vlei brings one up on :7676). The
-  # base-url can't be set via ANS_RA_VLEI__BASE_URL — koanf maps a
-  # single underscore literally, so it would target vlei.base_url, not
-  # vlei.base-url — hence it is composed into the file here:
+  # vlei-verifier (scripts/demo/vlei brings one up on :7676).
   #   ANS_VLEI_TYPE=verifier ANS_VLEI_BASE_URL=http://localhost:7676 \
   #     scripts/demo/start.sh
   type: ${ANS_VLEI_TYPE:-noop}

@@ -323,6 +323,9 @@ func TestPresentedCredentialSAID(t *testing.T) {
 		{"escaped strings before d", `{"v":"ACDC10JSON_","note":"a \"quoted\" }brace","d":"EReal"}`, "EReal"},
 		{"unterminated object", `{"v":"ACDC10JSON_","d":"x"`, ""},
 		{"marker but no d, then a real one", `{"v":"ACDC10JSON_","x":1}{"v":"ACDC10JSON_","d":"ESecond"}`, "ESecond"},
+		// Insignificant JSON whitespace around `{`, the `v` key, and the
+		// colon must not defeat the frame scan (pretty-printed export).
+		{"whitespace around version member", "{ \"v\" :\t\"ACDC10JSON_\", \"d\": \"EWS\" }", "EWS"},
 		// Full-chain exports: the leaf is the credential no other
 		// credential's edge `n` references — independent of frame order.
 		// KERIA emits issuer-first (leaf last); we must not pick the first.

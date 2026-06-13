@@ -9,7 +9,7 @@
 # On success build-chain.ts has written, into the bind-mounted out dir
 # (host: scripts/demo/vlei/signify/out/):
 #   - ecr-presentation.json  {cesr, lei, aid}     consumed by verify-control-demo.sh
-#   - tier1-outputs.json     {roleBran, ...}      consumed by the nonce signer
+#   - holder-state.json      {roleBran, ...}      consumed by the nonce signer
 #
 # Usage:
 #   scripts/demo/vlei/build-chain.sh
@@ -42,7 +42,7 @@ $COMPOSE -f "$COMPOSE_FILE" exec -T signify deno run -A "$SCRIPT"
 ok "build script executed"
 
 # Assert the exported artifacts landed on the host via the bind mount.
-for f in ecr-presentation.json tier1-outputs.json; do
+for f in ecr-presentation.json holder-state.json; do
   if [ ! -s "$OUT_DIR/$f" ]; then
     fail "expected $OUT_DIR/$f to exist and be non-empty after the run — check the output above"
   fi
@@ -50,5 +50,5 @@ for f in ecr-presentation.json tier1-outputs.json; do
 done
 
 header "Chain build complete"
-note "ecr-presentation.json + tier1-outputs.json are in $OUT_DIR"
+note "ecr-presentation.json + holder-state.json are in $OUT_DIR"
 note "next: $SCRIPT_DIR/verify-control-demo.sh  (or run-vlei.sh for the full flow)"

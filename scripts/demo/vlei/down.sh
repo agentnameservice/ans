@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export DATA="${DATA:-$(cd "$SCRIPT_DIR/../../.." && pwd)/data/demo/vlei}"
-# shellcheck source=../../common.sh
+# shellcheck source=../common.sh
 . "$SCRIPT_DIR/../common.sh"
 
 COMPOSE="${COMPOSE:-docker compose}"

@@ -66,7 +66,7 @@
 #   PRESENTATION_FILE  exported {cesr,lei,aid} JSON
 #                      (default: $DATA/ecr-presentation.json)
 #   OUTPUTS_FILE       exported {roleBran,...} JSON, used by AUTO_SIGN
-#                      (default: alongside PRESENTATION_FILE / tier1-outputs.json)
+#                      (default: alongside PRESENTATION_FILE / holder-state.json)
 #   LEI                claimed LEI (default: read from PRESENTATION_FILE)
 #   SIGNED_PROOF       the signature over the signingInput (indexed Siger qb64).
 #                      When set, the script uses it directly — highest
@@ -86,7 +86,7 @@ export DATA="${DATA:-$(cd "$SCRIPT_DIR/../../.." && pwd)/data/demo/vlei}"
 . "$SCRIPT_DIR/../common.sh"
 
 PRESENTATION_FILE="${PRESENTATION_FILE:-$DATA/ecr-presentation.json}"
-OUTPUTS_FILE="${OUTPUTS_FILE:-$(dirname "$PRESENTATION_FILE")/tier1-outputs.json}"
+OUTPUTS_FILE="${OUTPUTS_FILE:-$(dirname "$PRESENTATION_FILE")/holder-state.json}"
 COMPOSE="${COMPOSE:-docker compose}"
 
 require_cmd curl
@@ -231,7 +231,7 @@ fi
 
 # The sealed IDENTITY_VERIFIED reaches the TL through the outbox worker.
 header "verify the seal landed on the TL identity stream"
-poll_tl_identity_audit "$IDENTITY_ID" 1
+assert_tl_identity_audit "$IDENTITY_ID" 1
 ok "IDENTITY_VERIFIED sealed with a Merkle proof on the TL"
 
 # ----- 5. link: bind the verified identity to the agent (one event) -----

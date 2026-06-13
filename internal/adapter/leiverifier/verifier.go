@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -321,15 +322,24 @@ func isQB64(s string) bool {
 	return true
 }
 
+// acdcFrameMarker matches the start of an ACDC credential frame: a JSON
+// object whose first member is the version string `"v":"ACDC…"`. The
+// pattern tolerates insignificant JSON whitespace around the `{`, key,
+// and colon so a serializer that pretty-prints (or inserts SP/HT) does
+// not cause the scan to miss frames. It is deliberately anchored on the
+// version member being first, which the KERI/ACDC serialization rules
+// guarantee.
+var acdcFrameMarker = regexp.MustCompile(`\{\s*"v"\s*:\s*"ACDC`)
+
 // presentedCredentialSAID extracts the SAID of the *presented* (leaf)
 // credential from a full-chain CESR export — the minimal, targeted read
 // the real verifier path needs to route PUT /presentations/{said}. It is
 // NOT a CESR codec: KERI/ACDC serializations are version-string-first, so
 // an ACDC credential message is always a JSON object whose first member
-// is `"v":"ACDC…"`; we locate those frames by brace-balancing (respecting
-// JSON string escaping), read each frame's self-addressing `d`, and
-// collect the edge node SAIDs (the `n` of each edge) from each frame's
-// `e` block.
+// is `"v":"ACDC…"`; we locate those frames with acdcFrameMarker and read
+// each one by brace-balancing (respecting JSON string escaping), take its
+// self-addressing `d`, and collect the edge node SAIDs (the `n` of each
+// edge) from each frame's `e` block.
 //
 // The presented credential is the most-derived one — the ECR/role
 // credential at the bottom of the ECR→LE→QVI chain — identified
@@ -341,7 +351,6 @@ func isQB64(s string) bool {
 // so its one frame is the leaf. The end-to-end demo (scripts/demo/vlei)
 // exercises this against the live verifier.
 func presentedCredentialSAID(cesr string) string {
-	const marker = `{"v":"ACDC`
 	type acdcFrame struct {
 		D string          `json:"d"`
 		E json.RawMessage `json:"e"`
@@ -350,11 +359,11 @@ func presentedCredentialSAID(cesr string) string {
 	referenced := make(map[string]struct{})
 	offset := 0
 	for {
-		rel := strings.Index(cesr[offset:], marker)
-		if rel < 0 {
+		loc := acdcFrameMarker.FindStringIndex(cesr[offset:])
+		if loc == nil {
 			break
 		}
-		start := offset + rel
+		start := offset + loc[0]
 		obj, end := balancedJSONObject(cesr, start)
 		if obj == "" {
 			offset = start + 1

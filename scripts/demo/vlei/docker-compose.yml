@@ -181,7 +181,7 @@ services:
       # second exec (sign-proof.ts) reuses build-chain.ts's downloads.
       - DENO_DIR=/deno-dir
     # Bind the signify dir so edits are live AND the exported artifacts
-    # (out/ecr-presentation.json, out/tier1-outputs.json) land on the host for
+    # (out/ecr-presentation.json, out/holder-state.json) land on the host for
     # the shell demo to consume.
     volumes:
       - ./signify:/app

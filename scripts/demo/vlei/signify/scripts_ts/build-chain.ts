@@ -6,7 +6,7 @@
 // LOCAL synthetic GLEIF root of trust at the vlei-verifier, and exports the two
 // artifacts the shell demo consumes:
 //   - out/ecr-presentation.json  {cesr, lei, aid}  → verify-control-demo.sh
-//   - out/tier1-outputs.json     {roleBran, ...}   → the nonce signer
+//   - out/holder-state.json      {roleBran, ...}   → the nonce signer
 //
 // This is the headless equivalent of the old Jupyter notebook — same SignifyTS
 // logic, no notebook/kernel layer. The interactive sign cell is gone entirely;
@@ -337,7 +337,7 @@ prContinue();
 }
 
 // ---------------------------------------------------------------------------
-// Step 6 (Path 1): ECR Credential — LE directly issues an Engagement Context
+// Step 3: ECR Credential — LE directly issues an Engagement Context
 // Role credential to the Role holder, chained to the LE's own vLEI credential.
 // ---------------------------------------------------------------------------
 {
@@ -426,7 +426,13 @@ prContinue();
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ vlei: ecrCesr, oobi: gleifOOBI }),
   });
-  console.log("root_of_trust:", rotResp.status, await rotResp.text());
+  const rotBody = await rotResp.text();
+  if (!rotResp.ok) {
+    throw new Error(
+        `root_of_trust registration failed: ${rotResp.status} ${rotResp.statusText} — ${rotBody}`,
+    );
+  }
+  console.log("root_of_trust:", rotResp.status, rotBody);
 
   // Export {cesr, lei, aid} for the shell demo. The RA parses said+aid out of
   // the CESR itself and presents it to the verifier on the holder's behalf.
@@ -454,6 +460,6 @@ prContinue();
     ecrCredentialSaid: ecrCredential.sad.d,
     gleifOOBI,
   };
-  await Deno.writeTextFile(`${OUT_DIR}/tier1-outputs.json`, JSON.stringify(outputs, null, 2));
-  console.log(`   wrote ${OUT_DIR}/tier1-outputs.json`);
+  await Deno.writeTextFile(`${OUT_DIR}/holder-state.json`, JSON.stringify(outputs, null, 2));
+  console.log(`   wrote ${OUT_DIR}/holder-state.json`);
 }
