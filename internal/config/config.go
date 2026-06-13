@@ -178,10 +178,11 @@ type IdentityResolver struct {
 // because it is a distinct outbound dependency with its own service
 // endpoint.
 //
-// "noop" runs real Ed25519 crypto over the signing input but waives
-// the GLEIF authorization binding (quickstart — NOT for production);
-// "verifier" is a hardened HTTP client for an internal vlei-verifier
-// service.
+// "noop" accepts the same full-chain CESR presentation as "verifier"
+// but waives the external bindings — the GLEIF authorization, the
+// AID↔LEI binding, and the signature's cryptographic check (structural
+// only, quickstart — NOT for production); "verifier" is a hardened HTTP
+// client for an internal vlei-verifier service.
 type VLEI struct {
 	Type string `koanf:"type"` // "noop" | "verifier"
 	// BaseURL is the internal vlei-verifier service URL, required when

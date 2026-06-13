@@ -5,10 +5,11 @@
 # Bootstraps everything the flow needs and chains it end-to-end with no manual steps:
 #   0. ensure ans-ra      — start ans-ra (+ ans-tl) in the real vlei
 #                           "verifier" mode if it isn't already running that
-#                           way. The demo presents real CESR, which only the
-#                           verifier backend accepts; the plain start.sh
-#                           default is "noop" (base64url JSON), so a noop RA is
-#                           restarted into verifier mode here.
+#                           way. Both backends accept the same real CESR, but
+#                           noop waives the GLEIF authorization + signature
+#                           checks; a real end-to-end demo needs the verifier
+#                           backend, so a noop RA is restarted into verifier
+#                           mode here. The plain start.sh default is "noop".
 #   0b. ensure an agent   — register one (register.sh --v2) if none exists, to
 #                           link the verified lei identity to.
 #   1. up.sh              — bring up the stack (witnesses, vlei-server, KERIA,
@@ -59,9 +60,11 @@ VLEI_VERIFIER_URL="${VLEI_VERIFIER_URL:-http://localhost:7676}"
 
 header "vLEI verify-control demo — full run"
 
-# 0. Ensure ans-ra is up AND wired to the real vlei-verifier. This demo
-#    presents real CESR, which only the "verifier" backend accepts; the plain
-#    start.sh default is "noop" (base64url JSON). Three cases:
+# 0. Ensure ans-ra is up AND wired to the real vlei-verifier. Both backends
+#    accept the same real CESR, but only "verifier" actually checks GLEIF
+#    authorization + the signature (noop waives them), so a real end-to-end
+#    demo needs verifier mode. The plain start.sh default is "noop". Three
+#    cases:
 #      * RA not running       → fresh start in verifier mode.
 #      * RA running, noop mode → restart in verifier mode, preserving data
 #        (start.sh --keep keeps data/demo: agent id, SQLite store, signer keys;

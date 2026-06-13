@@ -2,10 +2,6 @@ package leiverifier
 
 import (
 	"context"
-	"crypto/ed25519"
-	"crypto/rand"
-	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -15,77 +11,70 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 )
 
-// b64 is the unpadded base64url encoding the noop wire shape uses.
-func b64(b []byte) string { return base64.RawURLEncoding.EncodeToString(b) }
+// leafACDC is a minimal single-credential CESR export whose leaf carries
+// the subject AID (a.i) and LEI (a.LEI) the noop pins and echoes — the
+// same shape the real verifier receives.
+const leafACDC = `{"v":"ACDC10JSON00011c_","d":"ECredSAID123","i":"EIssuerAID","s":"ESchema","a":{"i":"EHolderAID","LEI":"5493001KJTIIGC8Y1R17"}}`
 
-// noopFixture mints an Ed25519 keypair and the matching noop
-// presentation cesr + subject AID for the public key.
-func noopFixture(t *testing.T, lei string) (ed25519.PrivateKey, string, string) {
-	t.Helper()
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	aid := b64(pub)
-	raw, err := json.Marshal(noopPresentation{PublicKey: aid, LEI: lei})
-	if err != nil {
-		t.Fatal(err)
-	}
-	return priv, aid, b64(raw)
-}
-
-func TestNoopPresentAndVerify(t *testing.T) {
+func TestNoopPresent(t *testing.T) {
 	ctx := context.Background()
 	n := NewNoop()
-	priv, aid, cesr := noopFixture(t, "5493001KJTIIGC8Y1R17")
 
-	// Present recovers the AID + echoes the LEI + always AUTHORIZED.
-	res, err := n.Present(ctx, cesr)
+	// Present pins the leaf credential's subject AID, echoes its LEI, and
+	// always reports AUTHORIZED (the live binding is waived).
+	res, err := n.Present(ctx, leafACDC)
 	if err != nil {
 		t.Fatalf("Present: %v", err)
 	}
-	if res.SubjectAID != aid || res.LEI != "5493001KJTIIGC8Y1R17" || res.Status != "AUTHORIZED" {
+	if res.SubjectAID != "EHolderAID" || res.LEI != "5493001KJTIIGC8Y1R17" || res.Status != "AUTHORIZED" {
 		t.Fatalf("present result: %+v", res)
 	}
+}
 
-	// Authorization authorizes a well-formed AID, asserts no LEI binding.
-	auth, err := n.Authorization(ctx, aid)
+func TestNoopPresentChainPinsLeafSubject(t *testing.T) {
+	// Full-chain export: the noop pins the LEAF credential's subject AID
+	// (the ECR), not an intermediate's — the same leaf selection the real
+	// verifier uses, independent of frame order.
+	ctx := context.Background()
+	n := NewNoop()
+	chain := `{"v":"ACDC10JSON_","d":"EQVI","a":{"i":"EQviSub","LEI":"L"}}` +
+		`{"v":"ACDC10JSON_","d":"ELE","e":{"d":"Eedge1","qvi":{"n":"EQVI","s":"S"}},"a":{"i":"ELeSub","LEI":"L"}}` +
+		`{"v":"ACDC10JSON_","d":"EECR","e":{"d":"Eedge2","le":{"n":"ELE","s":"S"}},"a":{"i":"EEcrSub","LEI":"875500ELOZEL05BVXV37"}}`
+	res, err := n.Present(ctx, chain)
 	if err != nil {
-		t.Fatalf("Authorization: %v", err)
+		t.Fatalf("Present: %v", err)
 	}
-	if !auth.Authorized || auth.LEI != "" {
-		t.Fatalf("authorization: %+v", auth)
+	if res.SubjectAID != "EEcrSub" || res.LEI != "875500ELOZEL05BVXV37" {
+		t.Fatalf("present result: %+v", res)
 	}
+}
 
-	// VerifySignature: a real Ed25519 signature over the signing input.
-	const signingInput = "the-served-signing-input"
-	sig := ed25519.Sign(priv, []byte(signingInput))
-	ok, err := n.VerifySignature(ctx, aid, signingInput, b64(sig))
-	if err != nil || !ok {
-		t.Fatalf("verify good sig: ok=%v err=%v", ok, err)
+func TestNoopPresentIgnoresKEL(t *testing.T) {
+	// A real export interleaves KERI KEL events (icp/ixn) with ACDC frames;
+	// the scan keys on the ACDC version marker, so KEL frames are ignored
+	// and the leaf credential's subject AID is still pinned.
+	ctx := context.Background()
+	n := NewNoop()
+	withKEL := `{"v":"KERI10JSON0001b7_","t":"icp","d":"EIncept","i":"EIncept","k":["DKey"]}` + leafACDC
+	res, err := n.Present(ctx, withKEL)
+	if err != nil {
+		t.Fatalf("Present: %v", err)
 	}
-	// Tampered payload does not verify.
-	if ok, _ := n.VerifySignature(ctx, aid, "other-input", b64(sig)); ok {
-		t.Fatal("tampered payload should not verify")
+	if res.SubjectAID != "EHolderAID" {
+		t.Fatalf("want subject AID EHolderAID, got %q", res.SubjectAID)
 	}
 }
 
 func TestNoopPresentFailures(t *testing.T) {
 	ctx := context.Background()
 	n := NewNoop()
-	_, validAID, _ := noopFixture(t, "X")
-
-	noLEI, _ := json.Marshal(noopPresentation{PublicKey: validAID})
-	badPub, _ := json.Marshal(noopPresentation{PublicKey: "not-base64url-key", LEI: "X"})
-
 	cases := []struct {
 		name string
 		cesr string
 	}{
-		{"not base64url", "!!!not-base64!!!"},
-		{"not a json object", b64([]byte("not json"))},
-		{"bad public key", b64(badPub)},
-		{"missing lei", b64(noLEI)},
+		{"no ACDC frame", "no acdc credential here"},
+		{"leaf without subject AID", `{"v":"ACDC10JSON_","d":"ECred","a":{"LEI":"L"}}`},
+		{"leaf with non-qb64 subject AID", `{"v":"ACDC10JSON_","d":"ECred","a":{"i":"../evil","LEI":"L"}}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,22 +83,41 @@ func TestNoopPresentFailures(t *testing.T) {
 			}
 		})
 	}
+}
 
-	// A malformed AID to Authorization is an error (not a silent allow).
-	if _, err := n.Authorization(ctx, "bogus-aid"); err == nil {
-		t.Fatal("malformed AID should error")
+func TestNoopAuthorization(t *testing.T) {
+	ctx := context.Background()
+	n := NewNoop()
+	// A well-formed AID is authorized with NO live LEI binding asserted.
+	auth, err := n.Authorization(ctx, "EHolderAID")
+	if err != nil || !auth.Authorized || auth.LEI != "" {
+		t.Fatalf("auth=%+v err=%v", auth, err)
 	}
+	// A non-qb64 AID is a validation error (mirrors the real verifier guard).
+	if _, err := n.Authorization(ctx, "../signature/verify"); !isCode(err, "LEI_SUBJECT_AID_INVALID") {
+		t.Fatalf("want LEI_SUBJECT_AID_INVALID, got %v", err)
+	}
+}
 
-	// VerifySignature treats malformed AID / signature as a non-verifying
-	// false, never an I/O error.
-	if ok, err := n.VerifySignature(ctx, "bogus-aid", "in", b64([]byte("sig"))); ok || err != nil {
-		t.Fatalf("bad aid: ok=%v err=%v", ok, err)
+func TestNoopVerifySignature(t *testing.T) {
+	ctx := context.Background()
+	n := NewNoop()
+	// Structural accept: well-formed qb64 AID + signature → true.
+	if ok, err := n.VerifySignature(ctx, "EHolderAID", "signing-input", "0BsomeQb64Signature"); err != nil || !ok {
+		t.Fatalf("structural accept: ok=%v err=%v", ok, err)
 	}
-	if ok, err := n.VerifySignature(ctx, validAID, "in", "!!!"); ok || err != nil {
-		t.Fatalf("bad sig encoding: ok=%v err=%v", ok, err)
+	// A malformed AID or signature is a non-verifying false, never an error.
+	cases := []struct{ name, aid, sig string }{
+		{"bad aid", "../evil", "0Bsig"},
+		{"bad sig", "EHolderAID", "!!!not-qb64!!!"},
+		{"empty sig", "EHolderAID", ""},
 	}
-	if ok, err := n.VerifySignature(ctx, validAID, "in", b64([]byte("too-short"))); ok || err != nil {
-		t.Fatalf("wrong-length sig: ok=%v err=%v", ok, err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if ok, err := n.VerifySignature(ctx, tc.aid, "in", tc.sig); ok || err != nil {
+				t.Fatalf("ok=%v err=%v", ok, err)
+			}
+		})
 	}
 }
 

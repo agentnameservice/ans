@@ -331,31 +331,32 @@ func isQB64(s string) bool {
 // guarantee.
 var acdcFrameMarker = regexp.MustCompile(`\{\s*"v"\s*:\s*"ACDC`)
 
-// presentedCredentialSAID extracts the SAID of the *presented* (leaf)
-// credential from a full-chain CESR export — the minimal, targeted read
-// the real verifier path needs to route PUT /presentations/{said}. It is
-// NOT a CESR codec: KERI/ACDC serializations are version-string-first, so
-// an ACDC credential message is always a JSON object whose first member
-// is `"v":"ACDC…"`; we locate those frames with acdcFrameMarker and read
+// acdcFrame is the subset of an ACDC credential frame the presentation
+// scan needs: the self-addressing SAID `d`, the attributes block `a`
+// (the subject AID `i` and `LEI` the noop pins/echoes), and the edge
+// block `e` (the SAIDs this credential chains to). It is shared by the
+// real verifier (which needs the leaf `d` to route PUT /presentations)
+// and the noop (which pins the leaf `a.i` and echoes `a.LEI`).
+type acdcFrame struct {
+	D string `json:"d"`
+	A struct {
+		I   string `json:"i"`
+		LEI string `json:"LEI"`
+	} `json:"a"`
+	E json.RawMessage `json:"e"`
+}
+
+// scanACDCChain walks every ACDC credential frame in a full-chain CESR
+// export and returns the parsed frames (in serialization order) plus the
+// set of edge-referenced SAIDs (the `n` of each edge). It is NOT a CESR
+// codec: KERI/ACDC serializations are version-string-first, so an ACDC
+// credential message is always a JSON object whose first member is
+// `"v":"ACDC…"`; we locate those frames with acdcFrameMarker and read
 // each one by brace-balancing (respecting JSON string escaping), take its
 // self-addressing `d`, and collect the edge node SAIDs (the `n` of each
 // edge) from each frame's `e` block.
-//
-// The presented credential is the most-derived one — the ECR/role
-// credential at the bottom of the ECR→LE→QVI chain — identified
-// structurally as the lone credential whose SAID is NOT referenced by any
-// other credential's edge. This is position-independent: KERIA's
-// `credentials().get(said, true)` exporter emits the chain in topological
-// (issuer-first) order, so the leaf is serialized LAST, but we never rely
-// on frame order. A single-credential export (no chain) has no references,
-// so its one frame is the leaf. The end-to-end demo (scripts/demo/vlei)
-// exercises this against the live verifier.
-func presentedCredentialSAID(cesr string) string {
-	type acdcFrame struct {
-		D string          `json:"d"`
-		E json.RawMessage `json:"e"`
-	}
-	var saids []string
+func scanACDCChain(cesr string) ([]acdcFrame, map[string]struct{}) {
+	var frames []acdcFrame
 	referenced := make(map[string]struct{})
 	offset := 0
 	for {
@@ -374,19 +375,43 @@ func presentedCredentialSAID(cesr string) string {
 		if err := json.Unmarshal([]byte(obj), &frame); err != nil || frame.D == "" {
 			continue
 		}
-		saids = append(saids, frame.D)
+		frames = append(frames, frame)
 		if len(frame.E) > 0 {
 			collectEdgeNodes(frame.E, referenced)
 		}
 	}
-	// The leaf is the credential no other credential chains to. A
-	// well-formed linear chain has exactly one such SAID.
-	for _, d := range saids {
-		if _, ok := referenced[d]; !ok {
-			return d
+	return frames, referenced
+}
+
+// leafFrame returns the *presented* (leaf) credential frame — the
+// most-derived one (the ECR/role credential at the bottom of the
+// ECR→LE→QVI chain), identified structurally as the lone credential whose
+// SAID is NOT referenced by any other credential's edge. This is
+// position-independent: KERIA's `credentials().get(said, true)` exporter
+// emits the chain in topological (issuer-first) order, so the leaf is
+// serialized LAST, but we never rely on frame order. A single-credential
+// export (no chain) has no references, so its one frame is the leaf. ok
+// is false when the export carries no ACDC credential. The end-to-end
+// demo (scripts/demo/vlei) exercises this against the live verifier.
+func leafFrame(cesr string) (acdcFrame, bool) {
+	frames, referenced := scanACDCChain(cesr)
+	for _, f := range frames {
+		if _, ok := referenced[f.D]; !ok {
+			return f, true
 		}
 	}
-	return ""
+	return acdcFrame{}, false
+}
+
+// presentedCredentialSAID extracts the SAID of the presented (leaf)
+// credential — the minimal, targeted read the real verifier path needs to
+// route PUT /presentations/{said}. Empty when the export carries no ACDC.
+func presentedCredentialSAID(cesr string) string {
+	leaf, ok := leafFrame(cesr)
+	if !ok {
+		return ""
+	}
+	return leaf.D
 }
 
 // collectEdgeNodes walks an ACDC `e` (edge) block and records every edge

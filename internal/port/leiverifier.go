@@ -42,10 +42,13 @@ type AuthorizationResult struct {
 // following the DNS/DID precedent — a noop adapter for the quickstart
 // and a real adapter selected by config (`vlei.type: noop | verifier`).
 //
-// The RA never parses CESR/KERI: the verifier is the authoritative
+// The real verifier owns all KERI key state: it is the authoritative
 // key-state oracle. Present reports the subject AID, Authorization
 // re-checks live authorization, and VerifySignature owns the KEL/key
-// state used to check the registrant's signature.
+// state used to check the registrant's signature. The noop quickstart
+// adapter reads only the leaf credential's subject AID (a credential
+// attribute, not key state) and waives the authorization + signature
+// checks — the DNS/did:web noop precedent.
 type LEIControlVerifier interface {
 	// Present submits the full-chain CESR export to the verifier and
 	// returns the parsed subject AID + authorized LEI + presentation

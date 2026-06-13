@@ -208,9 +208,11 @@ identity:
 
 vlei:
   # The lei (vLEI) control verifier behind the "lei" identifier kind.
-  # "noop" runs real Ed25519 crypto but waives the GLEIF authorization
-  # binding; "verifier" routes CESR/KERI questions to a real
-  # vlei-verifier (scripts/demo/vlei brings one up on :7676).
+  # "noop" accepts the same full-chain CESR presentation but waives the
+  # external bindings — GLEIF authorization, the AID↔LEI binding, and the
+  # signature check (structural only); "verifier" routes CESR/KERI
+  # questions to a real vlei-verifier (scripts/demo/vlei brings one up on
+  # :7676).
   #   ANS_VLEI_TYPE=verifier ANS_VLEI_BASE_URL=http://localhost:7676 \
   #     scripts/demo/start.sh
   type: ${ANS_VLEI_TYPE:-noop}
