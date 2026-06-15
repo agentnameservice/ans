@@ -101,6 +101,24 @@ func (s *BadgeService) Get(ctx context.Context, agentID string) (*TransparencyLo
 	return s.buildTransparencyLog(ctx, rec)
 }
 
+// StatusOf returns only the agent's read-time badge status — the
+// latest-event read plus the cheap envelope parse, WITHOUT building
+// a Merkle inclusion proof (no checkpoint read, no tile walk). The
+// identity reverse join needs the agent-liveness conjunct of the
+// §5.6.3 visibility predicate but discards the proof, so calling the
+// full Get() per linked agent was O(total) wasted proof builds.
+func (s *BadgeService) StatusOf(ctx context.Context, agentID string) (BadgeStatus, error) {
+	rec, err := s.log.LatestEventByAgent(ctx, agentID)
+	if err != nil {
+		return "", err
+	}
+	wrapper, err := parseEnvelopeWrapper(rec.RawEvent)
+	if err != nil {
+		return "", err
+	}
+	return s.statusFromRecord(rec, wrapper.certExpiresAt()), nil
+}
+
 // buildTransparencyLog assembles a TransparencyLog from a stored
 // event record. Used by both Get (latest event) and Audit (each
 // record in the page).

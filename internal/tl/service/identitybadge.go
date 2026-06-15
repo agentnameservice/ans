@@ -306,17 +306,26 @@ func (s *IdentityBadgeService) LinkedAgentsForIdentity(ctx context.Context, iden
 		// answer (the agent lane still seals via the async outbox, so
 		// a just-activated agent's leaf can lag); any OTHER failure
 		// propagates — join failure is explicit, never silent.
-		agentTL, err := s.badge.Get(ctx, st.AnsID)
+		//
+		// StatusOf (not badge.Get): this view carries only
+		// ansId/linkedAt/agentStatus, so building a Merkle proof per
+		// agent here would be discarded work. Pagination stays at the
+		// handler after this walk because the agent-liveness filter
+		// needs each agent's latest event (not in the link index), so
+		// a SQL LIMIT couldn't preserve an accurate total or full
+		// pages; the per-agent cost is now one indexed read, not a
+		// checkpoint read + tile walk.
+		agentStatus, err := s.badge.StatusOf(ctx, st.AnsID)
 		if err != nil {
 			if errors.Is(err, domain.ErrNotFound) {
 				continue
 			}
 			return nil, err
 		}
-		if !agentLive(agentTL.Status) {
+		if !agentLive(agentStatus) {
 			continue
 		}
-		view := &LinkedAgentView{AnsID: st.AnsID, AgentStatus: agentTL.Status}
+		view := &LinkedAgentView{AnsID: st.AnsID, AgentStatus: agentStatus}
 		if linkRec, err := s.log.EventByLeafIndex(ctx, st.LeafIndex); err == nil {
 			view.LinkedAt = innerTimestamp(linkRec.RawEvent)
 		}

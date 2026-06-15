@@ -401,6 +401,7 @@ func buildAuth(ctx context.Context, cfg *config.TLConfig) (authMiddlewareProvide
 			// covered here — that route requires the Bearer key.
 			opts = append(opts,
 				auth.WithAnonymousPath("/v1/agents/"),
+				auth.WithAnonymousPath("/v1/identities/"),
 				auth.WithAnonymousPath("/v1/log/"),
 				auth.WithAnonymousPath("/checkpoint"),
 				auth.WithAnonymousPath("/root-keys"),
@@ -421,6 +422,7 @@ func buildAuth(ctx context.Context, cfg *config.TLConfig) (authMiddlewareProvide
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
 			auth.WithOIDCAnonymousPath("/docs"),
 			auth.WithOIDCAnonymousPath("/v1/agents/"),
+			auth.WithOIDCAnonymousPath("/v1/identities/"),
 			auth.WithOIDCAnonymousPath("/v1/log/"),
 			auth.WithOIDCAnonymousPath("/checkpoint"),
 			auth.WithOIDCAnonymousPath("/root-keys"),
