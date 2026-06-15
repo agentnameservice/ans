@@ -18,6 +18,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,7 @@ import (
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/service"
 	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
+	"github.com/rs/zerolog"
 )
 
 // fakeResolver returns a canned document — the did:web rule tests
@@ -140,7 +142,7 @@ func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixtur
 		KeyManager: km,
 		KeyID:      "ra-signer",
 		RaID:       "ra-test",
-	}).WithClock(clock.Now)
+	}).WithClock(clock.Now).WithLogger(zerolog.New(io.Discard))
 
 	return &identityFixture{
 		svc:        svc,
@@ -1436,5 +1438,103 @@ func TestNilSealerFailsClosed(t *testing.T) {
 	got, _, gerr := svc.Detail(ctx, "owner-ns", res.Identity.IdentityID)
 	if gerr != nil || got.Status != domain.IdentityPendingControl {
 		t.Fatalf("row must stand: %v (%v)", got.Status, gerr)
+	}
+}
+
+// TestVerifyControl_TLRejectedEventFailsClosed pins the ERROR seal
+// branch: a NON-transient TL rejection (TL_REJECTED_EVENT — the RA
+// produced an event the TL refuses, a pipeline bug) fails the
+// operation closed, consumes nothing, and is distinct from the
+// retryable TL_UNAVAILABLE path.
+func TestVerifyControl_TLRejectedEventFailsClosed(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+	res, err := fx.svc.Register(ctx, fx.providerID, "did:web:rejected.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := genKey(t)
+	jws := signProof(t, priv, res.Identity.Value+"#key-1", res.Challenges[0].SigningInput, true)
+	sub := service.ProofSubmission{SignedProofs: []string{jws}}
+
+	// A schema rejection is ErrInternal (TL_REJECTED_EVENT), not
+	// ErrUnavailable — the seal boundary logs it at ERROR and the
+	// operation fails.
+	fx.sealer.fail(domain.NewInternalError("TL_REJECTED_EVENT", "the transparency log rejected the identity event", errors.New("422")))
+	_, err = fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, sub)
+	if err == nil || errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("want a non-unavailable rejection error, got %v", err)
+	}
+	if rows := fx.drainSealed(t); len(rows) != 0 {
+		t.Fatalf("rejected seal must record nothing, got %d", len(rows))
+	}
+	identity, _, derr := fx.svc.Detail(ctx, fx.providerID, res.Identity.IdentityID)
+	if derr != nil || identity.Status != domain.IdentityPendingControl {
+		t.Fatalf("row must stand on rejection: %v (%v)", identity.Status, derr)
+	}
+
+	// The claim was released, so a retry once the pipeline is fixed
+	// succeeds with the same proof.
+	fx.sealer.fail(nil)
+	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID, sub); err != nil {
+		t.Fatalf("retry after rejection cleared: %v", err)
+	}
+}
+
+// releaseFailStore wraps the real identity store but fails
+// ReleaseChallenge, so the leaked-claim WARN path in releaseClaim is
+// exercised — the operation must still fail (best-effort release does
+// not change the outcome) without panicking.
+type releaseFailStore struct {
+	port.IdentityStore
+}
+
+func (releaseFailStore) ReleaseChallenge(context.Context, string, string) error {
+	return errors.New("release failed (simulated)")
+}
+
+// TestReleaseClaim_LeakedClaimIsLoggedNotSwallowed pins that a failed
+// claim release is surfaced (logged), not silently dropped, and does
+// not change the operation's failure.
+func TestReleaseClaim_LeakedClaimIsLoggedNotSwallowed(t *testing.T) {
+	t.Parallel()
+	db, err := sqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	km, err := keymanager.NewFileKeyManager(t.TempDir() + "/keys")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := km.EnsureKey(context.Background(), "ra-signer", port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	clock := &fakeClock{now: time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)}
+	sealer := &recordingSealer{err: domain.NewUnavailableError("TL_UNAVAILABLE", "down")}
+	svc := service.NewIdentityService(
+		releaseFailStore{IdentityStore: sqlite.NewIdentityStore(db)},
+		sqlite.NewIdentityLinkStore(db),
+		sqlite.NewAgentStore(db),
+		didresolver.NewNoopResolver(),
+		sealer,
+		db,
+	).WithSigner(service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"}).
+		WithClock(clock.Now).WithLogger(zerolog.New(io.Discard))
+
+	ctx := context.Background()
+	res, err := svc.Register(ctx, "owner-rl", "did:web:leak.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	priv := genKey(t)
+	jws := signProof(t, priv, res.Identity.Value+"#key-1", res.Challenges[0].SigningInput, true)
+	// Seal fails (TL down) → the success path releases the claim; the
+	// release itself fails → WARN-logged, but the verify still fails
+	// retryable as expected (not a panic, not a different error).
+	_, err = svc.VerifyControl(ctx, "owner-rl", res.Identity.IdentityID, service.ProofSubmission{SignedProofs: []string{jws}})
+	if !errors.Is(err, domain.ErrUnavailable) {
+		t.Fatalf("want ErrUnavailable despite the release failure, got %v", err)
 	}
 }

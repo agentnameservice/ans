@@ -1,6 +1,7 @@
 package didresolver
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net"
@@ -10,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
@@ -342,10 +345,16 @@ func TestParseDIDDocument_Tolerance(t *testing.T) {
 // against a host that cannot resolve: the fetch-failure branch
 // returns the coarse DID_RESOLUTION_FAILED (no SSRF oracle detail).
 func TestWebResolver_FullResolveFetchFailure(t *testing.T) {
+	// A logger is attached so the server-side failure-category log
+	// path (and WithLogger) is exercised; the wire error must stay
+	// coarse regardless. The log goes to a buffer we assert on — the
+	// category lives server-side, never in the returned error.
+	var logbuf bytes.Buffer
 	w := NewWebResolver(
 		WithTimeout(2*time.Second),
 		WithRootCAs(nil),
 		WithAllowPrivateNetworks(),
+		WithLogger(zerolog.New(&logbuf)),
 	)
 	_, err := w.Resolve(context.Background(), "did:web:no-such-host-ans-test.invalid", nil)
 	if err == nil || !strings.Contains(err.Error(), "DID_RESOLUTION_FAILED") {
@@ -353,6 +362,11 @@ func TestWebResolver_FullResolveFetchFailure(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "127.") {
 		t.Fatalf("error detail leaks addresses: %v", err)
+	}
+	// The diagnosable category reached the server-side log, not the
+	// caller.
+	if !strings.Contains(logbuf.String(), "did:web resolution fetch failed") {
+		t.Fatalf("expected a server-side failure log, got %q", logbuf.String())
 	}
 }
 

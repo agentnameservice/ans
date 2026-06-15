@@ -504,3 +504,65 @@ func TestIdentityHandler_ListPagination(t *testing.T) {
 		seen[e.IdentityID] = true
 	}
 }
+
+// TestIdentityHandler_ServiceErrorsPropagate exercises the
+// service-error pass-through arms across the mutating identity
+// handlers: a well-formed request against an identity the caller
+// does not own / that does not exist surfaces the service's domain
+// error (404/403), not a 200. Complements the malformed-body and
+// auth tests, which never reach the service call.
+func TestIdentityHandler_ServiceErrorsPropagate(t *testing.T) {
+	t.Parallel()
+	f := newIdentityHTTPFixture(t)
+	owner := "owner-svc-err"
+	missing := "01HXMISSINGIDENTITY0000000"
+
+	// Valid bodies, unknown identity → not-found from the owner gate.
+	cases := []struct {
+		method, path string
+		body         any
+	}{
+		{http.MethodGet, "/v2/ans/identities/" + missing, nil},
+		{http.MethodPut, "/v2/ans/identities/" + missing, map[string]string{"value": "did:web:x.example.com"}},
+		{http.MethodPost, "/v2/ans/identities/" + missing + "/verify-control", map[string]any{"signedProofs": []string{"a.b.c"}}},
+		{http.MethodPost, "/v2/ans/identities/" + missing + "/revoke", nil},
+		{http.MethodPost, "/v2/ans/identities/" + missing + "/links", map[string]any{"agentIds": []string{"some-agent"}}},
+		{http.MethodDelete, "/v2/ans/identities/" + missing + "/links/some-agent", nil},
+	}
+	for _, tc := range cases {
+		rec := f.do(t, owner, tc.method, tc.path, tc.body)
+		if rec.Code != http.StatusNotFound && rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s: got %d, want 404/403 (service error must propagate)", tc.method, tc.path, rec.Code)
+		}
+	}
+}
+
+// TestIdentityHandler_EmptyCollectionsRejected pins the
+// missing-required-field validation arms that a syntactically valid
+// but empty body reaches: verify-control with no proofs and links
+// with no agentIds are 4xx, not 200.
+func TestIdentityHandler_EmptyCollectionsRejected(t *testing.T) {
+	t.Parallel()
+	f := newIdentityHTTPFixture(t)
+	owner := "owner-empty"
+	id := f.registerAndVerify(t, owner, "did:web:empty-coll.example.com")
+	agentID := registerAgentForIdentity(t, f, owner, "empty-coll-agent.example.com")
+
+	// Empty signedProofs on a verified identity → rejected (no proof
+	// to verify), not a 200.
+	if rec := f.do(t, owner, http.MethodPost, "/v2/ans/identities/"+id+"/verify-control",
+		map[string]any{"signedProofs": []string{}}); rec.Code < 400 {
+		t.Fatalf("empty signedProofs: got %d, want 4xx", rec.Code)
+	}
+	// Empty agentIds on a link call → INVALID_LINK_REQUEST.
+	if rec := f.do(t, owner, http.MethodPost, "/v2/ans/identities/"+id+"/links",
+		map[string]any{"agentIds": []string{}}); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("empty agentIds: got %d, want 422", rec.Code)
+	}
+	// A valid single-agent link still works (sanity — the fixture's
+	// okSealer acknowledges).
+	if rec := f.do(t, owner, http.MethodPost, "/v2/ans/identities/"+id+"/links",
+		map[string]any{"agentIds": []string{agentID}}); rec.Code != http.StatusOK {
+		t.Fatalf("valid link after empty-batch reject: %d %s", rec.Code, rec.Body)
+	}
+}
