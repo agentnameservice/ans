@@ -43,10 +43,11 @@ func NewOutboxStore(db *DB) *OutboxStore { return &OutboxStore{db: db} }
 // preceded it — that's how we guarantee at-least-once delivery
 // without a dual-write window.
 //
-// schemaVersion must be "V1", "V2", or "IDENTITY"; the worker reads
-// this value to pick the matching TL ingest lane. An empty value is
-// rejected. For identity events the agentID parameter carries the
-// identityId — the row's subject, whatever the event family.
+// schemaVersion must be "V1" or "V2"; the worker reads this value to
+// pick the matching TL ingest lane. An empty value is rejected.
+// Identity events do NOT ride the outbox — they seal synchronously
+// (design §5.6.1: seal-before-success), so there is no "IDENTITY"
+// lane here.
 func (s *OutboxStore) Enqueue(
 	ctx context.Context,
 	eventType, agentID, schemaVersion string,
@@ -57,9 +58,9 @@ func (s *OutboxStore) Enqueue(
 		return 0, errors.New("sqlite/outbox: payload is empty")
 	}
 	switch schemaVersion {
-	case "V1", "V2", "IDENTITY":
+	case "V1", "V2":
 	default:
-		return 0, fmt.Errorf("sqlite/outbox: invalid schemaVersion %q (want V1, V2, or IDENTITY)", schemaVersion)
+		return 0, fmt.Errorf("sqlite/outbox: invalid schemaVersion %q (want V1 or V2)", schemaVersion)
 	}
 	const q = `
         INSERT INTO outbox_events(event_type, agent_id, schema_version, payload_json,
