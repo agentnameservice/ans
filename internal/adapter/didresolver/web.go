@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"golang.org/x/net/publicsuffix"
 
 	"github.com/godaddy/ans/internal/domain"
@@ -46,6 +47,7 @@ type Web struct {
 	maxBodyBytes int64
 	rootCAs      *x509.CertPool
 	allowPrivate bool
+	logger       zerolog.Logger
 }
 
 // WebOption customizes the Web resolver.
@@ -84,11 +86,25 @@ func WithAllowPrivateNetworks() WebOption {
 	return func(w *Web) { w.allowPrivate = true }
 }
 
+// WithLogger attaches a server-side logger (default: no-op). It
+// records the failure CATEGORY (the underlying error) plus the DID
+// and elapsed time so an on-call engineer can distinguish a
+// denylist rejection from a DNS-rebind block, a TLS failure, a
+// timeout, or a refused connection — none of which ever reach the
+// API caller (the wire error stays deliberately coarse, no SSRF
+// oracle).
+func WithLogger(logger zerolog.Logger) WebOption {
+	return func(w *Web) {
+		w.logger = logger.With().Str("component", "did-web-resolver").Logger()
+	}
+}
+
 // NewWebResolver constructs the production resolver.
 func NewWebResolver(opts ...WebOption) *Web {
 	w := &Web{
 		timeout:      5 * time.Second,
 		maxBodyBytes: 1 << 20, // 1 MiB
+		logger:       zerolog.Nop(),
 	}
 	for _, opt := range opts {
 		opt(w)
@@ -121,10 +137,19 @@ func (w *Web) Resolve(ctx context.Context, did string, _ []port.KeyHint) (*port.
 	}
 	req.Header.Set("Accept", "application/did+json, application/json")
 
+	start := time.Now()
 	resp, err := client.Do(req)
 	if err != nil {
-		// Deliberately coarse: no resolved IPs, ports, or redirect
-		// targets in the detail (no SSRF oracle).
+		// The wire error stays deliberately coarse — no resolved IPs,
+		// ports, or redirect targets (no SSRF oracle). The underlying
+		// err carries the diagnosable category (denylist rejection,
+		// DNS-rebind block, TLS failure, timeout, refused) and goes
+		// only to the server-side log.
+		w.logger.Info().
+			Err(err).
+			Str("did", did).
+			Int64("elapsedMs", time.Since(start).Milliseconds()).
+			Msg("did:web resolution fetch failed")
 		return nil, domain.NewValidationError("DID_RESOLUTION_FAILED",
 			fmt.Sprintf("could not fetch the DID document for %s", did))
 	}
@@ -171,6 +196,11 @@ func (w *Web) newClient(originHost string) (*http.Client, error) {
 		DialContext:       pinned.DialContext,
 		ForceAttemptHTTP2: true,
 		TLSClientConfig:   &tls.Config{RootCAs: w.rootCAs, MinVersion: tls.VersionTLS12},
+		// This transport is built per Resolve call against one
+		// registrant-steered host; keeping idle connections open
+		// would let a connection linger ~90s after the fetch with no
+		// reuse benefit. Close them when the request completes.
+		DisableKeepAlives: true,
 	}
 	originDomain, err := registrableDomain(originHost)
 	if err != nil {

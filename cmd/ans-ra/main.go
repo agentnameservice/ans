@@ -154,7 +154,7 @@ func run(cfgPath string) error {
 
 	// did:web resolver — noop (quickstart) or hardened web fetch,
 	// the identity surface's analog of the DNS verifier selection.
-	didResolver := selectDIDResolver(cfg)
+	didResolver := selectDIDResolver(cfg, logger)
 	logger.Info().
 		Str("resolver", cfg.Identity.Resolver.Type).
 		Dur("challengeTTL", cfg.Identity.ChallengeTTL).
@@ -207,7 +207,8 @@ func run(cfgPath string) error {
 	}).WithChallengeTTL(cfg.Identity.ChallengeTTL).
 		WithRegisterRateLimit(cfg.Identity.RegisterRateLimit).
 		WithLinkRateLimit(cfg.Identity.LinkRateLimit).
-		WithSealTimeout(cfg.Identity.SealTimeout)
+		WithSealTimeout(cfg.Identity.SealTimeout).
+		WithLogger(logger)
 
 	// HTTP.
 	r := chi.NewRouter()
@@ -475,10 +476,10 @@ func selectDNSVerifier(cfg *config.RAConfig) port.DNSVerifier {
 // the hardened HTTPS fetch (WebPKI + SSRF dialer guards); the default
 // "noop" synthesizes documents from the submitted proofs' embedded
 // keys for self-contained local development.
-func selectDIDResolver(cfg *config.RAConfig) port.DIDResolver {
+func selectDIDResolver(cfg *config.RAConfig, logger zerolog.Logger) port.DIDResolver {
 	switch cfg.Identity.Resolver.Type {
 	case "web":
-		return didresolver.NewWebResolver()
+		return didresolver.NewWebResolver(didresolver.WithLogger(logger))
 	default:
 		return didresolver.NewNoopResolver()
 	}

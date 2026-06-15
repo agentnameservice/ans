@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -95,6 +96,7 @@ type IdentityService struct {
 	sealTimeout  time.Duration
 	limiter      *ownerLimiter
 	linkLimiter  *ownerLimiter
+	logger       zerolog.Logger
 	clock        func() time.Time
 	newID        func() (string, error)
 	newNonce     func() (string, error)
@@ -122,6 +124,7 @@ func NewIdentityService(
 		sealTimeout:  defaultSealTimeout,
 		limiter:      newOwnerLimiter(defaultRegisterPerMinute),
 		linkLimiter:  newOwnerLimiter(defaultLinkPerMinute),
+		logger:       zerolog.Nop(),
 		clock:        time.Now,
 		newID: func() (string, error) {
 			id, err := uuid.NewV7()
@@ -138,6 +141,17 @@ func NewIdentityService(
 			return base64.RawURLEncoding.EncodeToString(b[:]), nil
 		},
 	}
+}
+
+// WithLogger attaches the structured logger used at the seal
+// boundary (default: a no-op logger). The identity lane seals
+// synchronously, so — unlike the agent lane's outbox worker — there
+// is no background component to log TL failures; this is where the
+// operator's signal for TL_REJECTED_EVENT / TL_UNAVAILABLE comes
+// from.
+func (s *IdentityService) WithLogger(logger zerolog.Logger) *IdentityService {
+	s.logger = logger.With().Str("component", "identity-service").Logger()
+	return s
 }
 
 // WithSigner attaches the producer event signer (same KeyManager +
@@ -477,7 +491,14 @@ func (s *IdentityService) VerifyControl(ctx context.Context, providerID, identit
 // releaseClaim is the best-effort failure-path release of the
 // verify-control seal claim — failed attempts never consume (§3.2).
 func (s *IdentityService) releaseClaim(ctx context.Context, identityID, nonce string) {
-	_ = s.identities.ReleaseChallenge(ctx, identityID, nonce)
+	if err := s.identities.ReleaseChallenge(ctx, identityID, nonce); err != nil {
+		// Best-effort by contract, but a leaked claim blocks re-verify
+		// until its TTL lapses (~30s) — make that visible rather than
+		// silent.
+		s.logger.Warn().Err(err).
+			Str("identityId", identityID).
+			Msg("failed to release verify-control seal claim; it will self-heal at the claim TTL")
+	}
 }
 
 // Revoke transitions a VERIFIED identity to REVOKED and seals
@@ -869,7 +890,24 @@ func (s *IdentityService) sealIdentityEvent(ctx context.Context, inner *identity
 	}
 	sealCtx, cancel := context.WithTimeout(ctx, s.sealTimeout)
 	defer cancel()
-	return s.sealer.SealIdentityEvent(sealCtx, innerCanonical, producerSig)
+	if err := s.sealer.SealIdentityEvent(sealCtx, innerCanonical, producerSig); err != nil {
+		ev := s.logger.Error()
+		if errors.Is(err, domain.ErrUnavailable) {
+			// Transient — the TL didn't confirm; the operation fails
+			// retryable and nothing was consumed. WARN, not ERROR.
+			ev = s.logger.Warn()
+		}
+		ev.Err(err).
+			Str("identityId", inner.IdentityID).
+			Str("eventType", string(inner.EventType)).
+			Msg("identity event seal failed")
+		return err
+	}
+	s.logger.Info().
+		Str("identityId", inner.IdentityID).
+		Str("eventType", string(inner.EventType)).
+		Msg("identity event sealed")
+	return nil
 }
 
 // mapIdentitySaveErr converts the storage layer's generic conflict
