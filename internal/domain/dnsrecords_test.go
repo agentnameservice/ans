@@ -131,6 +131,68 @@ func TestComputeRequiredDNSRecords_BadgeFallbackWithoutTLURL(t *testing.T) {
 	t.Fatal("no badge record found")
 }
 
+func TestComputeRequiredDNSRecords_SVCBFromEndpoint(t *testing.T) {
+	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	reg := &AgentRegistration{
+		AnsName: ansName,
+		Endpoints: []AgentEndpoint{
+			{Protocol: ProtocolA2A, AgentURL: "https://real-host.example.com:8080/a2a"},
+		},
+	}
+
+	records := ComputeRequiredDNSRecords(reg, "")
+	var svcbFound bool
+	for _, r := range records {
+		if r.Purpose == PurposeConnectivity {
+			svcbFound = true
+			assert.Equal(t, DNSRecordSVCB, r.Type)
+			assert.Equal(t, "agent.example.com", r.Name)
+			assert.Contains(t, r.Value, "real-host.example.com.")
+			assert.Contains(t, r.Value, "alpn=h2")
+			assert.Contains(t, r.Value, "port=8080")
+			assert.True(t, r.Required)
+		}
+	}
+	assert.True(t, svcbFound, "SVCB record should be generated")
+}
+
+func TestComputeRequiredDNSRecords_SVCBDefaultPort(t *testing.T) {
+	ansName, _ := NewAnsName(mustSemVer(1, 0, 0), "agent.example.com")
+	reg := &AgentRegistration{
+		AnsName: ansName,
+		Endpoints: []AgentEndpoint{
+			{Protocol: ProtocolMCP, AgentURL: "https://real-host.example.com/mcp"},
+		},
+	}
+
+	records := ComputeRequiredDNSRecords(reg, "")
+	for _, r := range records {
+		if r.Purpose == PurposeConnectivity {
+			assert.Contains(t, r.Value, "real-host.example.com.")
+			assert.Contains(t, r.Value, "alpn=h2")
+			assert.NotContains(t, r.Value, "port=", "default port 443 should be omitted")
+			return
+		}
+	}
+	t.Fatal("no SVCB record found")
+}
+
+func TestBuildSVCBValue(t *testing.T) {
+	tests := []struct {
+		url      string
+		expected string
+	}{
+		{"https://host.example.com/a2a", "1 host.example.com. alpn=h2"},
+		{"https://host.example.com:8080/mcp", "1 host.example.com. alpn=h2 port=8080"},
+		{"http://host.example.com:9000/api", "1 host.example.com. alpn=http/1.1 port=9000"},
+		{"https://host.example.com:443/default", "1 host.example.com. alpn=h2"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		assert.Equal(t, tc.expected, buildSVCBValue(tc.url), "url=%s", tc.url)
+	}
+}
+
 func TestProtocolToANSValue(t *testing.T) {
 	assert.Equal(t, "a2a", protocolToANSValue(ProtocolA2A))
 	assert.Equal(t, "mcp", protocolToANSValue(ProtocolMCP))

@@ -190,12 +190,13 @@ func (h *V1RegistrationHandler) Register(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	qualifiedHost := h.svc.QualifyHost(req.AgentHost)
 	semver, err := domain.ParseSemVer(req.Version)
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
-	ansName, err := domain.NewAnsName(semver, req.AgentHost)
+	ansName, err := domain.NewAnsName(semver, qualifiedHost)
 	if err != nil {
 		WriteError(w, err)
 		return

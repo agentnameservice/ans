@@ -3,6 +3,7 @@ package domain
 import (
 	"fmt"
 	"net/url"
+	"strconv"
 )
 
 // DNSRecordType represents a DNS record type.
@@ -12,6 +13,7 @@ const (
 	DNSRecordTXT   DNSRecordType = "TXT"
 	DNSRecordTLSA  DNSRecordType = "TLSA"
 	DNSRecordHTTPS DNSRecordType = "HTTPS"
+	DNSRecordSVCB  DNSRecordType = "SVCB"
 )
 
 // DNSRecordPurpose describes why a DNS record is needed.
@@ -22,6 +24,7 @@ const (
 	PurposeTrust              DNSRecordPurpose = "TRUST"
 	PurposeCertificateBinding DNSRecordPurpose = "CERTIFICATE_BINDING"
 	PurposeBadge              DNSRecordPurpose = "BADGE"
+	PurposeConnectivity       DNSRecordPurpose = "CONNECTIVITY"
 )
 
 // ExpectedDNSRecord represents a DNS record the operator must configure.
@@ -105,19 +108,66 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration, tlPublicBaseURL string) [
 	// fingerprint (otherwise an attacker rewrote the record in a
 	// signed zone — the worst failure mode). That post-verify
 	// check lives alongside the verifier, not in the record set.
-	if reg.ServerCert == nil {
-		return records
+	if reg.ServerCert != nil {
+		records = append(records, ExpectedDNSRecord{
+			Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
+			Type:     DNSRecordTLSA,
+			Value:    fmt.Sprintf("3 1 1 %s", reg.ServerCert.Fingerprint),
+			Purpose:  PurposeCertificateBinding,
+			Required: false,
+			TTL:      3600,
+		})
 	}
-	records = append(records, ExpectedDNSRecord{
-		Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
-		Type:     DNSRecordTLSA,
-		Value:    fmt.Sprintf("3 1 1 %s", reg.ServerCert.Fingerprint),
-		Purpose:  PurposeCertificateBinding,
-		Required: false,
-		TTL:      3600,
-	})
+
+	// SVCB record for each endpoint — connectivity parameters.
+	// Clients query the agent's FQDN for SVCB to get the target
+	// hostname, port, and ALPN, then resolve the target separately.
+	for _, ep := range reg.Endpoints {
+		svcb := buildSVCBValue(ep.AgentURL)
+		if svcb == "" {
+			continue
+		}
+		records = append(records, ExpectedDNSRecord{
+			Name:     fqdn,
+			Type:     DNSRecordSVCB,
+			Value:    svcb,
+			Purpose:  PurposeConnectivity,
+			Required: true,
+			TTL:      3600,
+		})
+	}
 
 	return records
+}
+
+// buildSVCBValue parses an agent endpoint URL and returns the SVCB
+// record value in wire-presentation format: "priority target key=val ...".
+func buildSVCBValue(agentURL string) string {
+	u, err := url.Parse(agentURL)
+	if err != nil || u.Hostname() == "" {
+		return ""
+	}
+
+	target := u.Hostname()
+	alpn := "h2"
+	if u.Scheme == "http" {
+		alpn = "http/1.1"
+	}
+
+	port := u.Port()
+	defaultPort := "443"
+	if u.Scheme == "http" {
+		defaultPort = "80"
+	}
+
+	if port == "" || port == defaultPort {
+		return fmt.Sprintf("1 %s. alpn=%s", target, alpn)
+	}
+	portNum, err := strconv.Atoi(port)
+	if err != nil {
+		return ""
+	}
+	return fmt.Sprintf("1 %s. alpn=%s port=%d", target, alpn, portNum)
 }
 
 func protocolToANSValue(p Protocol) string {

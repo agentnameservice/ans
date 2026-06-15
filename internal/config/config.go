@@ -92,7 +92,7 @@ type CAServerSelf struct {
 	DataDir      string `koanf:"data-dir"`
 }
 
-// DNS holds DNS verifier configuration.
+// DNS holds DNS verifier and optional provisioner configuration.
 type DNS struct {
 	// Type selects the verifier adapter. "noop" accepts any DNS
 	// state; "lookup" queries a real nameserver via miekg/dns and
@@ -106,6 +106,26 @@ type DNS struct {
 	// server (e.g. "127.0.0.1:15353") for self-contained local
 	// testing.
 	Server string `koanf:"server"`
+
+	// Provisioner configures automatic DNS record creation/deletion.
+	// When nil or empty, operators manage DNS manually (the default).
+	Provisioner *DNSProvisionerConfig `koanf:"provisioner"`
+}
+
+// DNSProvisionerConfig selects the DNS provisioning adapter.
+type DNSProvisionerConfig struct {
+	Type string         `koanf:"type"` // "ddns"
+	DDNS *DNSDDNSConfig `koanf:"ddns"`
+}
+
+// DNSDDNSConfig holds RFC 2136 dynamic DNS update settings.
+type DNSDDNSConfig struct {
+	Server        string        `koanf:"server"`         // "host:port" of authoritative nameserver
+	Zone          string        `koanf:"zone"`           // zone name (FQDN, e.g. "obispo.link.")
+	TSIGName      string        `koanf:"tsig-name"`      // TSIG key name (FQDN)
+	TSIGSecret    string        `koanf:"tsig-secret"`    // base64-encoded shared secret
+	TSIGAlgorithm string        `koanf:"tsig-algorithm"` // default: hmac-sha256
+	Timeout       time.Duration `koanf:"timeout"`        // default: 5s
 }
 
 // Keys holds key-manager configuration.
@@ -188,17 +208,27 @@ type Log struct {
 	Format string `koanf:"format"` // "text" | "json"
 }
 
+// Registration holds agent registration policy settings.
+type Registration struct {
+	// DomainSuffix is appended to the agentHost submitted by the
+	// caller. When set, the agent sends a short name (e.g. "my-agent")
+	// and the RA constructs the full FQDN ("my-agent.agents.example.com").
+	// When empty, the caller must provide the full FQDN.
+	DomainSuffix string `koanf:"domain-suffix"`
+}
+
 // RAConfig is the full configuration for ans-ra.
 type RAConfig struct {
-	Server   Server    `koanf:"server"`
-	Auth     Auth      `koanf:"auth"`
-	CA       CA        `koanf:"ca"`
-	DNS      DNS       `koanf:"dns"`
-	Keys     Keys      `koanf:"keys"`
-	Store    Store     `koanf:"store"`
-	TLClient TLClient  `koanf:"tl-client"`
-	Signer   SignerCfg `koanf:"signer"`
-	Log      Log       `koanf:"log"`
+	Server       Server       `koanf:"server"`
+	Auth         Auth         `koanf:"auth"`
+	CA           CA           `koanf:"ca"`
+	DNS          DNS          `koanf:"dns"`
+	Keys         Keys         `koanf:"keys"`
+	Store        Store        `koanf:"store"`
+	TLClient     TLClient     `koanf:"tl-client"`
+	Signer       SignerCfg    `koanf:"signer"`
+	Registration Registration `koanf:"registration"`
+	Log          Log          `koanf:"log"`
 }
 
 // SignerCfg names the KeyManager-managed key the RA uses to sign
@@ -338,6 +368,10 @@ func (c *RAConfig) Validate() error {
 	default:
 		return fmt.Errorf("dns.type %q not supported (expected 'noop' or 'lookup')", c.DNS.Type)
 	}
+	applyDNSProvisionerDefaults(c.DNS.Provisioner)
+	if err := validateDNSProvisioner(c.DNS.Provisioner); err != nil {
+		return err
+	}
 	if err := validateKeys(&c.Keys); err != nil {
 		return err
 	}
@@ -417,6 +451,46 @@ func validateStore(s *Store) error {
 	}
 	if s.SQLite == nil || s.SQLite.Path == "" {
 		return errors.New("store.sqlite.path is required")
+	}
+	return nil
+}
+
+// applyDNSProvisionerDefaults fills in default values for optional
+// DDNS provisioner fields. Called before validation so that Validate()
+// itself is side-effect-free.
+func applyDNSProvisionerDefaults(p *DNSProvisionerConfig) {
+	if p == nil || p.Type != "ddns" || p.DDNS == nil {
+		return
+	}
+	if p.DDNS.TSIGAlgorithm == "" {
+		p.DDNS.TSIGAlgorithm = "hmac-sha256"
+	}
+	if p.DDNS.Timeout <= 0 {
+		p.DDNS.Timeout = 5 * time.Second
+	}
+}
+
+func validateDNSProvisioner(p *DNSProvisionerConfig) error {
+	if p == nil || p.Type == "" {
+		return nil
+	}
+	switch p.Type {
+	case "ddns":
+		if p.DDNS == nil {
+			return errors.New("dns.provisioner.ddns block required when dns.provisioner.type is 'ddns'")
+		}
+		d := p.DDNS
+		if d.Server == "" {
+			return errors.New("dns.provisioner.ddns.server is required")
+		}
+		if d.Zone == "" {
+			return errors.New("dns.provisioner.ddns.zone is required")
+		}
+		if d.TSIGName == "" || d.TSIGSecret == "" {
+			return errors.New("dns.provisioner.ddns.tsig-name and tsig-secret are required")
+		}
+	default:
+		return fmt.Errorf("dns.provisioner.type %q not supported (expected 'ddns')", p.Type)
 	}
 	return nil
 }

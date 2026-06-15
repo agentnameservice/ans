@@ -227,6 +227,36 @@ func TestRAConfig_Validate_Errors(t *testing.T) {
 		{"unsupported store.type", func(c *RAConfig) { c.Store.Type = "postgres" }, "store.type"},
 		{"missing store.sqlite.path", func(c *RAConfig) { c.Store.SQLite.Path = "" }, "store.sqlite.path"},
 		{"missing tl-client.base-url", func(c *RAConfig) { c.TLClient.BaseURL = "" }, "tl-client.base-url"},
+		{"unsupported dns.provisioner.type", func(c *RAConfig) {
+			c.DNS.Provisioner = &DNSProvisionerConfig{Type: "bogus"}
+		}, "dns.provisioner.type"},
+		{"ddns missing block", func(c *RAConfig) {
+			c.DNS.Provisioner = &DNSProvisionerConfig{Type: "ddns"}
+		}, "dns.provisioner.ddns block"},
+		{"ddns missing server", func(c *RAConfig) {
+			c.DNS.Provisioner = &DNSProvisionerConfig{Type: "ddns", DDNS: &DNSDDNSConfig{Zone: "z.", TSIGName: "k.", TSIGSecret: "s"}}
+		}, "ddns.server"},
+		{"ddns missing zone", func(c *RAConfig) {
+			c.DNS.Provisioner = &DNSProvisionerConfig{Type: "ddns", DDNS: &DNSDDNSConfig{Server: "s:53", TSIGName: "k.", TSIGSecret: "s"}}
+		}, "ddns.zone"},
+		{"ddns missing tsig", func(c *RAConfig) {
+			c.DNS.Provisioner = &DNSProvisionerConfig{Type: "ddns", DDNS: &DNSDDNSConfig{Server: "s:53", Zone: "z."}}
+		}, "tsig-name"},
+		{"public-base-url http scheme", func(c *RAConfig) {
+			c.TLClient.PublicBaseURL = "http://tl.example.com"
+		}, "https scheme"},
+		{"public-base-url with userinfo", func(c *RAConfig) {
+			c.TLClient.PublicBaseURL = "https://user:pass@tl.example.com"
+		}, "userinfo not allowed"},
+		{"public-base-url with query", func(c *RAConfig) {
+			c.TLClient.PublicBaseURL = "https://tl.example.com?foo=bar"
+		}, "query string not allowed"},
+		{"public-base-url with fragment", func(c *RAConfig) {
+			c.TLClient.PublicBaseURL = "https://tl.example.com#frag"
+		}, "fragment not allowed"},
+		{"public-base-url empty", func(c *RAConfig) {
+			c.TLClient.PublicBaseURL = ""
+		}, "public-base-url is required"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -240,6 +270,34 @@ func TestRAConfig_Validate_Errors(t *testing.T) {
 				t.Errorf("error %q missing %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestRAConfig_Validate_DDNSDefaults(t *testing.T) {
+	dir := t.TempDir()
+	c := defaultRAConfig()
+	c.Auth.Static = &AuthStatic{APIKey: "x"}
+	c.CA.Self.DataDir = dir
+	c.Keys.File.Path = dir
+	c.Store.SQLite.Path = filepath.Join(dir, "db")
+	c.DNS.Provisioner = &DNSProvisionerConfig{
+		Type: "ddns",
+		DDNS: &DNSDDNSConfig{
+			Server:     "127.0.0.1:53",
+			Zone:       "example.com.",
+			TSIGName:   "ans-key.",
+			TSIGSecret: "c2VjcmV0",
+		},
+	}
+
+	if err := c.Validate(); err != nil {
+		t.Fatalf("validate: %v", err)
+	}
+	if c.DNS.Provisioner.DDNS.TSIGAlgorithm != "hmac-sha256" {
+		t.Errorf("TSIGAlgorithm default not applied: got %q", c.DNS.Provisioner.DDNS.TSIGAlgorithm)
+	}
+	if c.DNS.Provisioner.DDNS.Timeout != 5*time.Second {
+		t.Errorf("Timeout default not applied: got %v", c.DNS.Provisioner.DDNS.Timeout)
 	}
 }
 

@@ -537,8 +537,17 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 
 	expected := domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL)
 
+	if s.dnsProvisioner != nil {
+		if err := s.dnsProvisioner.ProvisionRecords(ctx, reg.FQDN(), expected); err != nil {
+			return nil, fmt.Errorf("dns provision: %w", err)
+		}
+	}
+
 	mismatches, perRecord, err := s.verifyDNSRecords(ctx, reg.FQDN(), expected)
 	if err != nil {
+		if s.dnsProvisioner != nil {
+			_ = s.dnsProvisioner.DeleteRecords(ctx, reg.FQDN(), expected)
+		}
 		return nil, fmt.Errorf("dns verify: %w", err)
 	}
 	if len(mismatches) > 0 {
@@ -585,6 +594,9 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		}
 		return s.enqueueTLEvent(txCtx, string(event.TypeAgentRegistered), reg, inner, now)
 	}); err != nil {
+		if s.dnsProvisioner != nil {
+			_ = s.dnsProvisioner.DeleteRecords(ctx, reg.FQDN(), expected)
+		}
 		return nil, err
 	}
 
@@ -781,6 +793,10 @@ type RevokeResult struct {
 	Registration       *domain.AgentRegistration
 	RevokedAt          time.Time
 	DNSRecordsToRemove []domain.ExpectedDNSRecord
+	// DNSCleanupErr is non-nil when DNS auto-cleanup was attempted
+	// but failed. Revocation itself succeeded — the DNS records are
+	// stale and need manual removal by the operator.
+	DNSCleanupErr error
 }
 
 // Revoke transitions the registration to REVOKED, marks every active
@@ -942,9 +958,16 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return nil, err
 	}
 
+	dnsToRemove := domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL)
+	var dnsCleanupErr error
+	if s.dnsProvisioner != nil && len(dnsToRemove) > 0 {
+		dnsCleanupErr = s.dnsProvisioner.DeleteRecords(ctx, reg.FQDN(), dnsToRemove)
+	}
+
 	return &RevokeResult{
 		Registration:       reg,
 		RevokedAt:          now,
-		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
+		DNSRecordsToRemove: dnsToRemove,
+		DNSCleanupErr:      dnsCleanupErr,
 	}, nil
 }
