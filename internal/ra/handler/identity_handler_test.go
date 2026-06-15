@@ -211,6 +211,37 @@ func (f *identityHTTPFixture) registerAndVerify(t *testing.T, owner, didValue st
 	return ch.IdentityID
 }
 
+// assertSingletonVerifiedList pins GET /v2/ans/identities returning a
+// single VERIFIED identity in the AgentListResponse-shaped envelope —
+// `items` array plus returnedCount/limit/hasMore (review #6). Lives
+// here so its branches stay out of the big lifecycle test's
+// cyclomatic budget.
+func assertSingletonVerifiedList(t *testing.T, f *identityHTTPFixture, owner string) {
+	t.Helper()
+	rec := f.do(t, owner, http.MethodGet, "/v2/ans/identities", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list: %d", rec.Code)
+	}
+	var list struct {
+		Items []struct {
+			IdentityID string `json:"identityId"`
+			Status     string `json:"status"`
+		} `json:"items"`
+		ReturnedCount int  `json:"returnedCount"`
+		Limit         int  `json:"limit"`
+		HasMore       bool `json:"hasMore"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Status != "VERIFIED" {
+		t.Fatalf("list shape: %+v", list)
+	}
+	if list.ReturnedCount != 1 || list.Limit != 20 || list.HasMore {
+		t.Fatalf("list envelope (items/returnedCount/limit/hasMore): %+v", list)
+	}
+}
+
 func TestIdentityHandler_RegisterShape(t *testing.T) {
 	t.Parallel()
 	f := newIdentityHTTPFixture(t)
@@ -281,29 +312,14 @@ func TestIdentityHandler_FullLifecycleOverHTTP(t *testing.T) {
 
 	identityID := f.registerAndVerify(t, owner, "did:web:identity.acme-corp.com")
 
-	// List.
-	rec := f.do(t, owner, http.MethodGet, "/v2/ans/identities", nil)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("list: %d", rec.Code)
-	}
-	var list struct {
-		Identities []struct {
-			IdentityID string `json:"identityId"`
-			Status     string `json:"status"`
-		} `json:"identities"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
-		t.Fatal(err)
-	}
-	if len(list.Identities) != 1 || list.Identities[0].Status != "VERIFIED" {
-		t.Fatalf("list shape: %+v", list)
-	}
+	// List — the AgentListResponse-shaped envelope (items + counts).
+	assertSingletonVerifiedList(t, f, owner)
 
 	// Register the agent to link.
 	agentID := registerAgentForIdentity(t, f, owner, "linked.example.com")
 
 	// Link → 200 {linked:1}.
-	rec = f.do(t, owner, http.MethodPost, "/v2/ans/identities/"+identityID+"/links",
+	rec := f.do(t, owner, http.MethodPost, "/v2/ans/identities/"+identityID+"/links",
 		map[string]any{"agentIds": []string{agentID}})
 	if rec.Code != http.StatusOK {
 		t.Fatalf("link: %d %s", rec.Code, rec.Body)
@@ -451,9 +467,9 @@ func TestIdentityHandler_ListPagination(t *testing.T) {
 	}
 
 	type page struct {
-		Identities []struct {
+		Items []struct {
 			IdentityID string `json:"identityId"`
-		} `json:"identities"`
+		} `json:"items"`
 		NextCursor *string `json:"nextCursor"`
 	}
 	var p1 page
@@ -464,7 +480,7 @@ func TestIdentityHandler_ListPagination(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p1); err != nil {
 		t.Fatal(err)
 	}
-	if len(p1.Identities) != 2 || p1.NextCursor == nil {
+	if len(p1.Items) != 2 || p1.NextCursor == nil {
 		t.Fatalf("page 1 shape: %+v", p1)
 	}
 
@@ -476,12 +492,12 @@ func TestIdentityHandler_ListPagination(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &p2); err != nil {
 		t.Fatal(err)
 	}
-	if len(p2.Identities) != 1 || p2.NextCursor != nil {
+	if len(p2.Items) != 1 || p2.NextCursor != nil {
 		t.Fatalf("page 2 shape: %+v", p2)
 	}
 	// No overlap between pages.
 	seen := map[string]bool{}
-	for _, e := range append(p1.Identities, p2.Identities...) {
+	for _, e := range append(p1.Items, p2.Items...) {
 		if seen[e.IdentityID] {
 			t.Fatalf("duplicate across pages: %s", e.IdentityID)
 		}

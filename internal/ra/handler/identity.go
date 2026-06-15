@@ -177,9 +177,26 @@ func (h *IdentityHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, toDetailResponse(identity, nil))
 }
 
+// defaultIdentityListLimit mirrors the store's default page size so
+// the reported `limit` is accurate when the caller omits one.
+const defaultIdentityListLimit = 20
+
+// identityListResponse is the cursor-paginated list envelope, named
+// to match AgentListResponse (`items` + returnedCount/limit/
+// nextCursor/hasMore) — one collection-response convention across
+// the v2 surface.
+type identityListResponse struct {
+	Items         []identityDetailResponse `json:"items"`
+	ReturnedCount int                      `json:"returnedCount"`
+	Limit         int                      `json:"limit"`
+	NextCursor    *string                  `json:"nextCursor"`
+	HasMore       bool                     `json:"hasMore"`
+}
+
 // List handles GET /v2/ans/identities — one page of the caller's
-// identities, in the v2 limit + opaque-cursor envelope (§5.6.1:
-// pagination inherits the surface's convention).
+// identities, in the v2 limit + opaque-cursor envelope mirroring
+// AgentListResponse (`items` array): one collection convention
+// across the v2 surface.
 func (h *IdentityHandler) List(w http.ResponseWriter, r *http.Request) {
 	providerID, ok := callerSubject(w, r)
 	if !ok {
@@ -204,9 +221,18 @@ func (h *IdentityHandler) List(w http.ResponseWriter, r *http.Request) {
 	for _, identity := range page.Items {
 		out = append(out, toDetailResponse(identity, nil))
 	}
-	resp := map[string]any{"identities": out, "nextCursor": nil}
+	effectiveLimit := limit
+	if effectiveLimit == 0 {
+		effectiveLimit = defaultIdentityListLimit
+	}
+	resp := identityListResponse{
+		Items:         out,
+		ReturnedCount: len(out),
+		Limit:         effectiveLimit,
+		HasMore:       page.HasMore,
+	}
 	if page.NextCursor != "" {
-		resp["nextCursor"] = page.NextCursor
+		resp.NextCursor = &page.NextCursor
 	}
 	WriteJSON(w, http.StatusOK, resp)
 }

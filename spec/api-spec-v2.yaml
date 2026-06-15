@@ -968,9 +968,12 @@ paths:
       summary: List my identities
       description: |
         Returns one page of the caller's identities, newest first, in
-        the standard limit + opaque-cursor envelope (the agent-list
-        convention). Pass `nextCursor` back as `cursor` for the next
-        page; a null `nextCursor` is the last page.
+        the same limit + opaque-cursor envelope as
+        `GET /v2/ans/agents` (`AgentListResponse`): the collection
+        array is named `items`, alongside `returnedCount`, `limit`,
+        `nextCursor`, and `hasMore`. Pass `nextCursor` back as
+        `cursor` for the next page; a null `nextCursor` is the last
+        page.
       operationId: listIdentities
       parameters:
         - name: limit
@@ -988,17 +991,7 @@ paths:
           content:
             application/json:
               schema:
-                type: object
-                required: [identities, nextCursor]
-                properties:
-                  identities:
-                    type: array
-                    items:
-                      $ref: '#/components/schemas/IdentityDetails'
-                  nextCursor:
-                    type: string
-                    nullable: true
-                    description: Cursor for the next page; null on the last page
+                $ref: '#/components/schemas/IdentityListResponse'
         '401':
           description: Authentication failed
           content:
@@ -2163,6 +2156,41 @@ components:
         PENDING_CONTROL → VERIFIED → REVOKED. Rotation keeps the row
         VERIFIED (the staged replacement proves control before
         anything changes).
+
+    IdentityListResponse:
+      type: object
+      description: |
+        Ownership-scoped, cursor-paginated list of the caller's
+        verified identities. Mirrors `AgentListResponse`: the
+        collection array is named `items` per the standard REST
+        collection-response convention shared across the v2 surface.
+      properties:
+        items:
+          type: array
+          description: List of identities owned by the caller
+          items:
+            $ref: '#/components/schemas/IdentityDetails'
+        returnedCount:
+          type: integer
+          description: Number of identities in this response
+        limit:
+          type: integer
+          description: Limit that was applied
+        nextCursor:
+          type: string
+          nullable: true
+          description: |
+            Opaque cursor for the next page. Pass as the `cursor` query
+            parameter to retrieve the next page. Null when there are no
+            more results.
+        hasMore:
+          type: boolean
+          description: Whether more results exist beyond this page
+      required:
+        - items
+        - returnedCount
+        - limit
+        - hasMore
 
     IdentityDetails:
       type: object
