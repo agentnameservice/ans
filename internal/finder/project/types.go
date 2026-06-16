@@ -25,18 +25,23 @@ package project
 // Finder always emits URL. Tombstones are carried in ProjectedEntry, not
 // Entry, and never reach the wire.
 type Entry struct {
-	Identifier    string            `json:"identifier"`
-	DisplayName   string            `json:"displayName"`
-	Type          string            `json:"type"`
-	URL           string            `json:"url,omitempty"`
-	Data          map[string]any    `json:"data,omitempty"`
-	Description   string            `json:"description,omitempty"`
-	Tags          []string          `json:"tags,omitempty"`
-	Capabilities  []string          `json:"capabilities,omitempty"`
-	Version       string            `json:"version,omitempty"`
-	UpdatedAt     string            `json:"updatedAt,omitempty"`
-	Metadata      map[string]string `json:"metadata,omitempty"`
-	TrustManifest *TrustManifest    `json:"trustManifest,omitempty"`
+	Identifier   string         `json:"identifier"`
+	DisplayName  string         `json:"displayName"`
+	Type         string         `json:"type"`
+	URL          string         `json:"url,omitempty"`
+	Data         map[string]any `json:"data,omitempty"`
+	Description  string         `json:"description,omitempty"`
+	Tags         []string       `json:"tags,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	// RepresentativeQueries holds ARD sample queries (ARDS §4.2). The
+	// Finder does not populate it — the ANS events feed carries no
+	// representative-query data — but it is part of the CatalogEntry
+	// contract, so the field stays present and omits cleanly when empty.
+	RepresentativeQueries []string          `json:"representativeQueries,omitempty"`
+	Version               string            `json:"version,omitempty"`
+	UpdatedAt             string            `json:"updatedAt,omitempty"`
+	Metadata              map[string]string `json:"metadata,omitempty"`
+	TrustManifest         *TrustManifest    `json:"trustManifest,omitempty"`
 }
 
 // TrustManifest carries verifiable identity and trust metadata
