@@ -17,6 +17,15 @@
 #  13. GET    TL /v1/agents/{id}/receipt                        (SCITT COSE)
 #  14. go test ./internal/tl/receipt -run TestSmokeVerifyDemoReceipt  (offline verify)
 #  15. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
+#  16. POST   /v2/ans/identities                                (register the WHO — a did:web verified identity)
+#  17. POST   /v2/ans/identities/{id}/verify-control            (control proof → VERIFIED, seals IDENTITY_VERIFIED)
+#  18. POST   /v2/ans/identities/{id}/links                     (link the agent — ONE IDENTITY_LINKED on the identity stream)
+#  19. GET    TL /v1/agents/{id}                                (badge now carries the computed identities[] join)
+#
+# Step 16-19 show the verified-identity surface in the standard
+# lifecycle; scripts/demo/identity-lifecycle.sh exercises EVERY
+# identity operation (re-add, did:key, rotation, unlink, revoke,
+# receipts, history views).
 #
 # Usage:
 #   scripts/demo/run-lifecycle.sh                            # random host, version 1.0.0
@@ -308,12 +317,56 @@ fi
 header "15. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
 curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
 
+# ----- 16-19. Verified identity (the WHO behind this agent) -----
+#
+# The agent registration above is the "what": one FQDN, its
+# endpoints, its certificates. The verified identity is the "who"
+# behind it — proven through a challenge-bound key proof, sealed on
+# its own TL stream, and linked to the agent. Rotating or revoking
+# the identity later is ONE sealed event regardless of how many
+# agents are linked; every linked badge reflects it at read time.
+header "16. POST /v2/ans/identities  (register the WHO — did:web)"
+require_cmd go
+IDENTITY_DID="did:web:who-$(openssl rand -hex 4).example.com"
+IDENTITY_KEY="$DATA/identity-who.pem"
+(cd "$ROOT" && go run ./scripts/demo/signproof keygen -out "$IDENTITY_KEY") >/dev/null
+ID_REG=$(curl_json POST /v2/ans/identities "$(jq -n --arg v "$IDENTITY_DID" '{value: $v}')")
+IDENTITY_ID=$(printf '%s' "$ID_REG" | jq -r '.identityId // empty')
+ID_INPUT=$(printf '%s' "$ID_REG" | jq -r '.challenges[0].signingInput // empty')
+[ -n "$IDENTITY_ID" ] && [ -n "$ID_INPUT" ] || fail "identity register failed"
+echo "$IDENTITY_ID" >"$DATA/last-identity-id"
+ok "identityId=$IDENTITY_ID (PENDING_CONTROL — challenge issued)"
+
+header "17. POST /v2/ans/identities/$IDENTITY_ID/verify-control  (→ VERIFIED)"
+ID_PROOF=$(cd "$ROOT" && go run ./scripts/demo/signproof sign \
+  -key "$IDENTITY_KEY" -kid "${IDENTITY_DID}#key-1" -input "$ID_INPUT")
+curl_json POST "/v2/ans/identities/$IDENTITY_ID/verify-control" \
+  "$(jq -n --arg p "$ID_PROOF" '{signedProofs: [$p]}')" >/dev/null
+assert_2xx "identity verify-control"
+ok "control proven — IDENTITY_VERIFIED seals on the identity's own TL stream"
+
+header "18. POST /v2/ans/identities/$IDENTITY_ID/links  (link this agent — one call, one sealed event)"
+curl_json POST "/v2/ans/identities/$IDENTITY_ID/links" \
+  "$(jq -n --arg a "$AGENT_ID" '{agentIds: [$a]}')" >/dev/null
+assert_2xx "identity link"
+
+header "19. TL: GET /v1/agents/$AGENT_ID  (badge — computed identities[] join)"
+# No polling: identity ops are seal-before-success — the seals are
+# already in the log the moment the link call returned.
+assert_tl_identity_audit "$IDENTITY_ID" 2
+BADGE_WITH_WHO=$(curl_tl GET "/v1/agents/$AGENT_ID")
+WHO_VALUE=$(printf '%s' "$BADGE_WITH_WHO" | jq -r '.identities[0].value // empty')
+[ "$WHO_VALUE" = "$IDENTITY_DID" ] || fail "badge identities[] join missing (got: $WHO_VALUE)"
+ok "one hop answers \"who is behind this agent\": $WHO_VALUE (VERIFIED)"
+
 # ----- summary -----
 header "Lifecycle complete (both sides)"
 printf "  agentId     %s\n" "$AGENT_ID" >&2
 printf "  ansName     %s\n" "$ANS_NAME" >&2
+printf "  identityId  %s  (%s)\n" "$IDENTITY_ID" "$IDENTITY_DID" >&2
 printf "  saved to    %s\n" "$DATA/last-agent-id" >&2
 printf "  root-keys   %s\n" "$ROOT_KEYS_FILE" >&2
 printf "  receipt     %s\n" "$RECEIPT_FILE" >&2
 printf "\n" >&2
 printf "  revoke:     %s\n" "scripts/demo/revoke.sh" >&2
+printf "  identities: %s\n" "scripts/demo/identity-lifecycle.sh (every identity operation)" >&2

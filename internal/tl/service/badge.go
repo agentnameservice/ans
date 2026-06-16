@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -43,6 +44,36 @@ type TransparencyLog struct {
 	SchemaVersion string       `json:"schemaVersion,omitempty"`
 	Signature     string       `json:"signature,omitempty"`
 	Status        BadgeStatus  `json:"status,omitempty"`
+
+	// Identities is the computed read-time join of the agent's
+	// currently-linked verified identities — populated on the agent
+	// badge only (never on audit entries, never sealed). The handler
+	// composes it from the IdentityBadgeService so this service stays
+	// single-purpose. Covered by the TL's response signature, not by
+	// any seal: link facts live on the identity stream.
+	Identities []*LinkedIdentityView `json:"identities,omitempty"`
+
+	// IdentitiesTotal counts every visible link when Identities is
+	// present — the badge embeds at most a small safety cap of
+	// entries (§5.6.1); the standalone, paginated
+	// /v1/agents/{agentId}/identities route is the overflow target.
+	IdentitiesTotal int `json:"identitiesTotal,omitempty"`
+
+	// IdentitiesUnavailable is set when the identities join could not
+	// be computed (design §5.6.3: join failure is explicit, never
+	// silent) — an absent/empty identities[] always means "no visible
+	// links", never "the join failed".
+	IdentitiesUnavailable bool `json:"identitiesUnavailable,omitempty"`
+
+	// Keys / KeysLogID are the identity badge's computed quote of the
+	// CURRENT proven key set (design §5.6.3 "computed views carry the
+	// keys"): the verification methods verbatim from the latest
+	// sealed proof event, with KeysLogID pointing at that seal (fetch
+	// it for the signedProof evidence). Populated on the identity
+	// badge only — never on audit entries — and omitted when the
+	// identity is REVOKED (the keys are no longer attested).
+	Keys      []json.RawMessage `json:"keys,omitempty"`
+	KeysLogID string            `json:"keysLogId,omitempty"`
 }
 
 // BadgeService computes the badge from the latest mirrored event
@@ -68,6 +99,24 @@ func (s *BadgeService) Get(ctx context.Context, agentID string) (*TransparencyLo
 		return nil, err
 	}
 	return s.buildTransparencyLog(ctx, rec)
+}
+
+// StatusOf returns only the agent's read-time badge status — the
+// latest-event read plus the cheap envelope parse, WITHOUT building
+// a Merkle inclusion proof (no checkpoint read, no tile walk). The
+// identity reverse join needs the agent-liveness conjunct of the
+// §5.6.3 visibility predicate but discards the proof, so calling the
+// full Get() per linked agent was O(total) wasted proof builds.
+func (s *BadgeService) StatusOf(ctx context.Context, agentID string) (BadgeStatus, error) {
+	rec, err := s.log.LatestEventByAgent(ctx, agentID)
+	if err != nil {
+		return "", err
+	}
+	wrapper, err := parseEnvelopeWrapper(rec.RawEvent)
+	if err != nil {
+		return "", err
+	}
+	return s.statusFromRecord(rec, wrapper.certExpiresAt()), nil
 }
 
 // buildTransparencyLog assembles a TransparencyLog from a stored

@@ -120,6 +120,15 @@ dns:
   type: ${ANS_DNS_TYPE:-noop}
   server: "${ANS_DNS_SERVER:-}"
 
+identity:
+  # Verified identities (the "who" behind agents). The "noop"
+  # resolver synthesizes did:web documents from the keys embedded in
+  # submitted proofs — real signature verification, no hosting
+  # needed; flip to "web" for the hardened HTTPS did.json fetch.
+  resolver:
+    type: ${ANS_IDENTITY_RESOLVER:-noop}
+  challenge-ttl: 1h
+
 keys:
   type: file
   file:

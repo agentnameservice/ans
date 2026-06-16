@@ -63,14 +63,16 @@ test:
 
 test-cover:
 	@echo "Running tests with coverage..."
-	@# Exclude cmd/* from the instrumented set. The three command
-	@# binaries (ans-ra, ans-tl, ans-verify) are thin glue: flag
-	@# parsing, config loading, dependency wiring, then hand off to
-	@# library code under internal/. We don't write unit tests for
-	@# main() — counting those ~30 unexercised statements toward the
-	@# 90% gate would only penalize real logic coverage. The library
-	@# packages under internal/ are where the gate has teeth.
-	@pkgs=$$(go list ./... | grep -v '/cmd/' | tr '\n' ',' | sed 's/,$$//'); \
+	@# Exclude cmd/* and scripts/* from the instrumented set. The
+	@# command binaries (ans-ra, ans-tl, ans-verify) are thin glue:
+	@# flag parsing, config loading, dependency wiring, then hand off
+	@# to library code under internal/. scripts/* holds demo-side
+	@# tooling (e.g. the signproof helper) exercised end-to-end by
+	@# the scripts/demo lifecycle runs, not unit tests. Counting
+	@# either's unexercised main() statements toward the 90% gate
+	@# would only penalize real logic coverage. The library packages
+	@# under internal/ are where the gate has teeth.
+	@pkgs=$$(go list ./... | grep -v -e '/cmd/' -e '/scripts/' | tr '\n' ',' | sed 's/,$$//'); \
 	go test ./... -count=1 -coverpkg=$$pkgs -coverprofile=coverage.out -covermode=atomic
 	@go tool cover -func=coverage.out
 	@echo ""
