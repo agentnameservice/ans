@@ -115,6 +115,51 @@ func (s *RegistrationService) GetByAgentID(ctx context.Context, agentID string) 
 	}, nil
 }
 
+// HostRegistrations returns the registrations on agentHost owned by
+// ownerID (any version, any status), each with its Endpoints populated,
+// for AI Catalog per-host document composition. Endpoints are bulk-loaded
+// in one roundtrip to avoid N+1.
+//
+// Scoping to ownerID is a security boundary, not a convenience. The
+// per-host document is meant to be host-complete (catalog §4) under the
+// ANS-1 §12.1 one-host-one-owner invariant — but this RA does not enforce
+// that invariant (registration uniqueness is keyed on the full versioned
+// ANS name, not the host), so two owners can hold different versions on
+// the same host. An owner-unscoped read would then disclose one owner's
+// registration metadata to another via this route. Filtering by owner
+// keeps the document host-complete for the requester (identical output in
+// the intended single-owner model) while never leaking a sibling owner's
+// agents.
+func (s *RegistrationService) HostRegistrations(ctx context.Context, ownerID, agentHost string) ([]*domain.AgentRegistration, error) {
+	all, err := s.agents.FindAllByAgentHost(ctx, agentHost)
+	if err != nil {
+		return nil, err
+	}
+	regs := make([]*domain.AgentRegistration, 0, len(all))
+	for _, r := range all {
+		if r.OwnerID == ownerID {
+			regs = append(regs, r)
+		}
+	}
+	if len(regs) == 0 {
+		return regs, nil
+	}
+	ids := make([]string, len(regs))
+	for i, r := range regs {
+		ids[i] = r.AgentID
+	}
+	eps, err := s.endpoints.FindByAgentIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for _, r := range regs {
+		if e, ok := eps[r.AgentID]; ok && e != nil {
+			r.Endpoints = e.Endpoints
+		}
+	}
+	return regs, nil
+}
+
 // IdentityCertificates returns every identity certificate the RA has
 // issued for this agent — typically just the one from registration,
 // but rotations (Stage 5) can add more. Newest-first.
@@ -334,6 +379,15 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 	now := s.clock()
 	reg, err := s.agents.FindByAgentID(ctx, agentID)
 	if err != nil {
+		return nil, err
+	}
+
+	// FQDN exclusivity, before the idempotency check: a registration that
+	// lost the host to another owner (and was cancelled at that owner's
+	// activation) must be rejected here rather than silently treated as
+	// "already validated". This is the at-every-level gate before
+	// verify-dns.
+	if err := s.ensureHostNotTakenByOther(ctx, reg); err != nil {
 		return nil, err
 	}
 
@@ -805,6 +859,13 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		return nil, err
 	}
 
+	// FQDN exclusivity gate: if a different owner already holds this host
+	// live, this registration lost the race and cannot activate — reject
+	// before the idempotency/precondition checks below.
+	if err := s.ensureHostNotTakenByOther(ctx, reg); err != nil {
+		return nil, err
+	}
+
 	// Precondition: PENDING_DNS is the only state verify-dns accepts.
 	// ACTIVE is idempotent (already done). Anything else is an error.
 	if reg.Status == domain.StatusActive {
@@ -886,45 +947,53 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		return &VerifyDNSResult{Registration: reg, Now: now, DNSMismatches: mismatches}, nil
 	}
 
-	// Transition to ACTIVE in-memory before entering the tx — Activate
-	// is a domain-aggregate state machine that can fail (preconditions
-	// on current status), and a precondition failure here shouldn't
-	// open and then immediately roll back a transaction.
+	// Transition to ACTIVE in-memory before any TL or DB work — Activate
+	// is a domain-aggregate state machine that can fail (preconditions on
+	// current status), and a precondition failure here shouldn't trigger a
+	// TL seal or open a transaction.
 	if err := reg.Activate(now); err != nil {
 		return nil, err
 	}
 
-	// AGENT_REGISTERED: the single terminal transition that marks
-	// the agent live in the log. Both V1 and V2 lanes emit this
-	// SAME `eventType` token (the V1 enum is authoritative), but in
-	// version-specific envelope shapes — V1 uses singleton +
-	// rotation-array + map-typed attestations, V2 uses unified
-	// `identityCerts[]` / `serverCerts[]` + typed
-	// `dnsRecordsProvisioned[]` per the documented deviation.
+	// Seal-before-success (ANS-1 §12.3: "the RA MUST NOT activate without a
+	// sealed event (step (d) is the point of no return)"). AGENT_REGISTERED
+	// is the single terminal transition that marks the agent live in the
+	// log; we submit it to the TL INLINE and report the agent ACTIVE only
+	// after the TL acknowledges the seal — mirroring the identity lane. A
+	// failed seal IS a failed activation: nothing is committed, the agent
+	// stays PENDING_DNS, and the operator retries verify-dns once the TL is
+	// reachable. This is what makes a downstream catalog entry's
+	// SCITT-receipt/badge links point at TL records that actually exist.
+	// (Both lanes emit the same eventType token in version-specific
+	// envelope shapes; the seal runs outside the tx so the network round
+	// trip never holds the SQLite write lock.)
+	if err := s.sealActivationEvent(ctx, reg, expected, perRecord, in.SchemaVersion, now); err != nil {
+		return nil, err
+	}
+
+	// Sealed: commit the ACTIVE transition and cancel any losing pending
+	// registrations on this host atomically. The AGENT_REGISTERED event is
+	// already durable in the TL, so — unlike the outbox path used by
+	// revocation — there is nothing to enqueue here.
 	//
-	// Build + sign the event before opening the tx so the producer
-	// signature (a KMS round-trip) doesn't hold the SQLite write
-	// lock open. Persistence of the agent's new status and the
-	// outbox row commit atomically inside uow.Run — without the tx,
-	// agent.Save committing without the outbox enqueue would mean
-	// an ACTIVE agent whose AGENT_REGISTERED event never makes it
-	// to the TL.
+	// The seal round trip above is a window a commit failure (SQLITE_BUSY,
+	// crash) can land in: the agent then stays PENDING_DNS and the operator
+	// retries verify-dns. The retry recomputes `now`, so its
+	// AGENT_REGISTERED leaf carries fresh timestamps and a fresh content
+	// hash — TL dedup will not match, appending a second AGENT_REGISTERED
+	// leaf. That is the intended benign residue, accepted exactly as on the
+	// identity lane: agent status keys on the ACTIVE row by agentId and
+	// read-side status derives from any terminal leaf, so the duplicate is
+	// invisible to verifiers and badges. It is not a dedup regression.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
 		if err := s.agents.Save(txCtx, reg); err != nil {
 			return err
 		}
-		if isV1Lane(in.SchemaVersion) {
-			v1Inner, err := s.buildAgentRegisteredV1Event(txCtx, reg, expected, now)
-			if err != nil {
-				return err
-			}
-			return s.enqueueTLEventV1(txCtx, string(eventv1.TypeAgentRegistered), reg, v1Inner, now)
-		}
-		inner, err := s.buildAgentRegisteredEvent(txCtx, reg, expected, perRecord, now)
-		if err != nil {
-			return err
-		}
-		return s.enqueueTLEvent(txCtx, string(event.TypeAgentRegistered), reg, inner, now)
+		// The winner now holds the FQDN exclusively: cancel any other
+		// owner's still-pending registrations on this host, atomically with
+		// this activation (the loser is cancelled the moment the winner
+		// goes live — not left to fail later at its own verify-dns).
+		return s.cancelConflictingPendings(txCtx, reg.FQDN(), reg.OwnerID)
 	}); err != nil {
 		return nil, err
 	}

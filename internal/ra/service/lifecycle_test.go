@@ -6,6 +6,7 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/godaddy/ans/internal/adapter/dns"
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/ra/service"
 	event "github.com/godaddy/ans/internal/tl/event"
@@ -73,20 +74,15 @@ func TestVerifyDNS_NoIdentityCSR_V2EventEmptyIdentityCerts(t *testing.T) {
 		t.Fatalf("verify-dns: %v", err)
 	}
 
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
+	// AGENT_REGISTERED is sealed inline at activation (seal-before-success),
+	// not enqueued to the outbox, so inspect what was sealed.
+	sealed := fx.sealer.sealed()
+	if len(sealed) == 0 {
+		t.Fatal("expected at least one sealed V2 event")
 	}
-	if len(rows) == 0 {
-		t.Fatal("expected at least one emitted V2 event")
-	}
-	for _, row := range rows {
-		var p service.OutboxPayload
-		if err := json.Unmarshal(row.PayloadJSON, &p); err != nil {
-			t.Fatalf("unmarshal OutboxPayload: %v", err)
-		}
+	for _, s := range sealed {
 		var ev event.Event
-		if err := json.Unmarshal(p.InnerEventCanonical, &ev); err != nil {
+		if err := json.Unmarshal(s.InnerCanonical, &ev); err != nil {
 			t.Fatalf("unmarshal inner V2 event: %v", err)
 		}
 		if ev.Attestations != nil && len(ev.Attestations.IdentityCerts) != 0 {
@@ -128,22 +124,15 @@ func TestVerifyDNS_NoIdentityCSR_V1EventEmptyIdentityCert(t *testing.T) {
 		t.Fatalf("V1 agent registered without an identity CSR must reach ACTIVE; got %q", got.Status)
 	}
 
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
+	// AGENT_REGISTERED is sealed inline at activation, not enqueued.
 	sawV1 := false
-	for _, row := range rows {
-		if row.SchemaVersion != eventv1.SchemaVersion {
+	for _, s := range fx.sealer.sealed() {
+		if s.SchemaVersion != eventv1.SchemaVersion {
 			continue
 		}
 		sawV1 = true
-		var p service.OutboxPayload
-		if err := json.Unmarshal(row.PayloadJSON, &p); err != nil {
-			t.Fatalf("unmarshal OutboxPayload: %v", err)
-		}
 		var ev eventv1.Event
-		if err := json.Unmarshal(p.InnerEventCanonical, &ev); err != nil {
+		if err := json.Unmarshal(s.InnerCanonical, &ev); err != nil {
 			t.Fatalf("unmarshal inner V1 event: %v", err)
 		}
 		if ev.Attestations != nil {
@@ -156,7 +145,7 @@ func TestVerifyDNS_NoIdentityCSR_V1EventEmptyIdentityCert(t *testing.T) {
 		}
 	}
 	if !sawV1 {
-		t.Fatal("expected a V1 AGENT_REGISTERED event in the outbox")
+		t.Fatal("expected a V1 AGENT_REGISTERED event to be sealed")
 	}
 }
 
@@ -196,5 +185,124 @@ func TestSubmitIdentityCSR_NoIdentityCSR_Rejected(t *testing.T) {
 	}
 	if de.Code != "IDENTITY_CSR_NOT_PERMITTED" {
 		t.Fatalf("expected code IDENTITY_CSR_NOT_PERMITTED; got %q", de.Code)
+	}
+}
+
+// TestVerifyDNS_SealFailure_FailsClosed pins the seal-before-success
+// contract for agent activation (ANS-1 §12.3: "the RA MUST NOT activate
+// without a sealed event (step (d) is the point of no return)"). When
+// the inline TL seal fails, verify-dns must NOT report ACTIVE: it
+// surfaces the seal error and leaves the agent PENDING_DNS so the
+// operator can retry once the TL is reachable. This is what guarantees a
+// downstream catalog entry's SCITT-receipt and badge links can only ever
+// point at a TL record that was actually written.
+func TestVerifyDNS_SealFailure_FailsClosed(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	ctx := context.Background()
+
+	resp, err := fx.svc.RegisterAgent(ctx, fx.req)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agentID := resp.Registration.AgentID
+	if _, err := fx.svc.VerifyACME(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+
+	// Arm the sealer to fail as the tlclient would when the TL is
+	// unreachable (transient → TL_UNAVAILABLE).
+	fx.sealer.failErr = domain.NewUnavailableError("TL_UNAVAILABLE", "tl down")
+
+	var de *domain.Error
+	if _, err := fx.svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err == nil {
+		t.Fatal("verify-dns must fail when the activation seal fails; got nil error")
+	} else if !errors.As(err, &de) || de.Code != "TL_UNAVAILABLE" {
+		t.Fatalf("expected TL_UNAVAILABLE domain error; got %T: %v", err, err)
+	}
+
+	// Fail-closed: the persisted agent must still be PENDING_DNS. ACTIVE
+	// is the point of no return and must not be reached without a seal.
+	got, err := fx.agents.FindByAgentID(ctx, agentID)
+	if err != nil {
+		t.Fatalf("FindByAgentID: %v", err)
+	}
+	if got.Status != domain.StatusPendingDNS {
+		t.Fatalf("agent must stay PENDING_DNS after a failed seal; got %q", got.Status)
+	}
+
+	// Nothing was recorded as durably sealed, and activation must never
+	// fall back to the outbox.
+	if n := len(fx.sealer.sealed()); n != 0 {
+		t.Errorf("no event should be recorded as sealed on failure; got %d", n)
+	}
+	if rows, _ := fx.outboxStore.Claim(ctx, 100); len(rows) != 0 {
+		t.Errorf("activation must not enqueue to the outbox; got %d rows", len(rows))
+	}
+
+	// Retry succeeds once the TL recovers — proving the failure left the
+	// aggregate in a retryable PENDING_DNS state, not a wedged one.
+	fx.sealer.failErr = nil
+	if _, err := fx.svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-dns retry after TL recovers: %v", err)
+	}
+	got, err = fx.agents.FindByAgentID(ctx, agentID)
+	if err != nil {
+		t.Fatalf("FindByAgentID after retry: %v", err)
+	}
+	if got.Status != domain.StatusActive {
+		t.Fatalf("agent must reach ACTIVE on retry; got %q", got.Status)
+	}
+	if n := len(fx.sealer.sealed()); n != 1 {
+		t.Errorf("retry must seal exactly one AGENT_REGISTERED; got %d sealed", n)
+	}
+}
+
+// TestVerifyDNS_NilSealer_FailsClosed covers the no-sealer-configured
+// branch of activation — the live fail-closed path when the RA runs with
+// the TL client disabled (cmd/ans-ra/main.go leaves the sealer nil and
+// only wires it when non-nil). With no sealer there is no "seal later"
+// mode: activation must report TL_UNAVAILABLE and leave the agent
+// PENDING_DNS rather than going ACTIVE without a sealed event. No signer
+// is wired here either — the nil-sealer guard short-circuits before any
+// event is built or signed.
+func TestVerifyDNS_NilSealer_FailsClosed(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	ctx := context.Background()
+
+	// Reuse the fixture's stores/CAs but build a service with NO agent
+	// sealer (and no signer) — mirroring a TL-disabled deployment. A DNS
+	// verifier is still wired so verify-acme's challenge gate passes and
+	// the flow reaches verify-dns, where the nil-sealer guard fires.
+	svc := service.NewRegistrationService(
+		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
+		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
+		fx.discoveryReg,
+	).WithServerCertificateIssuer(fx.serverCA).
+		WithDNSVerifier(dns.NewNoopVerifier())
+
+	resp, err := svc.RegisterAgent(ctx, fx.req)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agentID := resp.Registration.AgentID
+	if _, err := svc.VerifyACME(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+
+	var de *domain.Error
+	if _, err := svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err == nil {
+		t.Fatal("verify-dns must fail closed when no sealer is configured; got nil error")
+	} else if !errors.As(err, &de) || de.Code != "TL_UNAVAILABLE" {
+		t.Fatalf("expected TL_UNAVAILABLE domain error; got %T: %v", err, err)
+	}
+
+	got, err := fx.agents.FindByAgentID(ctx, agentID)
+	if err != nil {
+		t.Fatalf("FindByAgentID: %v", err)
+	}
+	if got.Status != domain.StatusPendingDNS {
+		t.Fatalf("agent must stay PENDING_DNS with no sealer configured; got %q", got.Status)
 	}
 }

@@ -10,7 +10,7 @@
 #   6. GET    /v2/ans/agents/{id}                               (detail, now ACTIVE)
 #   7. GET    /v2/ans/agents?status=ALL                         (list mine)
 #   8. GET    /v2/ans/agents/{id}/certificates/identity         (issued cert)
-#   9. Wait for the outbox worker to push events to the TL
+#   9. Confirm the inline-sealed AGENT_REGISTERED leaf is durable in the TL
 #  10. GET    TL /v1/agents/{id}/audit                          (history)
 #  11. GET    TL /v1/agents/{id}                                (badge)
 #  12. GET    TL /root-keys                                     (verifier PEMs)
@@ -162,9 +162,10 @@ REG_REQ=$(jq -n \
     version:          $version,
     agentHost:        $host,
     endpoints: [{
-      agentUrl:   ("https://" + $host + "/mcp"),
-      protocol:   "MCP",
-      transports: ["SSE"]
+      agentUrl:    ("https://" + $host + "/mcp"),
+      metaDataUrl: ("https://" + $host + "/.well-known/mcp/server-card.json"),
+      protocol:    "MCP",
+      transports:  ["SSE"]
     }],
     identityCsrPEM: $csr,
     serverCsrPEM:   $srvCsr
@@ -254,17 +255,19 @@ curl_json GET "/v2/ans/agents?status=ALL" >/dev/null
 header "8. GET /v2/ans/agents/$AGENT_ID/certificates/identity"
 curl_json GET "/v2/ans/agents/$AGENT_ID/certificates/identity" >/dev/null
 
-# ----- 9. Wait for outbox worker -----
+# ----- 9. Confirm the inline-sealed AGENT_REGISTERED leaf -----
 #
-# The single terminal AGENT_REGISTERED event fires at verify-dns
-# ACTIVE transition — matching the reference TL and production's
-# one-leaf-per-lifecycle model. The outbox worker polls on
-# cfg.tl-client.poll-interval (default 2s) and POSTs it to the TL.
-# Wait for the leaf to show up on the audit endpoint before
-# continuing, keeping the demo deterministic without "sleep enough".
-header "9. Wait for outbox worker to push the AGENT_REGISTERED event to the TL"
+# The single terminal AGENT_REGISTERED event is sealed INLINE at the
+# verify-dns ACTIVE transition (seal-before-success): verify-dns only
+# returned ACTIVE above because the TL already acknowledged the seal,
+# so — unlike revocation, which still rides the outbox worker — the
+# leaf is durable in the log by the time we get here. This poll is a
+# confirmation, not a wait: it should succeed on the first try (the
+# audit materialized view may lag the seal by a beat, so we still poll
+# to keep the demo deterministic rather than racing the projection).
+header "9. Confirm the inline-sealed AGENT_REGISTERED leaf is durable in the TL"
 poll_tl_audit "$AGENT_ID" 1 30
-ok "TL received the AGENT_REGISTERED leaf"
+ok "TL has the AGENT_REGISTERED leaf (sealed inline at activation)"
 
 # ----- 10. TL audit -----
 header "10. TL: GET /v1/agents/$AGENT_ID/audit"
@@ -421,6 +424,76 @@ BADGE_WITH_WHO=$(curl_tl GET "/v1/agents/$AGENT_ID")
 WHO_VALUE=$(printf '%s' "$BADGE_WITH_WHO" | jq -r '.identities[0].value // empty')
 [ "$WHO_VALUE" = "$IDENTITY_DID" ] || fail "badge identities[] join missing (got: $WHO_VALUE)"
 ok "one hop answers \"who is behind this agent\": $WHO_VALUE (VERIFIED)"
+
+# ----- 20. AI Catalog entry -----
+#
+# The catalog entry is a derived, owner-scoped view of how this agent
+# appears to an external AI Catalog / ARD registry. Its trust manifest
+# points at the SAME SCITT receipt the demo fetched at step 13 — proving
+# the catalog references a real, resolvable inclusion proof, not a
+# fabricated URL. badgeUrl + the attestation URI use the RA's configured
+# public TL base ($TL_PUBLIC_URL); in this demo that is the same host:port
+# as the TL, https scheme.
+header "20. GET /v2/ans/agents/$AGENT_ID/catalog-entry  (AI Catalog record)"
+# curl_json runs in a command-substitution subshell, so its
+# LAST_HTTP_STATUS does not reach this shell — the strict jq shape
+# assertion below is the guard: a 422/error body has no matching
+# .identifier and fails it.
+CAT_ENTRY=$(curl_json GET "/v2/ans/agents/$AGENT_ID/catalog-entry")
+want_urn="urn:ai:${AGENT_HOST}:agents:${AGENT_HOST%%.*}"
+want_receipt="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}/receipt"
+want_badge="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}"
+printf '%s' "$CAT_ENTRY" | jq -e \
+  --arg urn "$want_urn" --arg rcpt "$want_receipt" --arg badge "$want_badge" '
+    .identifier == $urn
+    and .mediaType == "application/mcp-server-card+json"
+    and (.url | type) == "string"
+    and (has("data") | not)
+    and .trustManifest.identity == $urn
+    and .trustManifest.attestations[0].type == "ANS-Registration"
+    and .trustManifest.attestations[0].mediaType == "application/scitt-receipt+cose"
+    and .trustManifest.attestations[0].uri == $rcpt
+    and .metadata.agentHost == "'"$AGENT_HOST"'"
+    and .metadata.badgeUrl == $badge
+  ' >/dev/null || fail "catalog entry shape/URLs did not match expectations"
+ok "catalog entry well-formed; attestation URI = $want_receipt"
+# The catalog advertises the receipt at the path the demo already fetched
+# live over http at step 13 (same agentId, same path; https public base).
+ok "that receipt path is live on the TL (step 13 retrieved its COSE bytes → $RECEIPT_FILE)"
+
+# ----- 21. Host-complete AI Catalog document -----
+#
+# The per-host document is what the AHP publishes verbatim at
+# /.well-known/ai-catalog.json. It lists every ACTIVE catalog-eligible
+# agent on the host (this one). It is served as application/ai-catalog+json
+# with a strong ETag; a conditional re-fetch returns 304, so AHPs poll
+# cheaply. Uses curl directly (not curl_json) to read response headers.
+header "21. GET /v2/ans/agents/$AGENT_ID/ai-catalog  (host-complete AI Catalog document)"
+AICAT_HDR="$DATA/ai-catalog.hdr"
+AICAT_BODY="$DATA/ai-catalog.json"
+printf "${C_DIM}→ GET %s/v2/ans/agents/%s/ai-catalog${C_RESET}\n" "$RA_URL" "$AGENT_ID" >&2
+aicat_status=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
+  -D "$AICAT_HDR" -o "$AICAT_BODY" -w '%{http_code}' \
+  "$RA_URL/v2/ans/agents/$AGENT_ID/ai-catalog")
+[ "$aicat_status" = "200" ] || fail "ai-catalog: expected 200, got $aicat_status"
+pretty_json <"$AICAT_BODY" >&2
+grep -iq '^content-type:[[:space:]]*application/ai-catalog+json' "$AICAT_HDR" \
+  || fail "ai-catalog: Content-Type is not application/ai-catalog+json"
+ETAG=$(grep -i '^etag:' "$AICAT_HDR" | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r')
+[ -n "$ETAG" ] || fail "ai-catalog: no ETag header"
+jq -e --arg urn "$want_urn" --arg host "$AGENT_HOST" '
+  .specVersion == "1.0"
+  and .host.identifier == $host
+  and .host.displayName == $host
+  and ((.entries | map(.identifier) | index($urn)) != null)
+' "$AICAT_BODY" >/dev/null || fail "ai-catalog: document shape wrong or this agent's entry missing"
+ok "host-complete document lists this ACTIVE agent (ETag $ETAG)"
+# Conditional re-fetch with the ETag → 304 Not Modified (cheap AHP poll).
+aicat_304=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
+  -H "If-None-Match: $ETAG" -o /dev/null -w '%{http_code}' \
+  "$RA_URL/v2/ans/agents/$AGENT_ID/ai-catalog")
+[ "$aicat_304" = "304" ] || fail "ai-catalog: If-None-Match did not yield 304 (got $aicat_304)"
+ok "conditional GET (If-None-Match) returned 304 Not Modified"
 
 # ----- summary -----
 header "Lifecycle complete (both sides)"
