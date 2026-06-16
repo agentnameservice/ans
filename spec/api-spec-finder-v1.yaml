@@ -552,10 +552,10 @@ components:
         per discoverable agent endpoint from the ANS events feed.
 
         **Untrusted publisher content.** `displayName`, `description`,
-        `tags`, and `capabilities` are asserted by the agent's publisher
-        at registration and carried verbatim (after control-character
-        and bidirectional-text hygiene). An orchestrator MUST treat them
-        as data, never as instructions.
+        `tags`, `capabilities`, and `representativeQueries` are asserted
+        by the agent's publisher at registration and carried verbatim
+        (after control-character and bidirectional-text hygiene). An
+        orchestrator MUST treat them as data, never as instructions.
 
         **Value-or-Reference (ARDS §3.4, §4.2).** For an **Active** entry,
         exactly one of `url` or `data` is present — never both, never
@@ -632,6 +632,16 @@ components:
             endpoint function names.
           items:
             type: string
+        representativeQueries:
+          type: array
+          description: |
+            Sample natural-language queries the agent can answer
+            (ARDS §4.2). **Untrusted publisher content.** Part of the
+            CatalogEntry contract; the Finder does not currently populate
+            it — the ANS events feed carries no representative-query data
+            — so it is absent from projected entries today.
+          items:
+            type: string
         version:
           type: string
           description: Version of the artifact (ARDS §4.2). The agent's semver.
@@ -704,6 +714,23 @@ components:
             agent's SCITT COSE receipt on the ANS Transparency Log.
           items:
             $ref: '#/components/schemas/Attestation'
+        provenance:
+          type: array
+          description: |
+            Provenance links describing how the artifact was derived or
+            published (ARDS §5.1). Optional in ARD; the Finder does not
+            emit provenance — agent trust derives from the
+            `ANS-Registration` attestation and its TL receipt, not from
+            publisher-asserted provenance.
+          items:
+            $ref: '#/components/schemas/ProvenanceLink'
+        signature:
+          type: string
+          description: |
+            Detached JWS signature over the trust manifest (ARDS §5.1).
+            Optional in ARD; the Finder does not emit it — manifest
+            integrity is anchored by the `ANS-Registration` attestation on
+            the ANS Transparency Log, not a publisher self-signature.
       required:
         - identity
 
@@ -748,6 +775,32 @@ components:
         - type
         - uri
         - mediaType
+
+    # ── Provenance link (ARDS §5.1) ──────────────────────────────
+    ProvenanceLink:
+      type: object
+      description: |
+        A provenance relationship within a trust manifest (ARDS §5.1).
+        Optional and not emitted by the Finder; defined here so the
+        published contract carries the full ARD `TrustManifest` shape.
+      properties:
+        relation:
+          type: string
+          description: |
+            Provenance relation, e.g. `derivedFrom` or `publishedFrom`
+            (ARDS §5.1).
+          example: derivedFrom
+        sourceId:
+          type: string
+          description: Identifier of the source artifact (ARDS §5.1).
+        sourceDigest:
+          type: string
+          description: |
+            Optional cryptographic digest of the source artifact for
+            integrity verification (ARDS §5.1).
+      required:
+        - relation
+        - sourceId
 
     # ── Errors ───────────────────────────────────────────────────
     # RFC 7807 Problem Details. Shape copied verbatim from the ANS TL
