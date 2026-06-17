@@ -232,6 +232,19 @@ func TestIsPublicIP(t *testing.T) {
 	}
 }
 
+// TestSSRFGuard_DisablesProxy pins that the guarded transport never
+// proxies. If ProxyFromEnvironment (inherited from
+// http.DefaultTransport) survived, an HTTP(S)_PROXY env var would route
+// the fetch through a proxy whose own IP the dial guard sees as public,
+// and the proxy would fetch an internal target on our behalf — a full
+// bypass of the SSRF guard. HTTP-01 validation dials the resolved FQDN
+// directly, so Proxy must be nil.
+func TestSSRFGuard_DisablesProxy(t *testing.T) {
+	if tr := guardedTransport(); tr.Proxy != nil {
+		t.Fatal("guardedTransport must set Proxy=nil so the dial guard stays authoritative")
+	}
+}
+
 // TestSSRFGuard_RefusesRedirects confirms the verifier does not follow
 // a redirect (which could pivot a public host to an internal one).
 func TestSSRFGuard_RefusesRedirects(t *testing.T) {

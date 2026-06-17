@@ -113,6 +113,14 @@ func guardedTransport() *http.Transport {
 		base = &http.Transport{}
 	}
 	t := base.Clone()
+	// Never proxy. ProxyFromEnvironment (inherited from
+	// http.DefaultTransport) would route the fetch through an
+	// HTTP(S)_PROXY whose own address the dial guard sees as public —
+	// the proxy would then fetch the internal target on our behalf,
+	// defeating the guard entirely. HTTP-01 validation must dial the
+	// resolved FQDN directly, so the Control hook above governs the
+	// real target.
+	t.Proxy = nil
 	t.DialContext = d.DialContext
 	return t
 }
