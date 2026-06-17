@@ -212,7 +212,7 @@ refused, responses capped at 16 MiB with an explicit over-cap error.
   — version successions share it by design; per-registration
   uniqueness rides the wrapper keys.
 - **Fan-out.** One entry per includable endpoint: `A2A →
-  application/a2a-agent-card+json`, `MCP → application/mcp-server+json`;
+  application/a2a-agent-card+json`, `MCP → application/mcp-server-card+json`;
   `HTTP-API` endpoints produce no entry. Capabilities come from
   `functions[].name` (sanitized, deduped, sorted, capped at 50), tags
   from the union of `functions[].tags` (capped at 10).

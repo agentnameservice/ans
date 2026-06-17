@@ -23,8 +23,9 @@ It serves the ARD search and explore endpoints over an index built
 from agents the RA has registered and the TL has sealed.
 
 The protocol is the **Agentic Resource Discovery Specification (ARD),
-v0.5 (Draft), dated May 28, 2026** — the public draft maintained by
-the `agenticresourcediscovery` working group. GoDaddy participates in
+v0.9 (Draft)** — the public draft maintained by the ARD working group
+at `github.com/ards-project/ard-spec` (rendered at
+agenticresourcediscovery.org/spec). GoDaddy participates in
 that working group, and Microsoft's "Agent Finder" product implements
 the same protocol. `ans-finder` is a reference implementation of the
 registry role: it ingests ANS registrations, projects them into ARD
@@ -318,7 +319,7 @@ entry per endpoint whose protocol is includable**:
 | Source field (EventItem) | Target (CatalogEntry) | Rule |
 |---|---|---|
 | `endpoints[].protocol` = `A2A` | `type` = `application/a2a-agent-card+json` | one entry |
-| `endpoints[].protocol` = `MCP` | `type` = `application/mcp-server+json` | one entry |
+| `endpoints[].protocol` = `MCP` | `type` = `application/mcp-server-card+json` | one entry |
 | `endpoints[].protocol` = `HTTP-API` | — | no entry (HTTP-API is not an ARD artifact type) |
 | unknown protocol token | — | per-endpoint Skip |
 | `agentDisplayName` | `displayName` | sanitized |
@@ -441,7 +442,7 @@ Accepts an ARD `query` object (`{text, filter}`) plus root-level
 `federation`, `pageSize`, and `pageToken`. For Search, `text` is
 required and `filter` is optional (ARD §7.2). Returns `results[]` —
 catalog entries each annotated with a `score` (0–100 relevance) and a
-`source` — plus optional `referrals[]` and a `nextPageToken`.
+`source` — plus optional `referrals[]` and a `pageToken`.
 
 - `filter` keys are dot-paths into the catalog entry; values are
   arrays (OR within a key, AND across keys), per ARD §7.1. The slice
@@ -721,16 +722,16 @@ rationale. Deviations are flagged, not silently resolved.
 | 7 | Attestation carries no content `digest` | ARD §5.2 (digest optional) | The receipt proves latest-event *inclusion*, not entry *content* (§5, §11). A content digest would overclaim what the receipt verifies, so it is omitted deliberately. |
 | 8 | Unknown `eventType` is an alertable Skip, not an error | strict validation intuition | Feed-only ingestion behind a cursor means a structural error on an unknown event type would halt the only ingestion source at that cursor when the producer's enum grows. Fail-closed must not mean fail-stuck (§6). |
 | 9 | Protocol-token map (domain underscored ↔ wire hyphenated) is owned by the feed-route PR (PR 2) | — | The OSS domain tokens are underscored (`HTTP_API`, `STREAMABLE_HTTP`, `JSON_RPC` — [protocol.go:14,51-53](../../internal/domain/protocol.go)) and the wire is hyphenated (`HTTP-API`, `STREAMABLE-HTTP`, `JSON-RPC`). PR 2 owns the explicit domain→wire token map and asserts enum *values* against the swagger, not just marshal shape. The finder's `feed` types use the production hyphenated values directly. |
-| 10 | Next-page token is named `nextPageToken` in responses | ARD §7.2 (response example uses `pageToken`) | The request parameter is `pageToken` (matching ARD); naming the response field `nextPageToken` disambiguates "the token you sent" from "the token to send next" at the cost of differing from the §7.2 example's field name. Clients reading the spec schema (rather than the prose example) are unaffected. |
-| 11 | Responses carry an optional `staleSince` timestamp | not in ARD | Additive amendment to `SearchResponse`/`ExploreResponse`: set once the ingestion poll gap exceeds the configured staleness bound, so degraded mode (§5) is visible to clients instead of silent. Optional and absent in normal operation; ARD-conformant clients that ignore unknown fields are unaffected. |
+| 10 | Responses carry an optional `staleSince` timestamp | not in ARD | Additive amendment to `SearchResponse`/`ExploreResponse`: set once the ingestion poll gap exceeds the configured staleness bound, so degraded mode (§5) is visible to clients instead of silent. Optional and absent in normal operation; ARD-conformant clients that ignore unknown fields are unaffected. |
 
 ---
 
 ## 16. Risks
 
-1. **ARDS transcription fidelity.** The canonical ards.io site is
-   auth-gated; the source used here is the working group's public
-   `docs/spec.md` (v0.5 Draft, 2026-05-28). Mitigation: the appendix
+1. **ARDS transcription fidelity.** The canonical spec is the public
+   `github.com/ards-project/ard-spec` repo (v0.9), which ships
+   machine-readable JSON Schema and OpenAPI under `spec/schemas/`.
+   Mitigation: the appendix
    (§17) transcribes the field tables verbatim with section citations,
    so any drift is checkable against the source.
 2. **Production-swagger fidelity for `feed` types.** The finder's
@@ -979,9 +980,11 @@ three multi-word tokens above differ.
 
 ## Source references
 
-- **ARD spec**: Agentic Resource Discovery Specification, v0.5 (Draft),
-  2026-05-28 — working-group public `docs/spec.md`. Section citations
-  throughout (§3.4, §4.1, §4.2, §4.2.1, §5.1–5.3, §6.2, §7.1–7.3, §8).
+- **ARD spec**: Agentic Resource Discovery Specification, v0.9 (Draft)
+  — public `github.com/ards-project/ard-spec` (rendered at
+  agenticresourcediscovery.org/spec), with machine-readable JSON Schema
+  and OpenAPI under `spec/schemas/`. Section citations throughout
+  (§3.4, §4.1, §4.2, §4.2.1, §5.1–5.3, §6.2, §7.1–7.3, §8).
 - **Production events contract**: `swagger_ans.json`
   (developer.godaddy.com), `definitions.EventPageResponse` /
   `EventItem` / `AgentEndpoint` / `AgentFunction`.

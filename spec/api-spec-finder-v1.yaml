@@ -10,7 +10,9 @@ info:
     agent by natural-language need and verify it against the ANS
     Transparency Log. The contract here implements the ARD Registry REST
     interface defined in the Agentic Resource Discovery Specification
-    v0.5 (ARDS) — see the `§`-citations throughout this document.
+    v0.9 (ARDS), maintained at github.com/ards-project/ard-spec and
+    rendered at agenticresourcediscovery.org/spec — see the
+    `§`-citations throughout this document.
 
     **Two operations:**
 
@@ -336,7 +338,7 @@ components:
           type: string
           description: |
             Opaque pagination token from a previous response's
-            `nextPageToken` (ARDS §7.2). Omit for the first page.
+            `pageToken` (ARDS §7.2). Omit for the first page.
       required:
         - query
 
@@ -360,7 +362,7 @@ components:
             The Finder never auto-follows referrals; the client decides.
           items:
             $ref: '#/components/schemas/CatalogEntry'
-        nextPageToken:
+        pageToken:
           type: string
           description: |
             Opaque token for the next page. Pass as `pageToken` on the
@@ -592,8 +594,8 @@ components:
           description: |
             IANA media type of the AI artifact (ARDS §4.2, §3.3). The
             Finder emits `application/a2a-agent-card+json` for A2A
-            endpoints and `application/mcp-server+json` for MCP endpoints.
-          example: application/mcp-server+json
+            endpoints and `application/mcp-server-card+json` for MCP endpoints.
+          example: application/mcp-server-card+json
         url:
           type: string
           format: uri
@@ -702,10 +704,19 @@ components:
           example: https://myagent.example.com
         identityType:
           type: string
+          enum: [spiffe, did, https, other]
           description: |
-            Type hint for the identity URI (ARDS §5.1) — e.g. `did`,
-            `spiffe`, `https`. The Finder emits `https`.
+            Type hint for the identity URI (ARDS §5.1). One of `spiffe`,
+            `did`, `https`, `other`. The Finder emits `https`.
           example: https
+        trustSchema:
+          type: object
+          description: |
+            Trust-framework descriptor (ARDS §5.1) — identifies the trust
+            framework, its version, and the governance applied to the
+            artifact. Optional in ARD and not emitted by the Finder;
+            documented here for contract completeness. See the canonical
+            spec for its sub-shape.
         attestations:
           type: array
           description: |
@@ -776,28 +787,29 @@ components:
         - uri
         - mediaType
 
-    # ── Provenance link (ARDS §5.1) ──────────────────────────────
+    # ── Provenance link (ARDS §5.3) ──────────────────────────────
     ProvenanceLink:
       type: object
       description: |
-        A provenance relationship within a trust manifest (ARDS §5.1).
+        A provenance relationship within a trust manifest (ARDS §5.3).
         Optional and not emitted by the Finder; defined here so the
         published contract carries the full ARD `TrustManifest` shape.
       properties:
         relation:
           type: string
+          enum: [derivedFrom, publishedFrom, copiedFrom]
           description: |
-            Provenance relation, e.g. `derivedFrom` or `publishedFrom`
-            (ARDS §5.1).
+            Provenance relation (ARDS §5.3). One of `derivedFrom`,
+            `publishedFrom`, `copiedFrom`.
           example: derivedFrom
         sourceId:
           type: string
-          description: Identifier of the source artifact (ARDS §5.1).
+          description: Identifier of the source artifact (ARDS §5.3).
         sourceDigest:
           type: string
           description: |
             Optional cryptographic digest of the source artifact for
-            integrity verification (ARDS §5.1).
+            integrity verification (ARDS §5.3).
       required:
         - relation
         - sourceId

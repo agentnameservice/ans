@@ -10,7 +10,7 @@
       "entry": {
         "identifier": "urn:ai:pacific.example.com:agents:Pacific-Time-Agent",
         "displayName": "Pacific Time Agent",
-        "type": "application/mcp-server+json",
+        "type": "application/mcp-server-card+json",
         "url": "https://pacific.example.com/.well-known/mcp.json",
         "description": "Created with a non-Z UTC offset to pin verbatim passthrough",
         "tags": [

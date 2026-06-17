@@ -10,7 +10,7 @@
       "entry": {
         "identifier": "urn:ai:evil.example.com:agents:SafeNameEVILAgent",
         "displayName": "SafeNameEVILAgent",
-        "type": "application/mcp-server+json",
+        "type": "application/mcp-server-card+json",
         "url": "https://evil.example.com/.well-known/mcp.json",
         "description": "Line one[31mred and reversedisolated text",
         "tags": [

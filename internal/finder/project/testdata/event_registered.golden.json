@@ -52,7 +52,7 @@
       "entry": {
         "identifier": "urn:ai:myagent.example.com:agents:Sentiment-Analyzer",
         "displayName": "Sentiment Analyzer",
-        "type": "application/mcp-server+json",
+        "type": "application/mcp-server-card+json",
         "url": "https://myagent.example.com/.well-known/mcp.json",
         "description": "An agent that analyzes sentiment in text",
         "tags": [

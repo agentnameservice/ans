@@ -19,7 +19,7 @@ func TestOpen_FileBackedAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	mustApply(t, s1, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	mustApply(t, s1, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", withDisplay("Persisted", "persisted")))
 	if err := s1.SaveCursor(context.Background(), index.Cursor{LastLogID: "log-7"}); err != nil {
 		t.Fatalf("save cursor: %v", err)
@@ -62,7 +62,7 @@ func TestApply_UnknownLifecycleErrors(t *testing.T) {
 func TestExplore_UnsupportedFacetFieldErrors(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", withDisplay("Alpha", "alpha")))
 	_, err := s.Explore(context.Background(), index.ExploreQuery{
 		Facets: []index.FacetSpec{{Field: "not.a.real.field", Limit: 20}},
@@ -91,7 +91,7 @@ func TestApply_TombstoneWithoutIdentifierHasEmptyPublisher(t *testing.T) {
 	// (absent) identifier yields empty publisher — suppression keys on
 	// ansName, not publisher, so it still applies.
 	const ansName = "ans://v1.0.0.a.example.com"
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", withDisplay("Alpha", "alpha"), withCreated("2025-01-01T00:00:00Z")))
 	mustApply(t, s, tombstone("a.example.com", "a", ansName, "2025-02-01T00:00:00Z", project.LifecycleRevoked))
 	if got := search(t, s, index.SearchQuery{Text: "alpha", Limit: 10}); len(got.Results) != 0 {

@@ -13,7 +13,7 @@ import (
 // endpoints are not discoverable artifacts and produce no entry.
 const (
 	mediaTypeA2A = "application/a2a-agent-card+json"
-	mediaTypeMCP = "application/mcp-server+json"
+	mediaTypeMCP = "application/mcp-server-card+json"
 )
 
 // well-known metadata filenames per discoverable protocol. Used to build

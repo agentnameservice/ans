@@ -287,7 +287,7 @@ func TestFromEvent_ActiveFanOut(t *testing.T) {
 	gotTypes := []string{proj.Entries[0].Type, proj.Entries[1].Type}
 	// Sorted by (identifier, type, url); both share identifier, so type
 	// orders them: a2a-agent-card < mcp-server.
-	want := []string{"application/a2a-agent-card+json", "application/mcp-server+json"}
+	want := []string{"application/a2a-agent-card+json", "application/mcp-server-card+json"}
 	for i := range want {
 		if gotTypes[i] != want[i] {
 			t.Errorf("entry %d type: got %q, want %q", i, gotTypes[i], want[i])
