@@ -1530,6 +1530,7 @@ func TestReleaseClaim_LeakedClaimIsLoggedNotSwallowed(t *testing.T) {
 		sqlite.NewAgentStore(db),
 		didresolver.NewNoopResolver(),
 		sealer,
+		leiverifier.NewNoop(),
 		db,
 	).WithSigner(service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"}).
 		WithClock(clock.Now).WithLogger(zerolog.New(io.Discard))
