@@ -85,8 +85,8 @@ type VerifiedIdentity struct {
 	Value  string
 	Status IdentityStatus
 	// ProofMethod names the control proof that verified this
-	// identity ("did-web-sig" | "did-key-sig"). Empty until the
-	// first successful verify-control.
+	// identity ("did-web-sig" | "did-key-sig" | "lei-vlei-acdc").
+	// Empty until the first successful verify-control.
 	ProofMethod string
 	// PendingValue stages a same-kind replacement during rotation
 	// (§4.2): set by StageRotation, applied by CompleteVerification.

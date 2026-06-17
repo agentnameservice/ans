@@ -222,9 +222,9 @@ func (s *IdentityService) raID() string {
 }
 
 // verifierFor returns the kind's control verifier, or the precise
-// IDENTIFIER_KIND_UNSUPPORTED error when this deployment has none —
-// lei is recognized lexically but postponed: the route exists, the
-// kind does not until its verifier registers (identitykinds.go).
+// IDENTIFIER_KIND_UNSUPPORTED error when this deployment has none.
+// Kinds are recognized lexically but only enabled once their verifier
+// registers (identitykinds.go).
 func (s *IdentityService) verifierFor(kind domain.IdentifierKind) (controlVerifier, error) {
 	v, ok := s.verifiers[kind]
 	if !ok {
