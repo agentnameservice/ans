@@ -140,6 +140,38 @@ type DNS struct {
 	Server string `koanf:"server"`
 }
 
+// Identity holds Verified Identity (the "who") configuration — the
+// /v2/ans/identities surface (RA only).
+type Identity struct {
+	// Resolver selects the did:web document fetcher.
+	Resolver IdentityResolver `koanf:"resolver"`
+	// ChallengeTTL bounds the verify-control nonce (default 1h; 5m
+	// is the design floor for high-assurance deployments).
+	ChallengeTTL time.Duration `koanf:"challenge-ttl"`
+	// RegisterRateLimit is the per-owner register/rotate budget per
+	// minute (default 10) — each call can trigger an outbound
+	// did:web fetch before any proof exists.
+	RegisterRateLimit int `koanf:"register-rate-limit"`
+	// LinkRateLimit is the per-owner link/unlink budget per minute
+	// (default 60) — operational hardening on the link route
+	// (design §4.3).
+	LinkRateLimit int `koanf:"link-rate-limit"`
+	// SealTimeout bounds the inline TL seal call identity operations
+	// make before reporting success (seal-before-success, design
+	// §5.6.1). Default 5s.
+	SealTimeout time.Duration `koanf:"seal-timeout"`
+}
+
+// IdentityResolver selects the did:web resolver adapter. "noop"
+// performs no I/O and synthesizes the DID document from the keys
+// embedded in the submitted proofs (quickstart — signature
+// verification still genuinely runs, only the live-document binding
+// is waived; NOT for production); "web" performs the hardened HTTPS
+// fetch with WebPKI validation and SSRF dialer guards.
+type IdentityResolver struct {
+	Type string `koanf:"type"` // "noop" | "web"
+}
+
 // Keys holds key-manager configuration.
 type Keys struct {
 	Type string    `koanf:"type"` // "file"
@@ -226,6 +258,7 @@ type RAConfig struct {
 	Auth     Auth      `koanf:"auth"`
 	CA       CA        `koanf:"ca"`
 	DNS      DNS       `koanf:"dns"`
+	Identity Identity  `koanf:"identity"`
 	Keys     Keys      `koanf:"keys"`
 	Store    Store     `koanf:"store"`
 	TLClient TLClient  `koanf:"tl-client"`
@@ -373,6 +406,17 @@ func (c *RAConfig) Validate() error {
 	if c.CA.Server.IsACME() && c.DNS.Type == "noop" {
 		return errors.New(
 			"ca.server.type 'acme' requires dns.type 'lookup': a noop challenge gate would answer the provider's challenge before the artifact exists and invalidate every order")
+	}
+	switch c.Identity.Resolver.Type {
+	case "noop", "web":
+	default:
+		return fmt.Errorf("identity.resolver.type %q not supported (expected 'noop' or 'web')", c.Identity.Resolver.Type)
+	}
+	if c.Identity.ChallengeTTL < 0 {
+		return errors.New("identity.challenge-ttl must not be negative")
+	}
+	if c.Identity.RegisterRateLimit < 0 {
+		return errors.New("identity.register-rate-limit must not be negative")
 	}
 	if err := validateKeys(&c.Keys); err != nil {
 		return err

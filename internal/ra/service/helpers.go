@@ -41,7 +41,7 @@ func (s *RegistrationService) loadServerCert(
 // serialFromCertPEM parses the certificate and returns its serial as
 // lowercase hex — the same encoding issuers report at signing time.
 // Fallback for stored certificates persisted before serial tracking
-// landed (migration 007); rows written since carry the serial
+// landed (migration 009); rows written since carry the serial
 // directly.
 func serialFromCertPEM(pemStr string) (string, error) {
 	block, _ := pem.Decode([]byte(pemStr))

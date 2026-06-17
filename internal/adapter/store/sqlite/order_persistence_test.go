@@ -117,7 +117,7 @@ func TestAgentStore_ZeroOrderStaysZero(t *testing.T) {
 }
 
 // TestAgentStore_LegacyRowSynthesizesOrder: a row written before
-// migration 006 (bare acme_dns01_token, NULL order columns) reads as
+// migration 008 (bare acme_dns01_token, NULL order columns) reads as
 // a self-issued single-DNS-01 PENDING order, so in-flight
 // registrations keep working across the upgrade.
 func TestAgentStore_LegacyRowSynthesizesOrder(t *testing.T) {

@@ -18,11 +18,23 @@ import (
 // routes assume the ownership middleware has already run.
 type LifecycleHandler struct {
 	svc *service.RegistrationService
+	// identities, when set, decorates agent detail responses with the
+	// computed identities[] view (design §5.4) — the verified
+	// identities currently linked to the agent. Optional so the
+	// agent surface has zero hard dependency on the identity feature.
+	identities *service.IdentityService
 }
 
 // NewLifecycleHandler constructs a LifecycleHandler.
 func NewLifecycleHandler(svc *service.RegistrationService) *LifecycleHandler {
 	return &LifecycleHandler{svc: svc}
+}
+
+// WithIdentityViews attaches the identity service used to compute the
+// additive identities[] field on agent detail responses.
+func (h *LifecycleHandler) WithIdentityViews(identities *service.IdentityService) *LifecycleHandler {
+	h.identities = identities
+	return h
 }
 
 // ----- GET /v2/ans/agents -----
@@ -91,7 +103,16 @@ func (h *LifecycleHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, mapAgentDetails(res, r, h.svc.TLPublicBaseURL()))
+	details := mapAgentDetails(res, r, h.svc.TLPublicBaseURL())
+	if h.identities != nil {
+		linked, lerr := h.identities.LinkedIdentitiesForAgent(r.Context(), agentID)
+		if lerr != nil {
+			WriteError(w, lerr)
+			return
+		}
+		details.Identities = mapLinkedIdentities(linked)
+	}
+	WriteJSON(w, http.StatusOK, details)
 }
 
 // ----- GET /v2/ans/agents/{agentId}/certificates/identity -----

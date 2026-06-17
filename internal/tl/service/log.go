@@ -21,6 +21,7 @@ import (
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/tl/event"
+	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
 	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
 	"github.com/godaddy/ans/internal/tl/logstore"
 )
@@ -136,6 +137,16 @@ func (s *LogService) AppendV2(ctx context.Context, in AppendInput) (*AppendResul
 // shape to match the reference byte-for-byte.
 func (s *LogService) AppendV1(ctx context.Context, in AppendInput) (*AppendResult, error) {
 	return s.append(ctx, in, v1Codec{})
+}
+
+// AppendIdentity ingests an identity-family producer event
+// (IDENTITY_*). Wired to the `POST /v1/internal/identities/event`
+// route. Identity events ride the same producer-signature lane and
+// land in the same Merkle tree as agent events; the dedicated route
+// exists because the payload schema differs (keyed by identityId),
+// and the codec's closed enum is the cross-lane guard.
+func (s *LogService) AppendIdentity(ctx context.Context, in AppendInput) (*AppendResult, error) {
+	return s.append(ctx, in, identityCodec{})
 }
 
 // append is the schema-agnostic ingest pipeline. The only per-version
@@ -258,6 +269,9 @@ func setOuterSignature(env event.Signable, sig string) error {
 	case *eventv1.Envelope:
 		e.Signature = sig
 		return nil
+	case *identityevent.Envelope:
+		e.Signature = sig
+		return nil
 	default:
 		return fmt.Errorf("log: unknown envelope type %T", env)
 	}
@@ -276,6 +290,50 @@ func (s *LogService) EventsByAgent(ctx context.Context, agentID string, limit, o
 // EventByLeafIndex returns the event at a specific leaf.
 func (s *LogService) EventByLeafIndex(ctx context.Context, idx uint64) (*sqlitetl.EventRecord, error) {
 	return s.events.GetEventByLeafIndex(ctx, idx)
+}
+
+// LatestEventByIdentity returns the newest event on an identity's
+// stream (the read index over the single log keyed by identityId).
+func (s *LogService) LatestEventByIdentity(ctx context.Context, identityID string) (*sqlitetl.EventRecord, error) {
+	return s.events.GetLatestByIdentityID(ctx, identityID)
+}
+
+// EventsByIdentity returns paginated events for an identity.
+func (s *LogService) EventsByIdentity(ctx context.Context, identityID string, limit, offset int) ([]*sqlitetl.EventRecord, error) {
+	return s.events.GetByIdentityID(ctx, identityID, limit, offset)
+}
+
+// LatestProofByIdentity returns the newest proof event
+// (IDENTITY_VERIFIED / IDENTITY_UPDATED) for an identity — the event
+// carrying the current proven key set, which the badge join surfaces
+// as provenKeyThumbprints.
+func (s *LogService) LatestProofByIdentity(ctx context.Context, identityID string) (*sqlitetl.EventRecord, error) {
+	return s.events.GetLatestProofByIdentityID(ctx, identityID)
+}
+
+// IdentityRevoked reports whether the identity's stream contains an
+// IDENTITY_REVOKED event — the terminal read-time rule (§5.6.3):
+// once revoked, no later leaf changes the answer.
+func (s *LogService) IdentityRevoked(ctx context.Context, identityID string) (bool, error) {
+	return s.events.HasIdentityRevoked(ctx, identityID)
+}
+
+// LinkStatesByAgent returns the latest link/unlink fact per identity
+// that ever named this agent.
+func (s *LogService) LinkStatesByAgent(ctx context.Context, ansID string) ([]*sqlitetl.LinkState, error) {
+	return s.events.LinkStatesByAgent(ctx, ansID)
+}
+
+// LinkStatesByIdentity returns the latest link/unlink fact per agent
+// this identity ever named.
+func (s *LogService) LinkStatesByIdentity(ctx context.Context, identityID string) ([]*sqlitetl.LinkState, error) {
+	return s.events.LinkStatesByIdentity(ctx, identityID)
+}
+
+// LinkEventsByAgent returns the link/unlink events that ever named
+// this agent — the per-agent association history.
+func (s *LogService) LinkEventsByAgent(ctx context.Context, ansID string, limit, offset int) ([]*sqlitetl.EventRecord, error) {
+	return s.events.LinkEventsByAgent(ctx, ansID, limit, offset)
 }
 
 // LatestCheckpoint returns the most recent checkpoint Tessera has

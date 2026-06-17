@@ -1,4 +1,4 @@
--- 006_certificate_orders.sql
+-- 008_certificate_orders.sql
 -- Persist the certificate order — provider order ref, order state,
 -- and the full challenge set — on both agent registrations and
 -- server-cert renewals.

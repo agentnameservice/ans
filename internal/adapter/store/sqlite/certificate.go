@@ -16,7 +16,7 @@ type CertificateStore struct{ db *DB }
 func NewCertificateStore(db *DB) *CertificateStore { return &CertificateStore{db: db} }
 
 // certRow maps an issued_certificates row. serial_number /
-// certificate_ref are NULL on rows persisted before migration 007 —
+// certificate_ref are NULL on rows persisted before migration 009 —
 // readers surface them as empty strings and the revocation flow falls
 // back to parsing the PEM for the serial.
 type certRow struct {

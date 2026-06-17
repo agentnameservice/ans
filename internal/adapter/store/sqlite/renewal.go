@@ -19,7 +19,7 @@ func NewRenewalStore(db *DB) *RenewalStore { return &RenewalStore{db: db} }
 // renewalRow maps a single server_cert_renewals row for scanning.
 //
 // The `dns01_token` / `http01_token` columns are legacy: rows written
-// before migration 006 carried bare RA-generated tokens instead of a
+// before migration 008 carried bare RA-generated tokens instead of a
 // challenge set from the certificate order. Readers synthesize
 // self-issued challenges from them when the `challenges` JSON column
 // is NULL. New rows still fill the token columns (they are NOT NULL

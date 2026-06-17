@@ -103,7 +103,7 @@ func TestRevoke_RevokesIdentityCertsAtCA(t *testing.T) {
 }
 
 // TestRevoke_LegacyRowsDeriveSerialFromPEM pins the fallback: rows
-// persisted before serial tracking (migration 007) have no stored
+// persisted before serial tracking (migration 009) have no stored
 // serial, so CA revocation parses it out of the certificate PEM.
 func TestRevoke_LegacyRowsDeriveSerialFromPEM(t *testing.T) {
 	t.Parallel()

@@ -1,4 +1,4 @@
--- 007_certificate_identifiers.sql
+-- 009_certificate_identifiers.sql
 -- Persist the issued certificate's serial number and the issuing
 -- provider's opaque handle on issued_certificates.
 --

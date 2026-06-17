@@ -26,7 +26,7 @@ func NewAgentStore(db *DB) *AgentStore { return &AgentStore{db: db} }
 // agentRow maps a single agent_registrations row for scanning.
 //
 // The `acme_dns01_token` column is legacy: rows written before
-// migration 006 carried a single RA-generated DNS-01 token instead of
+// migration 008 carried a single RA-generated DNS-01 token instead of
 // a certificate order. Readers synthesize a self-issued order from it
 // when the order columns are NULL; writers only fill the order
 // columns. `acme_challenge_expires_at_ms` is shared between both
@@ -91,7 +91,7 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 
 // certOrderFromRow decodes the certificate order from its columns,
 // falling back to synthesizing a self-issued single-DNS-01 order from
-// the legacy token columns for rows written before migration 006.
+// the legacy token columns for rows written before migration 008.
 func certOrderFromRow(
 	ref, state, challengesJSON sql.NullString,
 	legacyDNS01 sql.NullString, legacyExpiresMs sql.NullInt64,
