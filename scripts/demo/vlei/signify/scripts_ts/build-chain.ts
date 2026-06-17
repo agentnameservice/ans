@@ -20,7 +20,7 @@
 // ============================================================================
 
 import "npm:libsodium-wrappers-sumo@0.7.15";
-import { randomPasscode, Saider } from "npm:signify-ts@^0.3.0-rc1";
+import { randomPasscode, Saider, SignifyClient } from "npm:signify-ts@0.3.0-rc1";
 import {
   initializeSignify,
   initializeAndConnectClient,
@@ -54,7 +54,7 @@ const WITNESS_OOBIS = [
   { url: "http://witness-demo:5644/oobi/BIKKuvBwpmDVA4Ds-EpL5bt9OqPzWPja2LigFYZN2YfX/controller?name=wes&tag=witness", alias: "wes" },
 ];
 
-async function resolveWitnesses(client, who: string) {
+async function resolveWitnesses(client: SignifyClient, who: string) {
   for (const w of WITNESS_OOBIS) {
     await resolveOOBI(client, w.url, `${who}-${w.alias}`);
   }
@@ -132,7 +132,7 @@ let approved = false;
 for (let attempt = 1; attempt <= 10 && !approved; attempt++) {
   try {
     const gleifApproval = await gleifClient.delegations().approve(gleifAlias, delegationSeal);
-    await gleifClient.operations().wait(await gleifApproval.op(), AbortSignal.timeout(30000));
+    await gleifClient.operations().wait(await gleifApproval.op(), { signal: AbortSignal.timeout(30000) });
     approved = true;
   } catch (_e) {
     prMessage(`Waiting for qvi's dip to reach gleif's delegation escrow (attempt ${attempt})...`);
@@ -143,8 +143,8 @@ if (!approved) throw new Error("gleif failed to approve qvi's delegated inceptio
 
 // 3. qvi pulls gleif's anchoring event, then its delegated inception completes.
 const qviQueryOp = await qviClient.keyStates().query(gleifPrefix);
-await qviClient.operations().wait(qviQueryOp, AbortSignal.timeout(60000));
-await qviClient.operations().wait(qviIcpOp, AbortSignal.timeout(60000));
+await qviClient.operations().wait(qviQueryOp, { signal: AbortSignal.timeout(60000) });
+await qviClient.operations().wait(qviIcpOp, { signal: AbortSignal.timeout(60000) });
 await qviClient.operations().delete(qviIcpOp.name);
 
 await addEndRoleForAID(qviClient, qviAlias, ROLE_AGENT);

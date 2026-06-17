@@ -8,7 +8,7 @@ import {
     Contact,
     Salter,
     Serder
-} from 'npm:signify-ts';
+} from 'npm:signify-ts@0.3.0-rc1';
 
 class Ansi {
   // Text Colors
@@ -109,7 +109,7 @@ export async function initializeAndConnectClient(
         console.log('  Client AID Prefix: ', clientState?.controller?.state?.i);
         console.log('  Agent AID Prefix:  ', clientState?.agent?.i);
 
-        return { client, clientState };
+        return { client, clientState: clientState as unknown as State };
     } catch (error) {
         console.error('Failed to initialize or connect client:', error);
         throw error;
@@ -122,13 +122,13 @@ export async function initializeAndConnectClient(
  * @param {SignifyClient} client - The initialized SignifyClient.
  * @param {string} alias - A human-readable alias for the AID.
  * @param {CreateIdentiferArgs} [identifierArgs=DEFAULT_IDENTIFIER_ARGS] - Configuration for the new AID.
- * @returns {Promise<{ aid: any; operation: Operation<T> }>} The created AID's inception event and the operation details.
+ * @returns {Promise<{ aid: any; operation: Operation }>} The created AID's inception event and the operation details.
  */
 export async function createNewAID(
     client: SignifyClient,
     alias: string,
     identifierArgs: CreateIdentiferArgs = DEFAULT_IDENTIFIER_ARGS
-): Promise<{ aid: any; operation: Operation<T> }> {
+): Promise<{ aid: any; operation: Operation }> {
     console.log(`Initiating AID inception for alias: ${alias}`);
     try {
         const inceptionResult = await client.identifiers().create(alias, identifierArgs as any);
@@ -136,13 +136,13 @@ export async function createNewAID(
 
         const completedOperation = await client
             .operations()
-            .wait(operationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(operationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         if (completedOperation.error) {
             throw new Error(`AID creation failed: ${JSON.stringify(completedOperation.error)}`);
         }
 
-        const newAidInceptionEvent = completedOperation.response;
+        const newAidInceptionEvent = completedOperation.response as any;
         console.log(`Successfully created AID with prefix: ${newAidInceptionEvent?.i}`);
 
         await client.operations().delete(completedOperation.name);
@@ -157,13 +157,13 @@ export async function createNewAID(
 /**
  * Assigns an end role for a given AID to the client's KERIA Agent AID.
  *
- * @returns {Promise<{ operation: Operation<T> }>} The operation details.
+ * @returns {Promise<{ operation: Operation }>} The operation details.
  */
 export async function addEndRoleForAID(
     client: SignifyClient,
     aidAlias: string,
     role: string
-): Promise<{ operation: Operation<T> }> {
+): Promise<{ operation: Operation }> {
     if (!client.agent?.pre) {
         throw new Error('Client agent prefix is not available.');
     }
@@ -179,7 +179,7 @@ export async function addEndRoleForAID(
 
         const completedOperation = await client
             .operations()
-            .wait(operationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(operationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         console.log(`Successfully assigned '${role}' role for AID alias ${aidAlias}.`);
 
@@ -221,19 +221,19 @@ export async function generateOOBI(
 /**
  * Resolves an OOBI URL
  *
- * @returns {Promise<{ operation: Operation<T>; contacts?: Contact[] }>} The operation details and the resolved contact.
+ * @returns {Promise<{ operation: Operation; contacts?: Contact[] }>} The operation details and the resolved contact.
  */
 export async function resolveOOBI(
     client: SignifyClient,
     oobiUrl: string,
     contactAlias?: string
-): Promise<{ operation: Operation<T>; contacts?: Contact[] }> { 
+): Promise<{ operation: Operation; contacts?: Contact[] }> {
     console.log(`Resolving OOBI URL: ${oobiUrl} with alias ${contactAlias}`);
     try {
         const resolveOperationDetails = await client.oobis().resolve(oobiUrl, contactAlias);
         const completedOperation = await client
             .operations()
-            .wait(resolveOperationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(resolveOperationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         if (completedOperation.error) {
             throw new Error(`OOBI resolution failed: ${JSON.stringify(completedOperation.error)}`);
@@ -250,7 +250,7 @@ export async function resolveOOBI(
 
         await client.operations().delete(completedOperation.name);
         
-        return { operation: completedOperation, contact: contact };
+        return { operation: completedOperation, contacts: contact };
     } catch (error) {
         console.error(`Failed to resolve OOBI URL "${oobiUrl}":`, error);
         throw error;
@@ -282,13 +282,13 @@ export async function createCredentialRegistry(
         const operationDetails = await createRegistryResult.op();
         const completedOperation = await client
             .operations()
-            .wait(operationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(operationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         if (completedOperation.error) {
             throw new Error(`Credential registry creation failed: ${JSON.stringify(completedOperation.error)}`);
         }
 
-        const registrySaid = completedOperation?.response?.anchor?.i;
+        const registrySaid = (completedOperation?.response as any)?.anchor?.i;
         console.log(`Successfully created credential registry: ${registrySaid}`);
         
         await client.operations().delete(completedOperation.name);
@@ -341,13 +341,13 @@ export async function issueCredential(
         const operationDetails = await issueResult.op;
         const completedOperation = await client
             .operations()
-            .wait(operationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(operationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         if (completedOperation.error) {
             throw new Error(`Credential issuance failed: ${JSON.stringify(completedOperation.error)}`);
         }
         console.log(completedOperation) // ************
-        const credentialSad = completedOperation.response; // The full Self-Addressing Data (SAD) of the credential
+        const credentialSad = completedOperation.response as any; // The full Self-Addressing Data (SAD) of the credential
         const credentialSaid = credentialSad?.ced?.d; // The SAID of the credential
         console.log(`Successfully issued credential with SAID: ${credentialSaid}`);
 
@@ -392,7 +392,7 @@ export async function ipexGrantCredential(
         
         const completedOperation = await client
             .operations()
-            .wait(submitGrantOperationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(submitGrantOperationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         if (completedOperation.error) {
             throw new Error(`IPEX grant submission failed: ${JSON.stringify(completedOperation.error)}`);
@@ -411,15 +411,11 @@ export async function ipexGrantCredential(
  * Waits for and retrieves a specific notification.
  * @param {SignifyClient} client - The SignifyClient instance.
  * @param {string} expectedRoute - The expected route in the notification attributes (e.g., IPEX_GRANT_ROUTE).
- * @param {number} [retries=DEFAULT_RETRIES] - Number of retry attempts.
- * @param {number} [delayMs=DEFAULT_DELAY_MS] - Delay between retries in milliseconds.
  * @returns {Promise<any>} The first matching unread notification.
  */
 export async function waitForAndGetNotification(
     client: SignifyClient,
-    expectedRoute: string,
-    retries: number = DEFAULT_RETRIES,
-    delayMs: number = DEFAULT_DELAY_MS
+    expectedRoute: string
 ): Promise<any> {
     console.log(`Waiting for notification with route "${expectedRoute}"...`);
     
@@ -431,7 +427,7 @@ export async function waitForAndGetNotification(
             // List notifications, filtering for unread IPEX_GRANT_ROUTE messages.
             let allNotifications = await client.notifications().list()
             notifications = allNotifications.notes.filter(
-                (n) => n.a.r === expectedRoute && n.r === false // n.r is 'read' status
+                (n: any) => n.a.r === expectedRoute && n.r === false // n.r is 'read' status
             );
             if(notifications.length === 0){ 
                 throw new Error("Notification not found yet."); // Throw error to trigger retry
@@ -482,7 +478,7 @@ export async function ipexAdmitGrant(
         
         const completedOperation = await client
             .operations()
-            .wait(admitOperationDetails, AbortSignal.timeout(DEFAULT_TIMEOUT_MS));
+            .wait(admitOperationDetails, { signal: AbortSignal.timeout(DEFAULT_TIMEOUT_MS) });
 
         if (completedOperation.error) {
             throw new Error(`IPEX admit submission failed: ${JSON.stringify(completedOperation.error)}`);

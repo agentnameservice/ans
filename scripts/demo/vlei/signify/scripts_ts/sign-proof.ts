@@ -34,9 +34,14 @@
 // rejected as SIGNATURE_INVALID.
 // ============================================================================
 
+// Pin libsodium-wrappers-sumo to 0.7.15 BEFORE signify-ts (must be the first
+// import). signify-ts's range otherwise resolves 0.7.16, whose ESM packaging
+// Deno cannot resolve (ERR_MODULE_NOT_FOUND on libsodium-sumo.mjs). Mirrors
+// build-chain.ts so both scripts and the compose pre-cache agree.
+import "npm:libsodium-wrappers-sumo@0.7.15";
 // Pinned to match build-chain.ts so both scripts (and the compose pre-cache)
 // resolve the same signify-ts the holder's KERIA agent was created with.
-import { ready, SignifyClient, Tier } from "npm:signify-ts@^0.3.0-rc1";
+import { ready, SignifyClient, Tier } from "npm:signify-ts@0.3.0-rc1";
 import { DEFAULT_ADMIN_URL, DEFAULT_BOOT_URL } from "./utils.ts";
 
 const ROLE_ALIAS = "role";
