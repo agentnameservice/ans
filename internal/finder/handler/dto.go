@@ -96,14 +96,18 @@ type facetSpecDTO struct {
 
 // searchResponse is the spec SearchResponse. Results embed the full
 // CatalogEntry plus score and source; referrals are config-supplied
-// registry entries; nextPageToken continues paging. staleSince is the
-// additive pre-release field signaling the index is serving past the
-// configured freshness bound (omitted when fresh).
+// registry entries; pageToken carries the next page's cursor. staleSince
+// is the additive pre-release field signaling the index is serving past
+// the configured freshness bound (omitted when fresh).
 type searchResponse struct {
-	Results       []searchResult  `json:"results"`
-	Referrals     []project.Entry `json:"referrals,omitempty"`
-	NextPageToken string          `json:"nextPageToken,omitempty"`
-	StaleSince    string          `json:"staleSince,omitempty"`
+	Results   []searchResult  `json:"results"`
+	Referrals []project.Entry `json:"referrals,omitempty"`
+	// NextPageToken serializes as the spec's `pageToken` — ARDS §7.2 names
+	// the response continuation field symmetrically with the request
+	// (ADR-0002), so the wire key is pageToken though the field denotes the
+	// NEXT page's cursor.
+	NextPageToken string `json:"pageToken,omitempty"`
+	StaleSince    string `json:"staleSince,omitempty"`
 }
 
 // searchResult is a CatalogEntry annotated with score + source (spec

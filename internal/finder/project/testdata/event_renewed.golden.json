@@ -10,7 +10,7 @@
       "entry": {
         "identifier": "urn:ai:weather.example.net:agents:Weather-Data-Node",
         "displayName": "Weather Data Node",
-        "type": "application/mcp-server+json",
+        "type": "application/mcp-server-card+json",
         "url": "https://weather.example.net/.well-known/mcp.json",
         "description": "Enterprise weather MCP server for live telemetry",
         "tags": [

@@ -23,7 +23,7 @@ func TestConformance_ResponseFieldsMatchSpec(t *testing.T) {
 	spec := loadSpec(t)
 
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 100, DefaultPageSize: 10}, noLimit(), nil)
-	seed(t, idx, activeEntry("a.example.com", "alpha", "application/mcp-server+json",
+	seed(t, idx, activeEntry("a.example.com", "alpha", "application/mcp-server-card+json",
 		"https://a.example.com/.well-known/mcp.json",
 		display("Alpha Agent", "does things"), caps("Do Thing"), tags("util")))
 

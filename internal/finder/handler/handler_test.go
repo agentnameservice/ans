@@ -106,7 +106,7 @@ func noLimit() *handler.RateLimiter { return handler.NewRateLimiter(0, 0) }
 func TestSearch_OK(t *testing.T) {
 	t.Parallel()
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 100, DefaultPageSize: 10}, noLimit(), nil)
-	seed(t, idx, activeEntry("a.example.com", "flight", "application/mcp-server+json",
+	seed(t, idx, activeEntry("a.example.com", "flight", "application/mcp-server-card+json",
 		"https://a.example.com/.well-known/mcp.json", display("Flight Booker", "books flights"),
 		caps("Book Flight"), tags("travel")))
 
@@ -132,7 +132,7 @@ func TestSearch_OK(t *testing.T) {
 		t.Errorf("source: %v", r0["source"])
 	}
 	// Entry shape: type + url present, trustManifest nested.
-	if r0["type"] != "application/mcp-server+json" {
+	if r0["type"] != "application/mcp-server-card+json" {
 		t.Errorf("type: %v", r0["type"])
 	}
 	if _, ok := r0["trustManifest"].(map[string]any); !ok {
@@ -147,7 +147,7 @@ func TestSearch_OK(t *testing.T) {
 func TestSearch_FilterBareScalar(t *testing.T) {
 	t.Parallel()
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 100, DefaultPageSize: 10}, noLimit(), nil)
-	seed(t, idx, activeEntry("a.example.com", "alpha", "application/mcp-server+json",
+	seed(t, idx, activeEntry("a.example.com", "alpha", "application/mcp-server-card+json",
 		"https://a.example.com/x", display("Alpha", "alpha"), tags("finance")))
 
 	// Bare scalar form: "tags":"finance" (not an array).
@@ -259,7 +259,7 @@ func TestSearch_PageSizeClampedToMax(t *testing.T) {
 	t.Parallel()
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 2, DefaultPageSize: 10}, noLimit(), nil)
 	for _, l := range []string{"a", "b", "c", "d"} {
-		seed(t, idx, activeEntry(l+".example.com", l, "application/mcp-server+json",
+		seed(t, idx, activeEntry(l+".example.com", l, "application/mcp-server-card+json",
 			"https://"+l+".example.com/x", display("Common", "common")))
 	}
 	// Ask for 100; MaxPageSize is 2, so only 2 come back and there's more.
@@ -271,8 +271,8 @@ func TestSearch_PageSizeClampedToMax(t *testing.T) {
 	if len(results) != 2 {
 		t.Errorf("pageSize not clamped to max: got %d, want 2", len(results))
 	}
-	if body["nextPageToken"] == nil {
-		t.Errorf("expected nextPageToken when more results exist")
+	if body["pageToken"] == nil {
+		t.Errorf("expected pageToken when more results exist")
 	}
 }
 
@@ -282,21 +282,21 @@ func TestSearch_PaginationViaToken(t *testing.T) {
 	t.Parallel()
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 100, DefaultPageSize: 2}, noLimit(), nil)
 	for _, l := range []string{"a", "b", "c"} {
-		seed(t, idx, activeEntry(l+".example.com", l, "application/mcp-server+json",
+		seed(t, idx, activeEntry(l+".example.com", l, "application/mcp-server-card+json",
 			"https://"+l+".example.com/x", display("Common", "common")))
 	}
 	_, page1 := post(t, srv, "/v1/search", `{"query":{"text":"common"},"pageSize":2}`)
-	tok, _ := page1["nextPageToken"].(string)
+	tok, _ := page1["pageToken"].(string)
 	if tok == "" {
-		t.Fatal("no nextPageToken on page 1")
+		t.Fatal("no pageToken on page 1")
 	}
 	_, page2 := post(t, srv, "/v1/search", `{"query":{"text":"common"},"pageSize":2,"pageToken":"`+tok+`"}`)
 	results := page2["results"].([]any)
 	if len(results) != 1 {
 		t.Fatalf("page 2 should have the last result: got %d", len(results))
 	}
-	if page2["nextPageToken"] != nil {
-		t.Errorf("page 2 should be the last page: %v", page2["nextPageToken"])
+	if page2["pageToken"] != nil {
+		t.Errorf("page 2 should be the last page: %v", page2["pageToken"])
 	}
 }
 
@@ -304,11 +304,11 @@ func TestSearch_PageTokenBoundToQuery(t *testing.T) {
 	t.Parallel()
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 100, DefaultPageSize: 1}, noLimit(), nil)
 	for _, l := range []string{"a", "b"} {
-		seed(t, idx, activeEntry(l+".example.com", l, "application/mcp-server+json",
+		seed(t, idx, activeEntry(l+".example.com", l, "application/mcp-server-card+json",
 			"https://"+l+".example.com/x", display("Common", "common")))
 	}
 	_, page1 := post(t, srv, "/v1/search", `{"query":{"text":"common"},"pageSize":1}`)
-	tok := page1["nextPageToken"].(string)
+	tok := page1["pageToken"].(string)
 	// Reuse the token against a DIFFERENT query text → rejected.
 	status, parsed := post(t, srv, "/v1/search", `{"query":{"text":"different"},"pageSize":1,"pageToken":"`+tok+`"}`)
 	if status != http.StatusBadRequest || parsed["code"] != "INVALID_ARGUMENT" {
@@ -332,7 +332,7 @@ func TestSearch_RateLimited429(t *testing.T) {
 	// Burst 1, rate 0.0001/s (effectively no refill during the test).
 	rl := handler.NewRateLimiter(0.0001, 1)
 	srv, idx := testServer(t, handler.Config{MaxPageSize: 100, DefaultPageSize: 10}, rl, nil)
-	seed(t, idx, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	seed(t, idx, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", display("Alpha", "alpha")))
 
 	if status, _ := post(t, srv, "/v1/search", `{"query":{"text":"alpha"}}`); status != http.StatusOK {
@@ -353,7 +353,7 @@ func TestExplore_OK(t *testing.T) {
 	t.Parallel()
 	srv, idx := testServer(t, handler.Config{}, noLimit(), nil)
 	seed(t, idx,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x"),
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x"),
 		activeEntry("b.example.com", "b", "application/a2a-agent-card+json", "https://b.example.com/y"),
 		activeEntry("c.example.com", "c", "application/a2a-agent-card+json", "https://c.example.com/z"),
 	)
@@ -525,7 +525,7 @@ func TestSearch_ReferralsMode(t *testing.T) {
 	srv, idx := testServer(t, handler.Config{
 		MaxPageSize: 100, DefaultPageSize: 10, Referrals: []project.Entry{referral},
 	}, noLimit(), nil)
-	seed(t, idx, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	seed(t, idx, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", display("Alpha", "alpha")))
 
 	_, body := post(t, srv, "/v1/search", `{"query":{"text":"alpha"},"federation":"referrals"}`)

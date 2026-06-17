@@ -120,7 +120,7 @@ func TestApply_Search_RoundTrip(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	mustApply(t, s,
-		activeEntry("a.example.com", "flight-booker", "application/mcp-server+json",
+		activeEntry("a.example.com", "flight-booker", "application/mcp-server-card+json",
 			"https://a.example.com/.well-known/mcp.json",
 			withDisplay("Flight Booker", "Books flights worldwide"),
 			withCaps("Search Flights", "Book Flight"),
@@ -151,7 +151,7 @@ func TestSearch_MatchesDescriptionAndCapabilitiesAndTags(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	mustApply(t, s,
-		activeEntry("a.example.com", "agent-a", "application/mcp-server+json", "https://a.example.com/.well-known/mcp.json",
+		activeEntry("a.example.com", "agent-a", "application/mcp-server-card+json", "https://a.example.com/.well-known/mcp.json",
 			withDisplay("Alpha", "handles invoices"), withCaps("Reconcile Ledger"), withTags("finance")),
 	)
 	cases := map[string]string{
@@ -174,7 +174,7 @@ func TestSearch_EmptyTextMatchesAll(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	mustApply(t, s,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x"),
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x"),
 		activeEntry("b.example.com", "b", "application/a2a-agent-card+json", "https://b.example.com/y"),
 	)
 	res := search(t, s, index.SearchQuery{Text: "", Limit: 10})
@@ -194,7 +194,7 @@ func TestSearch_FTSDoesNotErrorOnHostileInput(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	mustApply(t, s,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 			withDisplay("Weather Agent", "forecasts")),
 	)
 	// Raw FTS5 metacharacters must never reach the engine as syntax — a
@@ -224,9 +224,9 @@ func TestSearch_OperatorTokensNotInterpreted(t *testing.T) {
 	// of three tokens (weather, or, forecast) AND-ed — matching NEITHER,
 	// because no single row contains all three.
 	mustApply(t, s,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 			withDisplay("Weather", "weather only")),
-		activeEntry("b.example.com", "b", "application/mcp-server+json", "https://b.example.com/y",
+		activeEntry("b.example.com", "b", "application/mcp-server-card+json", "https://b.example.com/y",
 			withDisplay("Forecast", "forecast only")),
 	)
 	res := search(t, s, index.SearchQuery{Text: "weather OR forecast", Limit: 10})
@@ -243,9 +243,9 @@ func TestSearch_LiteralMultiTokenIsAND(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	mustApply(t, s,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 			withDisplay("Flight Booker", "books flights")),
-		activeEntry("b.example.com", "b", "application/mcp-server+json", "https://b.example.com/y",
+		activeEntry("b.example.com", "b", "application/mcp-server-card+json", "https://b.example.com/y",
 			withDisplay("Flight Tracker", "tracks status")),
 	)
 	// Both tokens must be present (implicit AND), so only the booker matches.
@@ -262,9 +262,9 @@ func TestSearch_ScoreNormalizationAndOrder(t *testing.T) {
 	s := newStore(t)
 	// One row mentions "booking" three times, another once → different bm25.
 	mustApply(t, s,
-		activeEntry("a.example.com", "strong", "application/mcp-server+json", "https://a.example.com/x",
+		activeEntry("a.example.com", "strong", "application/mcp-server-card+json", "https://a.example.com/x",
 			withDisplay("Booking Booking", "booking booking booking")),
-		activeEntry("b.example.com", "weak", "application/mcp-server+json", "https://b.example.com/y",
+		activeEntry("b.example.com", "weak", "application/mcp-server-card+json", "https://b.example.com/y",
 			withDisplay("Misc", "one booking here")),
 	)
 	res := search(t, s, index.SearchQuery{Text: "booking", Limit: 10})
@@ -288,9 +288,9 @@ func TestSearch_DeterministicTieBreak(t *testing.T) {
 	s := newStore(t)
 	// Same display text → identical bm25 → tie broken by identifier.
 	mustApply(t, s,
-		activeEntry("z.example.com", "zeta", "application/mcp-server+json", "https://z.example.com/x",
+		activeEntry("z.example.com", "zeta", "application/mcp-server-card+json", "https://z.example.com/x",
 			withDisplay("Same Name", "same")),
-		activeEntry("a.example.com", "alpha", "application/mcp-server+json", "https://a.example.com/y",
+		activeEntry("a.example.com", "alpha", "application/mcp-server-card+json", "https://a.example.com/y",
 			withDisplay("Same Name", "same")),
 	)
 	res := search(t, s, index.SearchQuery{Text: "same", Limit: 10})
@@ -310,7 +310,7 @@ func TestSearch_Pagination(t *testing.T) {
 	s := newStore(t)
 	for _, label := range []string{"a", "b", "c", "d", "e"} {
 		mustApply(t, s, activeEntry(label+".example.com", label,
-			"application/mcp-server+json", "https://"+label+".example.com/x",
+			"application/mcp-server-card+json", "https://"+label+".example.com/x",
 			withDisplay("Common", "common term")))
 	}
 	page1 := search(t, s, index.SearchQuery{Text: "common", Limit: 2, Offset: 0})
@@ -339,7 +339,7 @@ func TestSearch_Pagination(t *testing.T) {
 func seedFiltered(t *testing.T, s *sqlitefinder.Store) {
 	t.Helper()
 	mustApply(t, s,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 			withAnsName("ans://v1.0.0.a.example.com"),
 			withDisplay("Alpha", "x"), withTags("finance", "travel"), withCaps("Pay")),
 		activeEntry("b.example.com", "b", "application/a2a-agent-card+json", "https://b.example.com/y",
@@ -357,8 +357,8 @@ func TestSearch_Filters(t *testing.T) {
 		filter index.Filter
 		want   int
 	}{
-		"by type":             {index.Filter{"type": {"application/mcp-server+json"}}, 1},
-		"by type OR":          {index.Filter{"type": {"application/mcp-server+json", "application/a2a-agent-card+json"}}, 3},
+		"by type":             {index.Filter{"type": {"application/mcp-server-card+json"}}, 1},
+		"by type OR":          {index.Filter{"type": {"application/mcp-server-card+json", "application/a2a-agent-card+json"}}, 3},
 		"by tag":              {index.Filter{"tags": {"finance"}}, 2},
 		"by tag OR":           {index.Filter{"tags": {"finance", "travel"}}, 3},
 		"by capability":       {index.Filter{"capabilities": {"Pay"}}, 2},
@@ -398,11 +398,11 @@ func TestSearch_ExpiredExcluded(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	mustApply(t, s,
-		activeEntry("live.example.com", "live", "application/mcp-server+json", "https://live.example.com/x",
+		activeEntry("live.example.com", "live", "application/mcp-server-card+json", "https://live.example.com/x",
 			withDisplay("Live", "live"), withExpires("2099-01-01T00:00:00Z")),
-		activeEntry("dead.example.com", "dead", "application/mcp-server+json", "https://dead.example.com/x",
+		activeEntry("dead.example.com", "dead", "application/mcp-server-card+json", "https://dead.example.com/x",
 			withDisplay("Dead", "dead"), withExpires("2020-01-01T00:00:00Z")),
-		activeEntry("never.example.com", "never", "application/mcp-server+json", "https://never.example.com/x",
+		activeEntry("never.example.com", "never", "application/mcp-server-card+json", "https://never.example.com/x",
 			withDisplay("Never", "never")), // no expiry
 	)
 	now := time.Date(2025, 6, 1, 0, 0, 0, 0, time.UTC)
@@ -425,7 +425,7 @@ func TestSearch_ExpiredExcluded(t *testing.T) {
 func TestApply_Idempotent(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	e := activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	e := activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Alpha", "alpha"), withTags("t1"), withCaps("c1"))
 	mustApply(t, s, e)
 	mustApply(t, s, e) // replay
@@ -443,10 +443,10 @@ func TestApply_Idempotent(t *testing.T) {
 func TestApply_UpsertReplacesContent(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Old Name", "old desc"), withTags("oldtag")))
 	// Re-register same key with new content.
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("New Name", "new desc"), withTags("newtag")))
 
 	if got := search(t, s, index.SearchQuery{Text: "Old", Limit: 10}); len(got.Results) != 0 {
@@ -469,7 +469,7 @@ func TestApply_FanOutSharesAnsName(t *testing.T) {
 	// One registration → two endpoints (a2a + mcp), same ansName.
 	const ansName = "ans://v1.0.0.a.example.com"
 	a2a := activeEntry("a.example.com", "a", "application/a2a-agent-card+json", "https://a.example.com/a2a", withDisplay("Agent", "x"))
-	mcp := activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/mcp", withDisplay("Agent", "x"))
+	mcp := activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/mcp", withDisplay("Agent", "x"))
 	mustApply(t, s, a2a, mcp)
 	if got := search(t, s, index.SearchQuery{Text: "Agent", Limit: 10}); len(got.Results) != 2 {
 		t.Fatalf("fan-out should yield 2 rows, got %d", len(got.Results))
@@ -495,9 +495,9 @@ func TestApply_DuplicateTypeURLInOneEventDoesNotWedge(t *testing.T) {
 	// Two entries, same ansName/logId (one event), same (type, url) — what
 	// two metaDataUrl-less MCP endpoints project to. The second carries
 	// distinct content so we can prove last-write-wins.
-	e1 := activeEntry("a.example.com", "a", "application/mcp-server+json", url,
+	e1 := activeEntry("a.example.com", "a", "application/mcp-server-card+json", url,
 		withDisplay("First", "first desc"), withCaps("Cap One"))
-	e2 := activeEntry("a.example.com", "a", "application/mcp-server+json", url,
+	e2 := activeEntry("a.example.com", "a", "application/mcp-server-card+json", url,
 		withDisplay("Second", "second desc"), withCaps("Cap Two"))
 
 	if _, err := s.Apply(context.Background(), []project.ProjectedEntry{e1, e2}); err != nil {
@@ -531,9 +531,9 @@ func TestApply_RenewReplacesFullRowSet(t *testing.T) {
 	const host = "a.example.com"
 
 	// v1: two MCP endpoints — one explicit URL, one well-known fallback URL.
-	regA := activeEntry(host, "a", "application/mcp-server+json",
+	regA := activeEntry(host, "a", "application/mcp-server-card+json",
 		"https://a.example.com/.well-known/mcp.json", withDisplay("Agent", "v1 desc"))
-	regB := activeEntry(host, "a", "application/mcp-server+json",
+	regB := activeEntry(host, "a", "application/mcp-server-card+json",
 		"https://a.example.com/mcp-explicit.json", withDisplay("Agent", "v1 desc"))
 	mustApply(t, s, regA, regB)
 	if got := search(t, s, index.SearchQuery{Text: "Agent", Limit: 10}); len(got.Results) != 2 {
@@ -543,10 +543,10 @@ func TestApply_RenewReplacesFullRowSet(t *testing.T) {
 	// Renewal (same ansName, newer createdAt): keeps one URL, CHANGES the
 	// other, and updates the description. The complete new set is exactly
 	// these two rows; the old "/mcp-explicit.json" row must be gone.
-	renA := activeEntry(host, "a", "application/mcp-server+json",
+	renA := activeEntry(host, "a", "application/mcp-server-card+json",
 		"https://a.example.com/.well-known/mcp.json",
 		withDisplay("Agent", "v2 desc"), withCreated("2025-06-01T00:00:00Z"))
-	renC := activeEntry(host, "a", "application/mcp-server+json",
+	renC := activeEntry(host, "a", "application/mcp-server-card+json",
 		"https://a.example.com/mcp-renamed.json",
 		withDisplay("Agent", "v2 desc"), withCreated("2025-06-01T00:00:00Z"))
 	mustApply(t, s, renA, renC)
@@ -584,7 +584,7 @@ func TestApply_ReplayDoesNotUnRevoke(t *testing.T) {
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
 
-	register := activeEntry("a.example.com", "a", "application/mcp-server+json",
+	register := activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x",
 		withAnsName(ansName), withDisplay("Reborn", "should stay buried"),
 		withCreated("2025-01-01T00:00:00Z"))
@@ -611,7 +611,7 @@ func TestApply_TombstoneNoOpReported(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", withAnsName(ansName),
 		withDisplay("Alpha", "alpha"), withCreated("2025-03-01T00:00:00Z")))
 
@@ -640,7 +640,7 @@ func TestApply_TombstoneEffectiveNotReported(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json",
 		"https://a.example.com/x", withAnsName(ansName),
 		withDisplay("Alpha", "alpha"), withCreated("2025-01-01T00:00:00Z")))
 	report, err := s.Apply(context.Background(), []project.ProjectedEntry{
@@ -660,7 +660,7 @@ func TestApply_TombstoneSuppresses(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Alpha", "alpha"), withTags("t1"), withCreated("2025-01-01T00:00:00Z")))
 	mustApply(t, s, tombstone("a.example.com", "a", ansName, "2025-02-01T00:00:00Z", project.LifecycleRevoked))
 
@@ -680,7 +680,7 @@ func TestApply_StaleTombstoneDoesNotSuppressNewer(t *testing.T) {
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
 	// A registration created 2025-03 ...
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Fresh", "fresh"), withCreated("2025-03-01T00:00:00Z")))
 	// ... must NOT be suppressed by an out-of-order revoke dated 2025-01.
 	mustApply(t, s, tombstone("a.example.com", "a", ansName, "2025-01-01T00:00:00Z", project.LifecycleRevoked))
@@ -693,7 +693,7 @@ func TestApply_DeprecatedSuppresses(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Alpha", "alpha"), withCreated("2025-01-01T00:00:00Z")))
 	mustApply(t, s, tombstone("a.example.com", "a", ansName, "2025-02-01T00:00:00Z", project.LifecycleDeprecated))
 	if got := search(t, s, index.SearchQuery{Text: "alpha", Limit: 10}); len(got.Results) != 0 {
@@ -705,11 +705,11 @@ func TestApply_ReregisterAfterRevokeRevives(t *testing.T) {
 	t.Parallel()
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.a.example.com"
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Alpha", "alpha"), withCreated("2025-01-01T00:00:00Z")))
 	mustApply(t, s, tombstone("a.example.com", "a", ansName, "2025-02-01T00:00:00Z", project.LifecycleRevoked))
 	// A fresh registration (e.g. renew) revives the agent.
-	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/x",
+	mustApply(t, s, activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/x",
 		withDisplay("Reborn", "reborn"), withCreated("2025-03-01T00:00:00Z")))
 	if got := search(t, s, index.SearchQuery{Text: "Reborn", Limit: 10}); len(got.Results) != 1 {
 		t.Fatalf("re-registration after revoke should revive: %d", len(got.Results))
@@ -785,9 +785,9 @@ func TestExplore_MinCountAndLimitAndOther(t *testing.T) {
 	s := newStore(t)
 	// types: mcp x3, a2a x2, ai-registry x1
 	mustApply(t, s,
-		activeEntry("a.example.com", "a", "application/mcp-server+json", "https://a.example.com/1"),
-		activeEntry("b.example.com", "b", "application/mcp-server+json", "https://b.example.com/1"),
-		activeEntry("c.example.com", "c", "application/mcp-server+json", "https://c.example.com/1"),
+		activeEntry("a.example.com", "a", "application/mcp-server-card+json", "https://a.example.com/1"),
+		activeEntry("b.example.com", "b", "application/mcp-server-card+json", "https://b.example.com/1"),
+		activeEntry("c.example.com", "c", "application/mcp-server-card+json", "https://c.example.com/1"),
 		activeEntry("d.example.com", "d", "application/a2a-agent-card+json", "https://d.example.com/1"),
 		activeEntry("e.example.com", "e", "application/a2a-agent-card+json", "https://e.example.com/1"),
 		activeEntry("f.example.com", "f", "application/ai-registry+json", "https://f.example.com/1"),
@@ -848,8 +848,8 @@ func TestExplore_ExcludesExpiredAndRevoked(t *testing.T) {
 	s := newStore(t)
 	const ansName = "ans://v1.0.0.gone.example.com"
 	mustApply(t, s,
-		activeEntry("live.example.com", "live", "application/mcp-server+json", "https://live.example.com/1"),
-		activeEntry("gone.example.com", "gone", "application/mcp-server+json", "https://gone.example.com/1",
+		activeEntry("live.example.com", "live", "application/mcp-server-card+json", "https://live.example.com/1"),
+		activeEntry("gone.example.com", "gone", "application/mcp-server-card+json", "https://gone.example.com/1",
 			withCreated("2025-01-01T00:00:00Z")),
 	)
 	mustApply(t, s, tombstone("gone.example.com", "gone", ansName, "2025-02-01T00:00:00Z", project.LifecycleRevoked))
