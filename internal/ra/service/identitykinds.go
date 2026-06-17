@@ -91,13 +91,29 @@ type RegisterOptions struct {
 // method. RegisterPresentation runs inside the shared challenge path,
 // so an idempotent re-add (and a rotation) re-presents and refreshes
 // the verifier's authorization window for free.
+//
+// RACE INVARIANT: RegisterPresentation runs BEFORE challenge() captures
+// the conditional-persist snapshot (identity.go:360), and is itself a
+// slow network call. The snapshot reads the in-memory load-time Status
+// and Challenge.Nonce, and the store's StageChallenge refuses the write
+// unless the row still matches them — so the conditional persist only
+// brackets the presentation fetch (a concurrent verify/revoke during it
+// → 0 rows → conflict, never a clobber) AS LONG AS RegisterPresentation
+// does NOT mutate Status or Challenge.Nonce. It may pin kind-specific
+// state (lei: PendingSubjectAID) and bump UpdatedAt; it must touch neither
+// guard column. Mutating Status here would make the snapshot reflect a
+// post-presentation value, opening exactly the status-regression race
+// (VERIFIED → PENDING_CONTROL) the conditional persist exists to close.
+// See docs/identity-challenge-race.md.
 type presentationRegistrar interface {
 	// RegisterPresentation submits the kind's register-time credential
 	// material to its verifier, pins the derived subject identifier on
 	// the aggregate, reconciles it against the requested value, and
 	// returns the advisory presentation status ("AUTHORIZED" |
-	// "PENDING") for the 202 body.
-	RegisterPresentation(ctx context.Context, identity *domain.VerifiedIdentity, opts RegisterOptions, now time.Time) (string, error)
+	// "PENDING") for the 202 body. It MUST NOT mutate the aggregate's
+	// Status or Challenge.Nonce (the conditional-persist guard columns —
+	// see the RACE INVARIANT on the interface doc).
+	RegisterPresentation(ctx context.Context, identity *domain.VerifiedIdentity, opts RegisterOptions, now time.Time) (port.PresentationStatus, error)
 }
 
 // controlVerifier is the per-kind control-proof gate — the design's

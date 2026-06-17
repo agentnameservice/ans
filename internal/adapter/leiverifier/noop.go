@@ -69,7 +69,7 @@ func (n *Noop) Present(_ context.Context, cesr string) (port.PresentationResult,
 	return port.PresentationResult{
 		SubjectAID: leaf.A.I,
 		LEI:        leaf.A.LEI,
-		Status:     "AUTHORIZED",
+		Status:     port.StatusAuthorized,
 	}, nil
 }
 

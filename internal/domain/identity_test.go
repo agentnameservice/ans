@@ -309,28 +309,40 @@ func TestInferIdentifierKind_DIDWebSegmentRejections(t *testing.T) {
 	}
 }
 
-func TestSetSubjectAID(t *testing.T) {
+func TestStageSubjectAID(t *testing.T) {
 	v := newPendingIdentity(t, "5493001KJTIIGC8Y1R17")
 
 	// Empty AID is rejected and mutates nothing.
-	err := v.SetSubjectAID("", idNow)
+	err := v.StageSubjectAID("", idNow)
 	var domainErr *Error
 	if !errors.As(err, &domainErr) || domainErr.Code != "LEI_PRESENTATION_INVALID" {
 		t.Fatalf("want LEI_PRESENTATION_INVALID, got %v", err)
 	}
-	if v.SubjectAID != "" {
-		t.Fatalf("subject AID should remain unset, got %q", v.SubjectAID)
+	if v.PendingSubjectAID != "" || v.EffectiveSubjectAID() != "" {
+		t.Fatalf("subject AID should remain unset, got %q", v.EffectiveSubjectAID())
 	}
 
-	// A non-empty AID pins the field and stamps UpdatedAt.
+	// A non-empty AID stages into PendingSubjectAID (not the proven
+	// field) and stamps UpdatedAt; EffectiveSubjectAID returns it.
 	later := idNow.Add(time.Minute)
-	if err := v.SetSubjectAID("EAID123", later); err != nil {
-		t.Fatalf("SetSubjectAID: %v", err)
+	if err := v.StageSubjectAID("EAID123", later); err != nil {
+		t.Fatalf("StageSubjectAID: %v", err)
 	}
-	if v.SubjectAID != "EAID123" {
-		t.Fatalf("subject AID = %q, want EAID123", v.SubjectAID)
+	if v.SubjectAID != "" {
+		t.Fatalf("proven subject AID should stay empty until verify, got %q", v.SubjectAID)
+	}
+	if v.EffectiveSubjectAID() != "EAID123" {
+		t.Fatalf("effective subject AID = %q, want EAID123", v.EffectiveSubjectAID())
 	}
 	if !v.UpdatedAt.Equal(later.UTC()) {
 		t.Fatalf("UpdatedAt = %v, want %v", v.UpdatedAt, later.UTC())
+	}
+
+	// CompleteVerification promotes the staged AID to the proven field.
+	if _, err := v.CompleteVerification(later); err != nil {
+		t.Fatalf("CompleteVerification: %v", err)
+	}
+	if v.SubjectAID != "EAID123" || v.PendingSubjectAID != "" {
+		t.Fatalf("after verify: SubjectAID=%q PendingSubjectAID=%q, want EAID123/empty", v.SubjectAID, v.PendingSubjectAID)
 	}
 }

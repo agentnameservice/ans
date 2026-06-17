@@ -129,6 +129,78 @@ func sha256Sum(s string) []byte {
 	return sum[:]
 }
 
+// TestIdentityRotate_LEI drives the lei rotation path: a VERIFIED lei
+// identity re-presents through Rotate, which re-runs RegisterPresentation
+// and stages the verifier-derived subject AID. The H1 invariant is that
+// the PUT stages the new AID into PendingSubjectAID and seals nothing —
+// the proven SubjectAID stands until verify-control completes — so an
+// abandoned rotation can never swap the proven signer out from under the
+// identity. verify-control then promotes the staged AID and seals
+// IDENTITY_UPDATED over it.
+func TestIdentityRotate_LEI(t *testing.T) {
+	t.Parallel()
+	fake := authorizedFakeLEI()
+	fx := newIdentityFixtureWithLEI(t, nil, fake)
+	ctx := context.Background()
+
+	// Register + verify → VERIFIED, proven subject AID EHolderAID.
+	res, err := fx.svc.Register(ctx, fx.providerID, testLEI,
+		service.RegisterOptions{VLEIPresentation: "chain-v1"})
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID,
+		service.ProofSubmission{CESRSignature: "0Bsig-v1"}); err != nil {
+		t.Fatalf("verify-control: %v", err)
+	}
+	fx.drainSealed(t)
+
+	// The rotation re-presents the SAME LEI, but the verifier now derives
+	// a new holder AID (a re-presented credential).
+	fake.present = port.PresentationResult{SubjectAID: "ERotatedAID", LEI: testLEI, Status: "AUTHORIZED"}
+	rot, err := fx.svc.Rotate(ctx, fx.providerID, res.Identity.IdentityID, testLEI,
+		service.RegisterOptions{VLEIPresentation: "chain-v2"})
+	if err != nil {
+		t.Fatalf("rotate: %v", err)
+	}
+
+	// H1: the proven AID stands, the new AID is only staged, the
+	// challenge is over the staged AID, and the PUT seals nothing.
+	if rot.Identity.Status != domain.IdentityVerified {
+		t.Fatalf("status after PUT = %s, want VERIFIED", rot.Identity.Status)
+	}
+	if rot.Identity.SubjectAID != "EHolderAID" || rot.Identity.PendingSubjectAID != "ERotatedAID" {
+		t.Fatalf("staged AID state: proven=%q pending=%q", rot.Identity.SubjectAID, rot.Identity.PendingSubjectAID)
+	}
+	if len(rot.Challenges) != 1 || rot.Challenges[0].Kid != "ERotatedAID" {
+		t.Fatalf("challenge must be over the staged AID: %+v", rot.Challenges)
+	}
+	if rows := fx.drainSealed(t); len(rows) != 0 {
+		t.Fatalf("PUT must not seal, got %d rows", len(rows))
+	}
+
+	// verify-control over the rotation promotes the staged AID and seals
+	// IDENTITY_UPDATED — value unchanged (same LEI), so no previousValue.
+	rotated, err := fx.svc.VerifyControl(ctx, fx.providerID, res.Identity.IdentityID,
+		service.ProofSubmission{CESRSignature: "0Bsig-v2"})
+	if err != nil {
+		t.Fatalf("rotation verify-control: %v", err)
+	}
+	if rotated.SubjectAID != "ERotatedAID" || rotated.PendingSubjectAID != "" {
+		t.Fatalf("promoted AID state: proven=%q pending=%q", rotated.SubjectAID, rotated.PendingSubjectAID)
+	}
+
+	rows := fx.drainSealed(t)
+	if len(rows) != 1 {
+		t.Fatalf("rotation rows: %d", len(rows))
+	}
+	inner := fx.decodeSealed(t, rows[0])
+	if inner.EventType != identityevent.TypeIdentityUpdated || len(inner.Keys) != 1 ||
+		inner.Keys[0].ID() != "ERotatedAID" {
+		t.Fatalf("IDENTITY_UPDATED over rotated AID: %+v", inner)
+	}
+}
+
 func TestIdentityRegister_LEIFailures(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

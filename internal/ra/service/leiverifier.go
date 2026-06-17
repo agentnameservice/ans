@@ -46,7 +46,7 @@ func (lv *leiVerifier) RegisterPresentation(
 	identity *domain.VerifiedIdentity,
 	opts RegisterOptions,
 	now time.Time,
-) (string, error) {
+) (port.PresentationStatus, error) {
 	if opts.VLEIPresentation == "" {
 		return "", domain.NewValidationError("IDENTIFIER_PRESENTATION_REQUIRED",
 			"lei registration requires vleiPresentation.cesr")
@@ -67,7 +67,7 @@ func (lv *leiVerifier) RegisterPresentation(
 		return "", domain.NewValidationError("LEI_MISMATCH",
 			fmt.Sprintf("presented credential authorizes LEI %q, not %q", res.LEI, identity.EffectiveValue()))
 	}
-	if err := identity.SetSubjectAID(res.SubjectAID, now); err != nil {
+	if err := identity.StageSubjectAID(res.SubjectAID, now); err != nil {
 		return "", err
 	}
 	return res.Status, nil
@@ -82,11 +82,12 @@ func (lv *leiVerifier) Challenges(
 	identity *domain.VerifiedIdentity,
 	signingInput string,
 ) ([]ProofChallenge, error) {
-	if identity.SubjectAID == "" {
+	aid := identity.EffectiveSubjectAID()
+	if aid == "" {
 		return nil, domain.NewInternalError("LEI_SUBJECT_AID_MISSING",
 			"subject AID was not pinned before challenge", nil)
 	}
-	return []ProofChallenge{{Kid: identity.SubjectAID, SigningInput: signingInput}}, nil
+	return []ProofChallenge{{Kid: aid, SigningInput: signingInput}}, nil
 }
 
 // VerifyProofs runs the lei control proof: a LIVE authorization
@@ -103,7 +104,7 @@ func (lv *leiVerifier) VerifyProofs(
 	if sub.CESRSignature == "" {
 		return nil, domain.NewValidationError("IDENTIFIER_PROOF_INVALID", "cesrSignature is required")
 	}
-	aid := identity.SubjectAID
+	aid := identity.EffectiveSubjectAID()
 	if aid == "" {
 		return nil, domain.NewInvalidStateError("LEI_SUBJECT_AID_MISSING",
 			"no subject AID is pinned; re-register the identifier with its presentation")

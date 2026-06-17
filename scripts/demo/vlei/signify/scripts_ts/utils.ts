@@ -95,7 +95,7 @@ export async function initializeAndConnectClient(
     tier: Tier = Tier.low
 ): Promise<{ client: SignifyClient;clientState: State }> {
 
-    console.log(`Using Passcode (bran): ${bran}`);
+    console.log('Connecting client with provided passcode (bran) [redacted].');
 
     const client = new SignifyClient(adminUrl, bran, tier, bootUrl);
 

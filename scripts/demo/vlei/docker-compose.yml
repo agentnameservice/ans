@@ -54,9 +54,9 @@ services:
       - witness
       - demo
     ports:
-      - "5642:5642"
-      - "5643:5643"
-      - "5644:5644"
+      - "127.0.0.1:5642:5642"
+      - "127.0.0.1:5643:5643"
+      - "127.0.0.1:5644:5644"
     # weboftrust/keri ships no curl; use the bundled python3 to probe the
     # witness HTTP endpoint (127.0.0.1 to avoid IPv6-localhost refusal).
     healthcheck:
@@ -77,7 +77,7 @@ services:
     # OOBI resolution — gleif/vlei:1.0.0 ships schemas under /vLEI/schema, and
     # the verifier's durls fail to parse an empty body if they're not served.
     ports:
-      - "7723:7723"
+      - "127.0.0.1:7723:7723"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:7723/health"]
       interval: 5s
@@ -114,9 +114,9 @@ services:
       - --loglevel
       - DEBUG
     ports:
-      - "3901:3901"
-      - "3902:3902"
-      - "3903:3903"
+      - "127.0.0.1:3901:3901"
+      - "127.0.0.1:3902:3902"
+      - "127.0.0.1:3903:3903"
     depends_on:
       witnesses:
         condition: service_healthy
@@ -145,7 +145,7 @@ services:
       - VERIFIER_CONFIG_FILE=verifier-config-docker-local.json
       - PYTHONUNBUFFERED=1
     ports:
-      - "7676:7676"
+      - "127.0.0.1:7676:7676"
     depends_on:
       witnesses:
         condition: service_healthy

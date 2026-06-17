@@ -26,6 +26,7 @@ type identityRow struct {
 	ProofMethod           string         `db:"proof_method"`
 	PendingValue          string         `db:"pending_value"`
 	SubjectAID            sql.NullString `db:"subject_aid"`
+	PendingSubjectAID     sql.NullString `db:"pending_subject_aid"`
 	ChallengeNonce        sql.NullString `db:"challenge_nonce"`
 	ChallengeExpiresAtMs  sql.NullInt64  `db:"challenge_expires_at_ms"`
 	ChallengeConsumedAtMs sql.NullInt64  `db:"challenge_consumed_at_ms"`
@@ -35,21 +36,22 @@ type identityRow struct {
 }
 
 const identityCols = `identity_id, provider_id, kind, value, status, proof_method,
-       pending_value, subject_aid, challenge_nonce, challenge_expires_at_ms,
+       pending_value, subject_aid, pending_subject_aid, challenge_nonce, challenge_expires_at_ms,
        challenge_consumed_at_ms, verified_at_ms, created_at_ms, updated_at_ms`
 
 func (r identityRow) toDomain() *domain.VerifiedIdentity {
 	v := &domain.VerifiedIdentity{
-		IdentityID:   r.IdentityID,
-		ProviderID:   r.ProviderID,
-		Kind:         domain.IdentifierKind(r.Kind),
-		Value:        r.Value,
-		Status:       domain.IdentityStatus(r.Status),
-		ProofMethod:  r.ProofMethod,
-		PendingValue: r.PendingValue,
-		SubjectAID:   r.SubjectAID.String,
-		CreatedAt:    msToTime(r.CreatedAtMs),
-		UpdatedAt:    msToTime(r.UpdatedAtMs),
+		IdentityID:        r.IdentityID,
+		ProviderID:        r.ProviderID,
+		Kind:              domain.IdentifierKind(r.Kind),
+		Value:             r.Value,
+		Status:            domain.IdentityStatus(r.Status),
+		ProofMethod:       r.ProofMethod,
+		PendingValue:      r.PendingValue,
+		SubjectAID:        r.SubjectAID.String,
+		PendingSubjectAID: r.PendingSubjectAID.String,
+		CreatedAt:         msToTime(r.CreatedAtMs),
+		UpdatedAt:         msToTime(r.UpdatedAtMs),
 	}
 	if r.VerifiedAtMs.Valid {
 		v.VerifiedAt = msToTime(r.VerifiedAtMs.Int64)
@@ -87,19 +89,23 @@ func (s *IdentityStore) Save(ctx context.Context, v *domain.VerifiedIdentity) er
 	if !v.VerifiedAt.IsZero() {
 		verifiedAt = sql.NullInt64{Int64: v.VerifiedAt.UnixMilli(), Valid: true}
 	}
-	var subjectAID sql.NullString
+	var subjectAID, pendingSubjectAID sql.NullString
 	if v.SubjectAID != "" {
 		subjectAID = sql.NullString{String: v.SubjectAID, Valid: true}
 	}
+	if v.PendingSubjectAID != "" {
+		pendingSubjectAID = sql.NullString{String: v.PendingSubjectAID, Valid: true}
+	}
 	const q = `
         INSERT INTO identities (` + identityCols + `)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(identity_id) DO UPDATE SET
             value                    = excluded.value,
             status                   = excluded.status,
             proof_method             = excluded.proof_method,
             pending_value            = excluded.pending_value,
             subject_aid              = excluded.subject_aid,
+            pending_subject_aid      = excluded.pending_subject_aid,
             challenge_nonce          = excluded.challenge_nonce,
             challenge_expires_at_ms  = excluded.challenge_expires_at_ms,
             challenge_consumed_at_ms = excluded.challenge_consumed_at_ms,
@@ -113,7 +119,7 @@ func (s *IdentityStore) Save(ctx context.Context, v *domain.VerifiedIdentity) er
             updated_at_ms            = excluded.updated_at_ms`
 	_, err := s.db.extx(ctx).ExecContext(ctx, q,
 		v.IdentityID, v.ProviderID, string(v.Kind), v.Value, string(v.Status),
-		v.ProofMethod, v.PendingValue, subjectAID,
+		v.ProofMethod, v.PendingValue, subjectAID, pendingSubjectAID,
 		nonce, expiresAt, consumedAt, verifiedAt,
 		v.CreatedAt.UnixMilli(), v.UpdatedAt.UnixMilli(),
 	)
@@ -316,9 +322,12 @@ func (s *IdentityStore) StageChallenge(
 	if !v.Challenge.ExpiresAt.IsZero() {
 		expires = sql.NullInt64{Int64: v.Challenge.ExpiresAt.UnixMilli(), Valid: true}
 	}
-	var subjectAID sql.NullString
-	if v.SubjectAID != "" {
-		subjectAID = sql.NullString{String: v.SubjectAID, Valid: true}
+	// Stage the presented AID into pending_subject_aid; the proven
+	// subject_aid is left untouched so an abandoned rotation never
+	// overwrites it (promotion happens on verify, in Save).
+	var pendingSubjectAID sql.NullString
+	if v.PendingSubjectAID != "" {
+		pendingSubjectAID = sql.NullString{String: v.PendingSubjectAID, Valid: true}
 	}
 	res, err := s.db.extx(ctx).ExecContext(ctx, `
         UPDATE identities
@@ -327,13 +336,13 @@ func (s *IdentityStore) StageChallenge(
             challenge_consumed_at_ms = NULL,
             challenge_claimed_at_ms  = NULL,
             pending_value            = ?,
-            subject_aid              = ?,
+            pending_subject_aid      = ?,
             updated_at_ms            = ?
         WHERE identity_id = ?
           AND status = ?
           AND (challenge_nonce = ? OR (challenge_nonce IS NULL AND ? = ''))
           AND (challenge_claimed_at_ms IS NULL OR challenge_claimed_at_ms < ?)`,
-		v.Challenge.Nonce, expires, v.PendingValue, subjectAID, v.UpdatedAt.UnixMilli(),
+		v.Challenge.Nonce, expires, v.PendingValue, pendingSubjectAID, v.UpdatedAt.UnixMilli(),
 		v.IdentityID, string(expectedStatus), expectedNonce, expectedNonce,
 		staleBefore.UnixMilli())
 	if err != nil {
@@ -375,6 +384,7 @@ func (s *IdentityStore) MarkRevoked(ctx context.Context, identityID string, now 
         UPDATE identities
         SET status                   = 'REVOKED',
             pending_value            = '',
+            pending_subject_aid      = NULL,
             challenge_nonce          = NULL,
             challenge_expires_at_ms  = NULL,
             challenge_consumed_at_ms = NULL,

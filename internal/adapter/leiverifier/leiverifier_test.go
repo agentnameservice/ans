@@ -2,9 +2,11 @@ package leiverifier
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -360,6 +362,22 @@ func TestPresentedCredentialSAID(t *testing.T) {
 				t.Fatalf("presentedCredentialSAID = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestCollectEdgeNodesDepthBound pins the recursion guard: a shallow `n`
+// is collected, one nested past maxEdgeDepth (64) is ignored, and the
+// walk terminates on adversarial deep nesting instead of overflowing.
+func TestCollectEdgeNodesDepthBound(t *testing.T) {
+	raw := json.RawMessage(`{"n":"ESHALLOW","deep":` +
+		strings.Repeat(`{"x":`, 100) + `{"n":"EDEEP"}` + strings.Repeat(`}`, 100) + `}`)
+	seen := map[string]struct{}{}
+	collectEdgeNodes(raw, seen)
+	if _, ok := seen["ESHALLOW"]; !ok {
+		t.Fatal("shallow edge node not collected")
+	}
+	if _, ok := seen["EDEEP"]; ok {
+		t.Fatal("edge node past maxEdgeDepth must be ignored")
 	}
 }
 

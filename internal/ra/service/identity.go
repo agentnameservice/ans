@@ -76,7 +76,7 @@ type IdentityChallengeResponse struct {
 	// with a register-time presentation reports ("AUTHORIZED" |
 	// "PENDING"); empty for kinds without one (did:web, did:key). The
 	// handler emits it on the 202 only when set.
-	PresentationStatus string
+	PresentationStatus port.PresentationStatus
 }
 
 // IdentityService owns the Verified Identity lifecycle: register →
@@ -349,7 +349,7 @@ func (s *IdentityService) challenge(ctx context.Context, identity *domain.Verifi
 	// their verifier here, pinning the verifier-derived subject AID on
 	// the aggregate before the challenge enumerates it. Discovered by
 	// capability — non-presentation kinds skip this entirely.
-	var presentationStatus string
+	var presentationStatus port.PresentationStatus
 	if pr, ok := verifier.(presentationRegistrar); ok {
 		presentationStatus, err = pr.RegisterPresentation(ctx, identity, opt, now)
 		if err != nil {

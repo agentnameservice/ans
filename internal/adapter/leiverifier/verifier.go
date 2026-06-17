@@ -138,7 +138,7 @@ func (v *Verifier) Present(ctx context.Context, cesr string) (port.PresentationR
 	req.Header.Set("Content-Type", "application/json+cesr")
 
 	var pres presentationResponse
-	status, err := v.do(req, &pres)
+	status, err := v.do(req, &pres, "present")
 	if err != nil {
 		return port.PresentationResult{}, err
 	}
@@ -162,14 +162,14 @@ func (v *Verifier) Present(ctx context.Context, cesr string) (port.PresentationR
 	if err != nil {
 		return port.PresentationResult{}, err
 	}
-	status0 := "PENDING"
+	presStatus := port.StatusPending
 	if auth.Authorized {
-		status0 = "AUTHORIZED"
+		presStatus = port.StatusAuthorized
 	}
 	return port.PresentationResult{
 		SubjectAID: pres.AID,
 		LEI:        auth.LEI,
-		Status:     status0,
+		Status:     presStatus,
 	}, nil
 }
 
@@ -188,7 +188,7 @@ func (v *Verifier) Authorization(ctx context.Context, subjectAID string) (port.A
 		return port.AuthorizationResult{}, v.unavailable("authorize")
 	}
 	var auth authorizationResponse
-	status, err := v.do(req, &auth)
+	status, err := v.do(req, &auth, "authorize")
 	if err != nil {
 		return port.AuthorizationResult{}, err
 	}
@@ -234,7 +234,7 @@ func (v *Verifier) VerifySignature(ctx context.Context, subjectAID, signingInput
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	status, err := v.do(req, nil)
+	status, err := v.do(req, nil, "verify-signature")
 	if err != nil {
 		return false, err
 	}
@@ -255,7 +255,7 @@ func (v *Verifier) VerifySignature(ctx context.Context, subjectAID, signingInput
 // do executes the request, enforces the response-size cap, and (when
 // out is non-nil and the status carries a JSON body) decodes it.
 // Returns the status code so callers map it to domain semantics.
-func (v *Verifier) do(req *http.Request, out any) (int, error) {
+func (v *Verifier) do(req *http.Request, out any, op string) (int, error) {
 	// The request URL is built only from the operator-configured baseURL
 	// (a trusted internal vlei-verifier) plus verifier-controlled path
 	// segments — never from registrant input — so the SSRF posture the
@@ -263,16 +263,16 @@ func (v *Verifier) do(req *http.Request, out any) (int, error) {
 	resp, err := v.client.Do(req) //nolint:gosec // baseURL is operator-configured; no caller-controlled host
 
 	if err != nil {
-		return 0, v.unavailable(req.Method)
+		return 0, v.unavailable(op)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, v.maxBodyBytes+1))
 	if err != nil {
-		return resp.StatusCode, v.unavailable(req.Method)
+		return resp.StatusCode, v.unavailable(op)
 	}
 	if int64(len(body)) > v.maxBodyBytes {
-		return resp.StatusCode, v.unavailable(req.Method)
+		return resp.StatusCode, v.unavailable(op)
 	}
 	// Decode strictly on a 2xx success — the contract callers rely on.
 	// A 200 with malformed JSON would otherwise leave `out` zero-valued
@@ -293,8 +293,8 @@ func (v *Verifier) do(req *http.Request, out any) (int, error) {
 // protocol failure. The detail names the operation but never the
 // configured host (no internal-topology leak).
 func (v *Verifier) unavailable(op string) error {
-	return domain.NewInternalError("LEI_VERIFIER_UNAVAILABLE",
-		fmt.Sprintf("the vlei verifier is unavailable (%s)", op), nil)
+	return domain.NewUnavailableError("LEI_VERIFIER_UNAVAILABLE",
+		fmt.Sprintf("the vlei verifier is unavailable (%s)", op))
 }
 
 // isQB64 reports whether s is a non-empty CESR qb64 token — the
@@ -367,7 +367,7 @@ func scanACDCChain(cesr string) ([]acdcFrame, map[string]struct{}) {
 		start := offset + loc[0]
 		obj, end := balancedJSONObject(cesr, start)
 		if obj == "" {
-			offset = start + 1
+			offset = end // unbalanced tail: jump to end, no O(N²) byte rescan
 			continue
 		}
 		offset = end
@@ -425,8 +425,14 @@ func collectEdgeNodes(raw json.RawMessage, seen map[string]struct{}) {
 	if err := json.Unmarshal(raw, &doc); err != nil {
 		return
 	}
-	var walk func(v any)
-	walk = func(v any) {
+	// maxEdgeDepth bounds recursion over attacker-controlled edge JSON;
+	// real ECR→LE→QVI chains nest ~3 deep.
+	const maxEdgeDepth = 64
+	var walk func(v any, depth int)
+	walk = func(v any, depth int) {
+		if depth > maxEdgeDepth {
+			return
+		}
 		switch t := v.(type) {
 		case map[string]any:
 			for k, val := range t {
@@ -435,15 +441,15 @@ func collectEdgeNodes(raw json.RawMessage, seen map[string]struct{}) {
 						seen[s] = struct{}{}
 					}
 				}
-				walk(val)
+				walk(val, depth+1)
 			}
 		case []any:
 			for _, el := range t {
-				walk(el)
+				walk(el, depth+1)
 			}
 		}
 	}
-	walk(doc)
+	walk(doc, 0)
 }
 
 // balancedJSONObject returns the JSON object beginning at start

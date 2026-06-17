@@ -164,6 +164,10 @@ func run(cfgPath string) error {
 		Dur("challengeTTL", cfg.Identity.ChallengeTTL).
 		Msg("verified-identity surface configured")
 
+	if cfg.VLEI.Type == "noop" {
+		logger.Warn().Msg("vlei.type=noop — signature & authorization checks waived, NOT for production")
+	}
+
 	logger.Info().
 		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
 		Str("tlBaseURL", cfg.TLClient.BaseURL).
@@ -525,9 +529,9 @@ func selectDIDResolver(cfg *config.RAConfig, logger zerolog.Logger) port.DIDReso
 // selectLEIVerifier returns the configured vLEI control verifier — the
 // lei kind's analog of selectDIDResolver. "verifier" is the hardened
 // HTTP client for an internal vlei-verifier (config-validated base
-// URL); the default "noop" runs real Ed25519 crypto over the signing
-// input but waives the GLEIF authorization binding, for self-contained
-// local development.
+// URL); the default "noop" performs structural-only qb64 checks and
+// waives both the GLEIF authorization binding and the cryptographic
+// signature check
 func selectLEIVerifier(cfg *config.RAConfig) port.LEIControlVerifier {
 	switch cfg.VLEI.Type {
 	case "verifier":

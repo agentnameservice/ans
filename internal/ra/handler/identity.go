@@ -115,6 +115,7 @@ func (h *IdentityHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — matches registration.go
 	var req identityRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
@@ -149,6 +150,7 @@ func (h *IdentityHandler) Rotate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — matches registration.go
 	var req identityRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
@@ -174,6 +176,7 @@ func (h *IdentityHandler) VerifyControl(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — matches registration.go
 	var req verifyControlRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
@@ -337,7 +340,7 @@ func toChallengeResponse(res *service.IdentityChallengeResponse) identityChallen
 		Kind:               string(res.Identity.Kind),
 		Value:              res.Identity.EffectiveValue(),
 		Status:             string(res.Identity.Status),
-		PresentationStatus: res.PresentationStatus,
+		PresentationStatus: string(res.PresentationStatus),
 		Nonce:              res.Nonce,
 		ExpiresAt:          res.ExpiresAt.UTC().Format(time.RFC3339),
 		Challenges:         challenges,

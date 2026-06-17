@@ -455,6 +455,57 @@ func TestIdentityStore_StageChallengeOptimisticConcurrency(t *testing.T) {
 	}
 }
 
+// TestIdentityStore_SubjectAIDRoundTrip pins the lei subject-AID
+// columns: Save promotes a verified SubjectAID into subject_aid (read
+// back on FindByID), and StageChallenge writes a rotation's
+// PendingSubjectAID into pending_subject_aid while leaving the proven
+// subject_aid untouched — the H1 store guarantee that an abandoned
+// rotation never overwrites the live signer.
+func TestIdentityStore_SubjectAIDRoundTrip(t *testing.T) {
+	db := newTestDB(t)
+	store := NewIdentityStore(db)
+	ctx := context.Background()
+
+	v := newIdentityFixture(t, "id-lei", "owner-1", "5493001KJTIIGC8Y1R17")
+	if v.Kind != domain.KindLEI {
+		t.Fatalf("fixture kind = %s, want lei", v.Kind)
+	}
+	// Stage then promote the verifier-derived AID, mirroring a verify.
+	if err := v.StageSubjectAID("EHolderAID", identityNow); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := v.CompleteVerification(identityNow); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Save(ctx, v); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	got, err := store.FindByID(ctx, "id-lei")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SubjectAID != "EHolderAID" || got.PendingSubjectAID != "" {
+		t.Fatalf("proven AID round-trip: proven=%q pending=%q", got.SubjectAID, got.PendingSubjectAID)
+	}
+
+	// A rotation stages a new AID via StageChallenge: pending_subject_aid
+	// is written, the proven subject_aid is left untouched.
+	got.PendingSubjectAID = "ERotatedAID"
+	if err := got.IssueChallenge("nonce-rot", time.Hour, identityNow.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.StageChallenge(ctx, got, domain.IdentityVerified, "", identityNow); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	reloaded, err := store.FindByID(ctx, "id-lei")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.SubjectAID != "EHolderAID" || reloaded.PendingSubjectAID != "ERotatedAID" {
+		t.Fatalf("staged AID round-trip: proven=%q pending=%q", reloaded.SubjectAID, reloaded.PendingSubjectAID)
+	}
+}
+
 func TestIdentityStore_MarkRevokedConditional(t *testing.T) {
 	db := newTestDB(t)
 	store := NewIdentityStore(db)

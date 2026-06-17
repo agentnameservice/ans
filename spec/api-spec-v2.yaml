@@ -1096,6 +1096,12 @@ paths:
         closed. The nonce is consumed exactly once, inside the
         success transaction — a failed attempt does not consume it.
 
+        The `lei` kind instead submits a single `cesrSignature` over
+        the same `signingInput`: the RA forwards it to the
+        vlei-verifier, which live-rechecks the subject AID's
+        authorization and verifies the signature against its current
+        KEL key state.
+
         JWS bearing unrecognized `crit` header parameters are
         rejected (RFC 7515 §4.1.11) — this verifier implements no
         critical extensions.
@@ -1155,14 +1161,14 @@ paths:
           description: |
             Proof rejected — `PRICC_SIGNATURE_INVALID`,
             `DID_VERIFICATION_METHOD_INVALID`, `DID_RESOLUTION_FAILED`,
-            `DID_DOCUMENT_ID_MISMATCH`, `IDENTIFIER_PROOF_INVALID`.
+            `DID_DOCUMENT_ID_MISMATCH`, `IDENTIFIER_PROOF_INVALID`, `LEI_NOT_AUTHORIZED`, `LEI_MISMATCH`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
         '503':
-          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable; the nonce is NOT consumed)
+          description: Upstream unavailable (TL_UNAVAILABLE, or LEI_VERIFIER_UNAVAILABLE — retryable; the nonce is NOT consumed)
           content:
             application/json:
               schema:
@@ -2111,15 +2117,6 @@ components:
           description: The canonical identifier this round proves
         status:
           $ref: '#/components/schemas/IdentityLifecycleStatus'
-        presentationStatus:
-          type: string
-          description: |
-            The lei register-time advisory authorization status from
-            the vlei-verifier (`AUTHORIZED` | `PENDING`). Omitted for
-            kinds with no register-time presentation (`did:web`,
-            `did:key`). Advisory only — control is finally established
-            by a LIVE re-authorization at verify-control.
-          enum: ['AUTHORIZED', 'PENDING']
         nonce:
           type: string
           description: Base64url 32-byte single-use anti-replay nonce
@@ -2130,6 +2127,15 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/IdentityProofChallenge'
+        presentationStatus:
+          type: string
+          enum: [AUTHORIZED, PENDING]
+          description: |
+            The lei register-time advisory authorization status from
+            the vlei-verifier (`AUTHORIZED` | `PENDING`). Omitted for
+            kinds with no register-time presentation (`did:web`,
+            `did:key`). Advisory only — control is finally established
+            by a LIVE re-authorization at verify-control.
       required:
         - identityId
         - kind

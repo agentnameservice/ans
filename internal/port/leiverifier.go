@@ -2,6 +2,14 @@ package port
 
 import "context"
 
+// PresentationStatus represents the state of a LEI presentation.
+type PresentationStatus string
+
+const (
+	StatusAuthorized PresentationStatus = "AUTHORIZED"
+	StatusPending    PresentationStatus = "PENDING"
+)
+
 // PresentationResult is what a vLEI presentation yields once the
 // verifier has parsed the full-chain CESR export: the holder's subject
 // AID (derived FROM the presentation, never caller-asserted — the
@@ -20,7 +28,7 @@ type PresentationResult struct {
 	// LEI is the LEI the presented credential authorizes the AID for.
 	LEI string
 	// Status is "AUTHORIZED" or "PENDING".
-	Status string
+	Status PresentationStatus
 }
 
 // AuthorizationResult is the verifier's LIVE view of an AID's vLEI

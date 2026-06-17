@@ -99,6 +99,10 @@ type VerifiedIdentity struct {
 	// Empty for kinds with no register-time presentation (did:web,
 	// did:key).
 	SubjectAID string
+	// PendingSubjectAID stages the AID a rotation/registration presents,
+	// promoted to SubjectAID only by CompleteVerification — an abandoned
+	// rotation never overwrites the proven signer. Mirrors PendingValue.
+	PendingSubjectAID string
 	// Challenge is the live anti-replay nonce, if any.
 	Challenge  *IdentityChallenge
 	VerifiedAt time.Time // zero until first proof
@@ -164,8 +168,7 @@ func InferIdentifierKind(raw string) (IdentifierKind, string, error) {
 
 // isLEI reports whether the value is shaped like an ISO 17442 LEI:
 // exactly 20 alphanumeric characters. (The mod-97 check digit and the
-// GLEIF status precondition belong to the lei control verifier, which
-// is postponed — this is lexical dispatch only.)
+// GLEIF status precondition belong to the lei control verifier)
 func isLEI(value string) bool {
 	if len(value) != 20 {
 		return false
@@ -392,14 +395,25 @@ func (v *VerifiedIdentity) StageRotation(rawValue string, now time.Time) error {
 	return nil
 }
 
-// SetSubjectAID pins the lei holder AID the verifier derived from the
-// presentation (§3.6). Rejects an empty AID — pinning a blank signer
-// would let any key satisfy verify-control.
-func (v *VerifiedIdentity) SetSubjectAID(aid string, now time.Time) error {
+// EffectiveSubjectAID is the lei holder AID the current proof round is
+// over: the staged AID during a rotation/registration, else the proven
+// one. Mirrors EffectiveValue.
+func (v *VerifiedIdentity) EffectiveSubjectAID() string {
+	if v.PendingSubjectAID != "" {
+		return v.PendingSubjectAID
+	}
+	return v.SubjectAID
+}
+
+// StageSubjectAID stages the lei holder AID the verifier derived from
+// the presentation (§3.6); CompleteVerification promotes it to the
+// proven SubjectAID. Rejects an empty AID — a blank signer would let
+// any key satisfy verify-control.
+func (v *VerifiedIdentity) StageSubjectAID(aid string, now time.Time) error {
 	if aid == "" {
 		return NewValidationError("LEI_PRESENTATION_INVALID", "subject AID is required")
 	}
-	v.SubjectAID = aid
+	v.PendingSubjectAID = aid
 	v.UpdatedAt = now.UTC()
 	return nil
 }
@@ -432,7 +446,11 @@ func (v *VerifiedIdentity) CompleteVerification(now time.Time) (string, error) {
 		return "", NewInvalidStateError("IDENTITY_INVALID_STATE",
 			fmt.Sprintf("unexpected identity status %s", v.Status))
 	}
+	if v.PendingSubjectAID != "" {
+		v.SubjectAID = v.PendingSubjectAID
+	}
 	v.PendingValue = ""
+	v.PendingSubjectAID = ""
 	v.ProofMethod = proofMethodForKind(v.Kind)
 	v.VerifiedAt = now.UTC()
 	v.UpdatedAt = now.UTC()
@@ -451,6 +469,7 @@ func (v *VerifiedIdentity) Revoke(now time.Time) error {
 	}
 	v.Status = IdentityRevoked
 	v.PendingValue = ""
+	v.PendingSubjectAID = ""
 	v.Challenge = nil
 	v.UpdatedAt = now.UTC()
 	return nil
