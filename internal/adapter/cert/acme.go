@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/acme"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
@@ -74,6 +75,7 @@ type ACMEIssuer struct {
 	client         *acme.Client
 	contact        []string
 	finalizeBudget time.Duration
+	logger         zerolog.Logger
 
 	mu         sync.Mutex
 	registered bool
@@ -90,6 +92,17 @@ type ACMEIssuerOption func(*ACMEIssuer)
 // provider before reporting port.ErrOrderPending.
 func WithFinalizeBudget(d time.Duration) ACMEIssuerOption {
 	return func(a *ACMEIssuer) { a.finalizeBudget = d }
+}
+
+// WithLogger attaches a structured logger (default: a no-op logger).
+// Issuance against an external CA is the part of the flow operators
+// cannot see from the wire — order open / finalize transitions are
+// logged at INFO and upstream-provider failures at ERROR so a stuck or
+// rejected order can be debugged from the RA logs.
+func WithLogger(logger zerolog.Logger) ACMEIssuerOption {
+	return func(a *ACMEIssuer) {
+		a.logger = logger.With().Str("component", "acme-issuer").Logger()
+	}
 }
 
 // NewACMEIssuer opens (or creates) the ACME account key under
@@ -117,6 +130,7 @@ func NewACMEIssuer(directoryURL, email, dataDir string, opts ...ACMEIssuerOption
 	a := &ACMEIssuer{
 		client:         &acme.Client{Key: key, DirectoryURL: directoryURL},
 		finalizeBudget: defaultFinalizeBudget,
+		logger:         zerolog.Nop(),
 	}
 	if email != "" {
 		a.contact = []string{"mailto:" + email}
@@ -147,15 +161,27 @@ func (a *ACMEIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.Cert
 	}
 	order, err := a.client.AuthorizeOrder(ctx, acme.DomainIDs(fqdn))
 	if err != nil {
+		a.logger.Error().Err(err).Str("fqdn", fqdn).Msg("acme new-order failed")
 		return nil, fmt.Errorf("cert: acme new-order: %w", err)
 	}
+	a.logger.Info().
+		Str("fqdn", fqdn).
+		Str("orderRef", order.URI).
+		Str("acmeStatus", order.Status).
+		Msg("acme order opened")
 
 	switch order.Status {
 	case acme.StatusPending:
 		challenges, cerr := a.collectChallenges(ctx, order)
 		if cerr != nil {
+			a.logger.Error().Err(cerr).Str("orderRef", order.URI).Msg("acme collect challenges failed")
 			return nil, cerr
 		}
+		a.logger.Debug().
+			Str("orderRef", order.URI).
+			Str("state", string(domain.OrderStatePending)).
+			Int("challenges", len(challenges)).
+			Msg("acme order pending — relaying challenges for the owner to publish")
 		return &domain.CertificateOrder{
 			OrderRef:   order.URI,
 			State:      domain.OrderStatePending,
@@ -166,12 +192,21 @@ func (a *ACMEIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.Cert
 		// Authorizations already satisfied (reuse) or issuance already
 		// underway — no domain-control artifact for the owner to
 		// publish. Relay as ISSUING so verify-acme drives FinalizeOrder.
+		a.logger.Info().
+			Str("orderRef", order.URI).
+			Str("acmeStatus", order.Status).
+			Str("state", string(domain.OrderStateIssuing)).
+			Msg("acme order already authorized (reuse) — no challenges to publish")
 		return &domain.CertificateOrder{
 			OrderRef:  order.URI,
 			State:     domain.OrderStateIssuing,
 			ExpiresAt: order.Expires,
 		}, nil
 	default: // acme.StatusInvalid or unknown
+		a.logger.Error().
+			Str("orderRef", order.URI).
+			Str("acmeStatus", order.Status).
+			Msg("acme new-order returned unusable status")
 		return nil, fmt.Errorf("cert: acme new-order returned unusable status %q", order.Status)
 	}
 }
@@ -239,39 +274,86 @@ func (a *ACMEIssuer) FinalizeOrder(ctx context.Context, req port.FinalizeOrderRe
 	if err := a.ensureRegistered(ctx); err != nil {
 		return nil, err
 	}
+	a.logger.Info().
+		Str("fqdn", req.FQDN).
+		Str("orderRef", req.OrderRef).
+		Msg("acme finalizing order")
 
 	order, err := a.client.GetOrder(ctx, req.OrderRef)
 	if err != nil {
+		a.logger.Error().Err(err).Str("orderRef", req.OrderRef).Msg("acme get order failed")
 		return nil, fmt.Errorf("cert: acme get order: %w", err)
 	}
 
 	if order.Status == acme.StatusPending {
 		if err := a.answerVerifiedChallenges(ctx, order, req.Verified); err != nil {
+			a.logger.Error().Err(err).Str("orderRef", req.OrderRef).Msg("acme answer challenges failed")
 			return nil, err
 		}
 		if order, err = a.waitOrder(ctx, req.OrderRef); err != nil {
+			a.logOrderWaitErr(req.OrderRef, "acme wait order", err)
 			return nil, err
 		}
 	}
 
+	var issued *port.IssuedCert
 	switch order.Status {
 	case acme.StatusReady:
-		return a.finalizeWithCSR(ctx, order.FinalizeURL, csr.Raw)
+		issued, err = a.finalizeWithCSR(ctx, order.FinalizeURL, csr.Raw)
 	case acme.StatusProcessing, acme.StatusPending:
 		// Validation or issuance is still running provider-side; the
 		// re-driven verify-acme picks the order back up.
+		a.logger.Debug().
+			Str("orderRef", req.OrderRef).
+			Str("acmeStatus", order.Status).
+			Msg("acme order still pending — will re-drive on next verify-acme")
 		return nil, fmt.Errorf("cert: acme order %s: %w", order.Status, port.ErrOrderPending)
 	case acme.StatusValid:
-		der, err := a.client.FetchCert(ctx, order.CertURL, true)
-		if err != nil {
-			return nil, fmt.Errorf("cert: acme fetch cert: %w", err)
+		der, ferr := a.client.FetchCert(ctx, order.CertURL, true)
+		if ferr != nil {
+			a.logger.Error().Err(ferr).Str("orderRef", req.OrderRef).Msg("acme fetch cert failed")
+			return nil, fmt.Errorf("cert: acme fetch cert: %w", ferr)
 		}
-		return a.issuedFromChain(der, order.CertURL)
+		issued, err = a.issuedFromChain(der, order.CertURL)
 	case acme.StatusInvalid:
+		a.logger.Error().
+			Str("fqdn", req.FQDN).
+			Str("orderRef", req.OrderRef).
+			Msg("acme order invalid — provider rejected domain validation")
 		return nil, fmt.Errorf("cert: acme order invalid: %w", port.ErrOrderFailed)
 	default:
+		a.logger.Error().
+			Str("orderRef", req.OrderRef).
+			Str("acmeStatus", order.Status).
+			Msg("acme order in unexpected status")
 		return nil, fmt.Errorf("cert: acme order in unexpected status %q", order.Status)
 	}
+	if err != nil {
+		a.logOrderWaitErr(req.OrderRef, "acme finalize", err)
+		return nil, err
+	}
+
+	a.logger.Info().
+		Str("fqdn", req.FQDN).
+		Str("orderRef", req.OrderRef).
+		Str("serialNumber", issued.SerialNumber).
+		Msg("acme order finalized — certificate issued")
+	return issued, nil
+}
+
+// logOrderWaitErr logs a FinalizeOrder-path error at the right level:
+// port.ErrOrderPending is the expected async signal (the order is still
+// running and a later verify-acme re-drives it), so it is debug, not an
+// error; everything else is a real upstream failure worth an ERROR line
+// for debugging.
+func (a *ACMEIssuer) logOrderWaitErr(orderRef, stage string, err error) {
+	if errors.Is(err, port.ErrOrderPending) {
+		a.logger.Debug().
+			Str("orderRef", orderRef).
+			Msg("acme order still running — will re-drive on next verify-acme")
+		return
+	}
+	a.logger.Error().Err(err).Str("orderRef", orderRef).Msg(stage + " failed")
 }
 
 // answerVerifiedChallenges tells the provider to validate exactly the

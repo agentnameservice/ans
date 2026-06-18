@@ -459,7 +459,7 @@ type providerWithAnonymous interface {
 // Config validation has already checked the per-type required fields.
 func buildServerIssuer(s *config.CAServer, logger zerolog.Logger) (port.ServerCertificateIssuer, error) {
 	if s.IsACME() {
-		issuer, err := cert.NewACMEIssuer(s.ACME.DirectoryURL, s.ACME.Email, s.ACME.DataDir)
+		issuer, err := cert.NewACMEIssuer(s.ACME.DirectoryURL, s.ACME.Email, s.ACME.DataDir, cert.WithLogger(logger))
 		if err != nil {
 			return nil, fmt.Errorf("init acme issuer: %w", err)
 		}

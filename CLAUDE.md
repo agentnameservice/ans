@@ -21,6 +21,27 @@ Everything that lands on `main` must meet production-grade standards:
   domain/port/adapter boundaries. No global mutable state, no panics
   in request paths, no swallowed errors, no `fmt.Println`/`log.Printf`
   in library code.
+- **Sufficient logging is required.** Every package ships with enough
+  structured logging (`zerolog`) to debug it in production from the
+  logs alone — a silent component is a non-negotiable defect, not a
+  style preference. Concretely:
+  - Library/adapter/service code takes an injected logger (a
+    `WithLogger(zerolog.Logger)` option or constructor parameter,
+    defaulting to `zerolog.Nop()`), tagged with a `component` field. It
+    never reaches for the package-global `log` — that's reserved for
+    `cmd/*` wiring.
+  - Log every meaningful state transition and outcome at `INFO`
+    (e.g. order opened, order finalized, agent activated, event
+    appended), every recoverable/expected detour at `DEBUG` (retries,
+    pending re-drives, cache misses, fallbacks), and every failure —
+    especially upstream/provider/store errors — at `ERROR` (or `WARN`
+    when the caller will recover), always with `.Err(err)` and the
+    identifiers needed to trace the request (`agentId`, `orderRef`,
+    `fqdn`, `serialNumber`, leaf index, …). A bare `return err` with no
+    log on a path that crosses a trust or network boundary is a defect.
+  - Never log secrets, private keys, full CSR/cert bytes, bearer
+    tokens, challenge key authorizations, or other sensitive material —
+    log stable identifiers and fingerprints instead.
 - **Unit test coverage is required.** Every new package ships with
   tests. `internal/domain` stays at 100% of statements.
   `internal/crypto` targets 100% but may sit at ≥95% when the

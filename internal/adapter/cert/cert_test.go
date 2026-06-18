@@ -343,6 +343,25 @@ func TestServerSelfCA_CreateOrder_RequiresFQDN(t *testing.T) {
 	}
 }
 
+// TestServerSelfCA_FinalizeOrder_RequiresOrderRef pins the contract
+// guard: even though the stateless self-CA never looks anything up by
+// the order ref, it must reject an empty ref so a caller that drops the
+// persisted ref fails the same way it would against an ACME provider
+// rather than silently issuing.
+func TestServerSelfCA_FinalizeOrder_RequiresOrderRef(t *testing.T) {
+	ca, _ := NewServerSelfCA(t.TempDir(), "o", 365)
+	csrPEM := buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"})
+	_, err := ca.FinalizeOrder(context.Background(), port.FinalizeOrderRequest{
+		OrderRef: "",
+		CSRPEM:   csrPEM,
+		FQDN:     "agent.example.com",
+		Verified: []domain.ChallengeType{domain.ChallengeTypeDNS01},
+	})
+	if err == nil {
+		t.Error("expected error for empty order ref")
+	}
+}
+
 func TestNewServerSelfCA_RespectsOrderTTLOption(t *testing.T) {
 	ca, err := NewServerSelfCA(t.TempDir(), "org", 365, WithOrderTTL(3*time.Hour))
 	if err != nil {

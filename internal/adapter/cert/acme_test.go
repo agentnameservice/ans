@@ -1,6 +1,7 @@
 package cert
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rand"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
 	"golang.org/x/crypto/acme"
 
 	"github.com/godaddy/ans/internal/adapter/cert/acmetest"
@@ -42,6 +44,23 @@ func newTestACMEIssuer(t *testing.T, f *acmetest.Server, opts ...ACMEIssuerOptio
 		t.Fatal(err)
 	}
 	return issuer
+}
+
+// TestACMEIssuer_WithLogger_LogsOrderLifecycle pins that the logger is
+// wired and that order-lifecycle transitions are actually emitted —
+// the signal operators rely on to debug issuance against an external CA.
+func TestACMEIssuer_WithLogger_LogsOrderLifecycle(t *testing.T) {
+	f := newFakeACME(t)
+	var buf bytes.Buffer
+	issuer := newTestACMEIssuer(t, f, WithLogger(zerolog.New(&buf)))
+
+	if _, err := issuer.CreateOrder(t.Context(), "agent.example.com"); err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "acme order opened") || !strings.Contains(out, "agent.example.com") {
+		t.Errorf("expected an order-opened log line carrying the fqdn, got: %s", out)
+	}
 }
 
 func TestACMEIssuer_CreateOrder_RelaysProviderChallenges(t *testing.T) {

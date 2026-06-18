@@ -167,6 +167,15 @@ func (c *ServerSelfCA) FinalizeOrder(
 	if err != nil {
 		return nil, err
 	}
+	// Require the order ref even though this stateless CA never looks
+	// anything up by it. It keeps the contract uniform with provider
+	// adapters (the ACME issuer needs the ref to resume the order) so a
+	// caller that drops the persisted ref fails the same way here as it
+	// would against Let's Encrypt, rather than silently succeeding and
+	// masking the threading bug in local/dev.
+	if req.OrderRef == "" {
+		return nil, errors.New("cert: server self-ca finalize: order ref is required")
+	}
 
 	c.mu.RLock()
 	rootCert, rootKey := c.rootCert, c.rootKey
