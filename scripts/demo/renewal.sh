@@ -8,6 +8,13 @@
 #   3. POST   .../certificates/server/renewal/verify-acme  (BYOC → sync 200 COMPLETED)
 #   4. GET    .../certificates/server/renewal         (final status)
 #
+# This script expects verify-acme to complete synchronously — BYOC, or
+# the CSR path against the local self-signed server CA. For a CSR
+# renewal against an ASYNCHRONOUS ACME provider (start.sh --with-acme),
+# the order comes back ISSUING_CERTIFICATE and must be re-driven; use
+# scripts/demo/renewal-acme-verify.sh for that (the renewal-lane
+# counterpart to acme-verify.sh).
+#
 # ans is BYOC-only — we generate a self-signed server cert for the
 # agent's FQDN. The RA validator skips chain verification in the
 # demo stack (cmd/ans-ra/main.go uses WithSkipChainVerify), so the
