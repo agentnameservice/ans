@@ -157,7 +157,7 @@ func run(cfgPath string) error {
 	// vLEI control verifier — noop (quickstart) or HTTP client for an internal vlei-verifier,
 	// the lei kind's analog of
 	// the did:web resolver selection.
-	leiVerifier := selectLEIVerifier(cfg)
+	leiVerifier := selectLEIVerifier(cfg, logger)
 	logger.Info().
 		Str("resolver", cfg.Identity.Resolver.Type).
 		Str("vleiVerifier", cfg.VLEI.Type).
@@ -532,10 +532,10 @@ func selectDIDResolver(cfg *config.RAConfig, logger zerolog.Logger) port.DIDReso
 // URL); the default "noop" performs structural-only qb64 checks and
 // waives both the GLEIF authorization binding and the cryptographic
 // signature check
-func selectLEIVerifier(cfg *config.RAConfig) port.LEIControlVerifier {
+func selectLEIVerifier(cfg *config.RAConfig, logger zerolog.Logger) port.LEIControlVerifier {
 	switch cfg.VLEI.Type {
 	case "verifier":
-		var opts []leiverifier.VerifierOption
+		opts := []leiverifier.VerifierOption{leiverifier.WithLogger(logger)}
 		if cfg.VLEI.PresentTimeout > 0 {
 			opts = append(opts, leiverifier.WithTimeout(cfg.VLEI.PresentTimeout))
 		}

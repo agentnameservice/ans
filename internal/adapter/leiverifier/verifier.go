@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 )
@@ -47,6 +49,7 @@ type Verifier struct {
 	baseURL      string
 	client       *http.Client
 	maxBodyBytes int64
+	logger       zerolog.Logger
 }
 
 // VerifierOption customizes the Verifier.
@@ -80,6 +83,22 @@ func WithMaxBodyBytes(n int64) VerifierOption {
 	}
 }
 
+// WithLogger attaches a server-side logger (default: no-op). It records
+// the failure CATEGORY behind a verifier I/O or protocol failure — the
+// operation, an unexpected HTTP status, the underlying transport error,
+// an oversized body, a 2xx body that failed to decode (the fail-closed
+// degradation), or a contract violation (a 2xx with no subject AID) — so
+// an on-call engineer can tell an internal vlei-verifier outage from a
+// 5xx from a malformed response. None of this reaches the API caller: the
+// wire error (unavailable) stays deliberately coarse and never names the
+// configured host (no internal-topology leak). This mirrors the did:web
+// resolver's coarse-wire / detailed-log split.
+func WithLogger(logger zerolog.Logger) VerifierOption {
+	return func(v *Verifier) {
+		v.logger = logger.With().Str("component", "vlei-verifier").Logger()
+	}
+}
+
 // NewVerifier constructs the production verifier against baseURL (e.g.
 // "http://vlei-verifier:7676"), with the trailing slash trimmed.
 func NewVerifier(baseURL string, opts ...VerifierOption) *Verifier {
@@ -87,6 +106,7 @@ func NewVerifier(baseURL string, opts ...VerifierOption) *Verifier {
 		baseURL:      strings.TrimRight(baseURL, "/"),
 		client:       &http.Client{Timeout: 5 * time.Second},
 		maxBodyBytes: 1 << 20,
+		logger:       zerolog.Nop(),
 	}
 	for _, opt := range opts {
 		opt(v)
@@ -149,9 +169,11 @@ func (v *Verifier) Present(ctx context.Context, cesr string) (port.PresentationR
 		return port.PresentationResult{}, domain.NewValidationError("LEI_PRESENTATION_INVALID",
 			"the vlei verifier rejected the presented credential")
 	default:
+		v.logFailure("present", "verifier returned an unexpected status", status, nil)
 		return port.PresentationResult{}, v.unavailable("present")
 	}
 	if pres.AID == "" {
+		v.logFailure("present", "verifier accepted the presentation but returned no subject AID", status, nil)
 		return port.PresentationResult{}, v.unavailable("present")
 	}
 
@@ -199,6 +221,7 @@ func (v *Verifier) Authorization(ctx context.Context, subjectAID string) (port.A
 		// 401: presented but not authorized; 404: not yet processed.
 		return port.AuthorizationResult{Authorized: false}, nil
 	default:
+		v.logFailure("authorize", "verifier returned an unexpected status", status, nil)
 		return port.AuthorizationResult{}, v.unavailable("authorize")
 	}
 }
@@ -248,6 +271,7 @@ func (v *Verifier) VerifySignature(ctx context.Context, subjectAID, signingInput
 		// proof from the registrant's perspective, not a verifier outage.
 		return false, nil
 	default:
+		v.logFailure("verify-signature", "verifier returned an unexpected status", status, nil)
 		return false, v.unavailable("verify-signature")
 	}
 }
@@ -263,15 +287,18 @@ func (v *Verifier) do(req *http.Request, out any, op string) (int, error) {
 	resp, err := v.client.Do(req) //nolint:gosec // baseURL is operator-configured; no caller-controlled host
 
 	if err != nil {
+		v.logFailure(op, "request to the verifier failed", 0, err)
 		return 0, v.unavailable(op)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	body, err := io.ReadAll(io.LimitReader(resp.Body, v.maxBodyBytes+1))
 	if err != nil {
+		v.logFailure(op, "reading the verifier response failed", resp.StatusCode, err)
 		return resp.StatusCode, v.unavailable(op)
 	}
 	if int64(len(body)) > v.maxBodyBytes {
+		v.logFailure(op, "verifier response exceeded the size cap", resp.StatusCode, nil)
 		return resp.StatusCode, v.unavailable(op)
 	}
 	// Decode strictly on a 2xx success — the contract callers rely on.
@@ -283,10 +310,29 @@ func (v *Verifier) do(req *http.Request, out any, op string) (int, error) {
 	// are not consumed by callers, so we leave them undecoded.
 	if out != nil && len(body) > 0 && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if err := json.Unmarshal(body, out); err != nil {
+			v.logFailure(op, "verifier 2xx body failed to decode (failing closed)", resp.StatusCode, err)
 			return resp.StatusCode, v.unavailable("decode")
 		}
 	}
 	return resp.StatusCode, nil
+}
+
+// logFailure records an operational verifier failure server-side, at the
+// same coarse-wire / detailed-log split as the did:web resolver. The wire
+// error (v.unavailable) never names the configured host or echoes the
+// response body; the diagnosable category goes ONLY here, so an on-call
+// engineer can distinguish an internal vlei-verifier outage (transport
+// error, status 0) from a 5xx, an oversized body, a fail-closed decode,
+// or a contract violation (a 2xx carrying no subject AID). status is 0
+// when no HTTP response was received; err is nil for the status- and
+// contract-derived failures the response itself already describes.
+func (v *Verifier) logFailure(op, reason string, status int, err error) {
+	v.logger.Warn().
+		Err(err).
+		Str("op", op).
+		Str("reason", reason).
+		Int("status", status).
+		Msg("vlei verifier call failed")
 }
 
 // unavailable builds the operator-facing error for a verifier I/O or

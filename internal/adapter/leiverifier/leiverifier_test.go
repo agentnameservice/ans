@@ -1,6 +1,7 @@
 package leiverifier
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/domain"
 )
@@ -378,6 +381,34 @@ func TestCollectEdgeNodesDepthBound(t *testing.T) {
 	}
 	if _, ok := seen["EDEEP"]; ok {
 		t.Fatal("edge node past maxEdgeDepth must be ignored")
+	}
+}
+
+// TestVerifierLogsOperationalFailure pins the coarse-wire / detailed-log
+// split (the did:web resolver's WithLogger precedent): an operational
+// verifier failure surfaces the deliberately coarse LEI_VERIFIER_UNAVAILABLE
+// wire error, which never names the configured host, while the diagnosable
+// category — operation and HTTP status — goes only to the server-side log.
+func TestVerifierLogsOperationalFailure(t *testing.T) {
+	var logbuf bytes.Buffer
+	srv := httptest.NewServer((&vleiServer{authStatus: http.StatusBadGateway}).handler())
+	t.Cleanup(srv.Close)
+	v := NewVerifier(srv.URL, WithHTTPClient(srv.Client()), WithLogger(zerolog.New(&logbuf)))
+
+	_, err := v.Authorization(context.Background(), "EAID")
+	if !isCode(err, "LEI_VERIFIER_UNAVAILABLE") {
+		t.Fatalf("want LEI_VERIFIER_UNAVAILABLE, got %v", err)
+	}
+	// The wire error never echoes the configured host (no topology leak).
+	if strings.Contains(err.Error(), "127.") || strings.Contains(err.Error(), srv.URL) {
+		t.Fatalf("wire error leaked the verifier host: %v", err)
+	}
+	// The diagnosable category reaches only the log.
+	out := logbuf.String()
+	if !strings.Contains(out, "vlei verifier call failed") ||
+		!strings.Contains(out, `"op":"authorize"`) ||
+		!strings.Contains(out, `"status":502`) {
+		t.Fatalf("log did not record the failure category: %q", out)
 	}
 }
 
