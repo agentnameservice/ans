@@ -511,6 +511,39 @@ func TestIdentityVerifyControl_FailClosed(t *testing.T) {
 	}
 }
 
+// TestIdentityVerifyControl_BothProofFamilies covers the wire oneOf
+// contract: a body that sets BOTH signedProofs and cesrSignature is
+// rejected, not silently accepted on the JWS member alone. The
+// neither-set case is covered by the "no proofs" row in FailClosed.
+func TestIdentityVerifyControl_BothProofFamilies(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+
+	res, err := fx.svc.Register(ctx, fx.providerID, "did:web:a.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res.Identity.IdentityID
+	did := res.Identity.Value
+	good := signProof(t, genKey(t), did+"#key-1", res.Challenges[0].SigningInput, true)
+
+	_, err = fx.svc.VerifyControl(ctx, fx.providerID, id, service.ProofSubmission{
+		SignedProofs:  []string{good},
+		CESRSignature: "0Bcesr-signature-bytes",
+	})
+	if err == nil || !strings.Contains(err.Error(), "IDENTIFIER_PROOF_INVALID") {
+		t.Fatalf("want IDENTIFIER_PROOF_INVALID, got %v", err)
+	}
+
+	// The rejected attempt must not consume the nonce — the clean
+	// single-family proof still lands afterward.
+	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, id,
+		service.ProofSubmission{SignedProofs: []string{good}}); err != nil {
+		t.Fatalf("clean proof after both-families rejection: %v", err)
+	}
+}
+
 func TestIdentityVerifyControl_WrongSignature(t *testing.T) {
 	t.Parallel()
 	fx := newIdentityFixture(t, nil)

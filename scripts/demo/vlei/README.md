@@ -73,8 +73,9 @@ the stack, builds the chain, and runs the register + verify-control flow.
 Re-running is safe: a running RA and a previously-registered agent are reused.
 
 **Why "mode" matters.** `vlei.type` selects the `lei` control verifier: `noop`
-runs real Ed25519 crypto but waives the GLEIF authorization binding (zero-infra
-quickstart); `verifier` routes every CESR/KERI question to this stack's
+performs structural qb64 checks only and waives the GLEIF authorization +
+cryptographic signature verification (zero-infra quickstart);
+`verifier` routes every CESR/KERI question to this stack's
 `vlei-verifier`. This demo presents **real CESR**, which only `verifier`
 accepts. So `run-vlei.sh` guarantees verifier mode — starting the RA in it if
 down, or restarting via `stop.sh` + `start.sh --keep` (preserves the registered

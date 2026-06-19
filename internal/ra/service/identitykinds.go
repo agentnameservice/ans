@@ -69,6 +69,20 @@ type ProofSubmission struct {
 	CESRSignature string
 }
 
+// validateExactlyOneFamily enforces the wire oneOf contract declared
+// by VerifyControlRequest in spec/api-spec-v2.yaml: EXACTLY ONE proof
+// family is set per request (JWS kinds → signedProofs; lei →
+// cesrSignature).
+func (s ProofSubmission) validateExactlyOneFamily() error {
+	hasJWS := len(s.SignedProofs) > 0
+	hasCESR := s.CESRSignature != ""
+	if hasJWS == hasCESR {
+		return domain.NewValidationError("IDENTIFIER_PROOF_INVALID",
+			"exactly one of signedProofs or cesrSignature must be set")
+	}
+	return nil
+}
+
 // RegisterOptions carries the additive, per-kind material a register
 // (or rotate) call may need beyond the identifier value. It is empty
 // for kinds with no register-time presentation (did:web, did:key);

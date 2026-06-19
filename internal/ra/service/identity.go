@@ -431,6 +431,13 @@ func (s *IdentityService) VerifyControl(ctx context.Context, providerID, identit
 	if err := identity.CheckChallenge(now); err != nil {
 		return nil, err
 	}
+	// Enforce the wire oneOf contract before kind dispatch: exactly one
+	// proof family per request. Each per-kind verifier validates only
+	// its own member, so a body carrying both families would otherwise
+	// slip through silently. Kind-independent, hence here above dispatch.
+	if err := sub.validateExactlyOneFamily(); err != nil {
+		return nil, err
+	}
 	verifier, err := s.verifierFor(identity.Kind)
 	if err != nil {
 		return nil, err

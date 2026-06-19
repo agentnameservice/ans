@@ -346,7 +346,6 @@ export async function issueCredential(
         if (completedOperation.error) {
             throw new Error(`Credential issuance failed: ${JSON.stringify(completedOperation.error)}`);
         }
-        console.log(completedOperation) // ************
         const credentialSad = completedOperation.response as any; // The full Self-Addressing Data (SAD) of the credential
         const credentialSaid = credentialSad?.ced?.d; // The SAID of the credential
         console.log(`Successfully issued credential with SAID: ${credentialSaid}`);

@@ -80,10 +80,10 @@ identity:
 vlei:
   # The lei (vLEI) control verifier behind the `lei` identifier kind,
   # mirroring the DNS verifier's and did:web resolver's noop/real split:
-  #   "noop"     — no I/O; runs REAL Ed25519 crypto over the served
-  #                signingInput, but waives the GLEIF/vlei-verifier
-  #                authorization binding (anyone can present any LEI).
-  #                Zero-infra quickstart only — NOT for production.
+  #   "noop"     — no I/O; accepts the same CESR presentation payload but
+  #                performs structural qb64 checks only and waives the
+  #                vlei-verifier authorization + cryptographic signature checks
+  #                (zero-infra quickstart only — NOT for production).
   #   "verifier" — a hardened HTTP client for an internal GLEIF
   #                vlei-verifier (present / authorize / verify). The RA
   #                never parses KERI key state itself; the verifier is
