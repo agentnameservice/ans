@@ -2,7 +2,6 @@ package handler
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
 
 	"github.com/godaddy/ans/internal/adapter/auth"
@@ -27,7 +26,7 @@ func NewRegistrationHandler(svc *service.RegistrationService) *RegistrationHandl
 // Server cert input follows the reference shape: exactly one of
 // `serverCsrPEM` or `serverCertificatePEM` must be set (both or
 // neither → 422). The CSR path routes through the RA's configured
-// `ServerCertificateAuthority` port; the BYOC path routes through
+// `ServerCertificateIssuer` port; the BYOC path routes through
 // the certificate validator.
 type registrationRequest struct {
 	AgentDisplayName          string        `json:"agentDisplayName"`
@@ -59,8 +58,10 @@ type functionDTO struct {
 
 // registrationPendingResponse mirrors the V2 spec's RegistrationPending
 // schema (spec/api-spec-v2.yaml §1167). Field names and optionality
-// match the spec exactly — no extensions. `challenges` holds ACME
-// challenges needed to drive verify-acme; ans emits DNS_01 only.
+// match the spec exactly — no extensions. `challenges` relays the
+// certificate order's domain-control challenges (DNS_01 and HTTP_01);
+// the owner publishes whichever artifact is easier and ANS verifies
+// it at verify-acme.
 type registrationPendingResponse struct {
 	AgentID    string         `json:"agentId"`
 	Status     string         `json:"status"`
@@ -81,13 +82,17 @@ type dnsRecordDTO struct {
 	TTL      int    `json:"ttl"`
 }
 
-// challengeDTO mirrors the V2 ChallengeInfo schema. ans emits DNS_01
-// only per the documented no-HTTP-01 deviation.
+// challengeDTO mirrors the V2 ChallengeInfo schema: type, token,
+// keyAuthorization, dnsRecord, httpPath, expiresAt. keyAuthorization
+// is populated when the issuing provider binds the token to its
+// account key (ACME); self-issued challenges omit it.
 type challengeDTO struct {
-	Type      string                 `json:"type"`
-	Token     string                 `json:"token"`
-	DNSRecord *challengeDNSRecordDTO `json:"dnsRecord,omitempty"`
-	ExpiresAt string                 `json:"expiresAt,omitempty"`
+	Type             string                 `json:"type"`
+	Token            string                 `json:"token"`
+	KeyAuthorization string                 `json:"keyAuthorization,omitempty"`
+	DNSRecord        *challengeDNSRecordDTO `json:"dnsRecord,omitempty"`
+	HTTPPath         string                 `json:"httpPath,omitempty"`
+	ExpiresAt        string                 `json:"expiresAt,omitempty"`
 }
 
 type challengeDNSRecordDTO struct {
@@ -215,8 +220,8 @@ func mapRegistrationResponse(resp *service.RegisterResponse, r *http.Request) *r
 
 	// Register-time next-steps reflect the deferred-cert flow: certs
 	// only issue once verify-acme proves domain control, so the only
-	// step the operator can take right now is publish the ACME
-	// challenge TXT and call verify-acme. Production DNS records
+	// step the operator can take right now is publish a challenge
+	// artifact and call verify-acme. Production DNS records
 	// (TRUST/BADGE/DISCOVERY/TLSA) only materialize on the
 	// verify-acme 202, where they appear paired with VERIFY_DNS as
 	// the next step.
@@ -228,37 +233,55 @@ func mapRegistrationResponse(resp *service.RegisterResponse, r *http.Request) *r
 		DNSRecords: dnsRecords,
 		NextSteps: []nextStepDTO{
 			{Action: "CONFIGURE_DNS",
-				Description: "Publish the ACME DNS-01 challenge TXT record listed in challenges[]",
+				Description: "Publish one challenge artifact from challenges[]: the DNS-01 TXT record, or the HTTP-01 resource at its httpPath",
 				Endpoint:    base + "/verify-acme"},
 			{Action: "VALIDATE_DOMAIN",
-				Description: "Call POST /v2/ans/agents/{agentId}/verify-acme once the challenge record is live",
+				Description: "Call POST /v2/ans/agents/{agentId}/verify-acme once the challenge artifact is live",
 				Endpoint:    base + "/verify-acme"},
 		},
-		ExpiresAt: rfc3339Zero(resp.Registration.ACMEChallenge.ExpiresAt),
+		ExpiresAt: rfc3339Zero(resp.Registration.CertOrder.ExpiresAt),
 		Links: []linkDTO{
 			{Rel: "self", Href: base},
 		},
 	}
 }
 
-// buildRegistrationChallenges builds the ChallengeInfo array for the
-// V2 RegistrationPending response. ans emits DNS_01 only. Named
-// distinctly from renewalmap.go's renewal-specific `buildChallenges`
-// to avoid collision.
+// buildRegistrationChallenges relays the certificate order's
+// challenge set as the ChallengeInfo array for the V2
+// RegistrationPending response. The entries are the provider's own
+// challenges, verbatim — for an external ACME provider that means its
+// token, key authorization, and computed DNS digest; for the
+// in-process CA the self-issued tokens. Named distinctly from
+// renewalmap.go's renewal-specific builder to avoid collision.
+//
+// Returns nil (omitted on the wire) when no order is present — e.g.
+// a registration pre-dating order persistence.
 func buildRegistrationChallenges(reg *domain.AgentRegistration) []challengeDTO {
-	if reg.ACMEChallenge.IsZero() {
+	if reg.CertOrder.IsZero() {
 		return nil
 	}
-	return []challengeDTO{{
-		Type:  "DNS_01",
-		Token: reg.ACMEChallenge.DNS01Token,
-		DNSRecord: &challengeDNSRecordDTO{
-			Name:  "_acme-challenge." + reg.FQDN(),
-			Type:  "TXT",
-			Value: reg.ACMEChallenge.DNS01Token,
-		},
-		ExpiresAt: rfc3339Zero(reg.ACMEChallenge.ExpiresAt),
-	}}
+	expiresAt := rfc3339Zero(reg.CertOrder.ExpiresAt)
+	out := make([]challengeDTO, 0, len(reg.CertOrder.Challenges))
+	for _, ch := range reg.CertOrder.Challenges {
+		dto := challengeDTO{
+			Type:             string(ch.Type),
+			Token:            ch.Token,
+			KeyAuthorization: ch.KeyAuthorization,
+			ExpiresAt:        expiresAt,
+		}
+		switch ch.Type {
+		case domain.ChallengeTypeDNS01:
+			dto.DNSRecord = &challengeDNSRecordDTO{
+				Name:  ch.EffectiveDNSRecordName(reg.FQDN()),
+				Type:  "TXT",
+				Value: ch.EffectiveDNSRecordValue(),
+			}
+		case domain.ChallengeTypeHTTP01:
+			dto.HTTPPath = ch.EffectiveHTTPPath()
+		}
+		out = append(out, dto)
+	}
+	return out
 }
 
 // schemeOf returns "https" if the request was served over TLS or
@@ -272,6 +295,3 @@ func schemeOf(r *http.Request) string {
 	}
 	return "http"
 }
-
-// silence "imported and not used" if handlers evolve.
-var _ = errors.New

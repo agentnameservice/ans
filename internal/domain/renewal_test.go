@@ -14,7 +14,8 @@ func TestNewCSRRenewal(t *testing.T) {
 	// rather than carrying the cert bytes inline. Reference:
 	// AgentServerCertificateRenewal with renewalType=SERVER_CSR.
 	now := time.Now()
-	r := NewCSRRenewal("agent-1", 42, "csr-9", "dns-tok", "http-tok", now)
+	r := NewCSRRenewal("agent-1", 42, "csr-9",
+		NewSelfIssuedOrder("dns-tok", "http-tok", now.Add(24*time.Hour)), now)
 	require.NotNil(t, r)
 	assert.Equal(t, "agent-1", r.AgentID)
 	assert.Equal(t, int64(42), r.RegistrationID)
@@ -24,23 +25,34 @@ func TestNewCSRRenewal(t *testing.T) {
 	assert.Empty(t, r.ByocCertPEM)
 	assert.Empty(t, r.ByocChainPEM)
 	assert.Equal(t, ValidationPending, r.Validation.Status)
-	assert.Equal(t, "dns-tok", r.Validation.DNS01ChallengeToken)
-	assert.Equal(t, "http-tok", r.Validation.HTTP01ChallengeToken)
-	assert.True(t, r.Validation.ExpiresAt.After(now))
+	dns01, ok := r.Validation.ChallengeOfType(ChallengeTypeDNS01)
+	require.True(t, ok)
+	assert.Equal(t, "dns-tok", dns01.Token)
+	http01, ok := r.Validation.ChallengeOfType(ChallengeTypeHTTP01)
+	require.True(t, ok)
+	assert.Equal(t, "http-tok", http01.Token)
+	// The validation window clamps to the order expiry when the
+	// order ends before the standard renewal window.
+	assert.Equal(t, now.Add(24*time.Hour), r.Validation.ExpiresAt)
 	assert.Equal(t, now, r.CreatedAt)
 }
 
 func TestNewBYOCRenewal(t *testing.T) {
 	now := time.Now()
-	r := NewBYOCRenewal("agent-1", 42, "LEAF", "CHAIN", "dns-tok", "http-tok", now)
+	r := NewBYOCRenewal("agent-1", 42, "LEAF", "CHAIN",
+		NewSelfIssuedOrder("dns-tok", "http-tok", now.Add(24*time.Hour)), now)
 	assert.Equal(t, "agent-1", r.AgentID)
 	assert.Equal(t, int64(42), r.RegistrationID)
 	assert.Equal(t, RenewalTypeBYOC, r.RenewalType)
 	assert.Equal(t, "LEAF", r.ByocCertPEM)
 	assert.Equal(t, "CHAIN", r.ByocChainPEM)
 	assert.Equal(t, ValidationPending, r.Validation.Status)
-	assert.Equal(t, "dns-tok", r.Validation.DNS01ChallengeToken)
-	assert.Equal(t, "http-tok", r.Validation.HTTP01ChallengeToken)
+	dns01, ok := r.Validation.ChallengeOfType(ChallengeTypeDNS01)
+	require.True(t, ok)
+	assert.Equal(t, "dns-tok", dns01.Token)
+	http01, ok := r.Validation.ChallengeOfType(ChallengeTypeHTTP01)
+	require.True(t, ok)
+	assert.Equal(t, "http-tok", http01.Token)
 	assert.True(t, r.Validation.ExpiresAt.After(now))
 }
 
@@ -79,14 +91,14 @@ func TestRenewalValidation_MarkFailed(t *testing.T) {
 
 func TestServerCertificateRenewal_IsExpired(t *testing.T) {
 	now := time.Now()
-	r := NewBYOCRenewal("a", 1, "c", "", "d", "h", now)
+	r := NewBYOCRenewal("a", 1, "c", "", NewSelfIssuedOrder("d", "h", now.Add(30*24*time.Hour)), now)
 	assert.False(t, r.IsExpired(now))
 	assert.True(t, r.IsExpired(now.Add(8*24*time.Hour)))
 }
 
 func TestServerCertificateRenewal_Completion(t *testing.T) {
 	now := time.Now()
-	r := NewBYOCRenewal("a", 1, "c", "", "d", "h", now)
+	r := NewBYOCRenewal("a", 1, "c", "", NewSelfIssuedOrder("d", "h", now.Add(30*24*time.Hour)), now)
 	assert.False(t, r.IsCompleted())
 
 	require.NoError(t, r.MarkCompleted(now.Add(time.Hour)))
@@ -100,16 +112,21 @@ func TestServerCertificateRenewal_Completion(t *testing.T) {
 
 func TestServerCertificateRenewal_Fail(t *testing.T) {
 	now := time.Now()
-	r := NewBYOCRenewal("a", 1, "c", "", "d", "h", now)
+	r := NewBYOCRenewal("a", 1, "c", "", NewSelfIssuedOrder("d", "h", now.Add(30*24*time.Hour)), now)
 	require.NoError(t, r.MarkFailed("boom", now.Add(time.Second)))
 	assert.Equal(t, "boom", r.FailureReason)
 	assert.False(t, r.CompletedAt.IsZero())
 }
 
 func TestServerCertificateRenewal_UpdateValidationStatus(t *testing.T) {
-	r := NewBYOCRenewal("a", 1, "c", "", "d", "h", time.Now())
+	r := NewBYOCRenewal("a", 1, "c", "", NewSelfIssuedOrder("d", "h", time.Now().Add(30*24*time.Hour)), time.Now())
 	newV, _ := r.Validation.MarkVerified(time.Now())
 	r.UpdateValidationStatus(newV)
 	assert.Equal(t, ValidationVerified, r.Validation.Status)
-	assert.True(t, r.IsCompleted()) // verified validation counts as completed
+	// Verified validation alone is NOT completion: a CSR renewal whose
+	// order is still ISSUING is verified-but-incomplete until
+	// MarkCompleted runs.
+	assert.False(t, r.IsCompleted())
+	require.NoError(t, r.MarkCompleted(time.Now()))
+	assert.True(t, r.IsCompleted())
 }

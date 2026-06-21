@@ -79,7 +79,7 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 		agents, endpoints, certsStore, byoc, renewals,
 		cert.NewX509Validator(cert.WithSkipChainVerify()),
 		identityCA, eventbus.NewInMemoryBus(zerolog.Nop()), outbox, db,
-	).WithServerCertificateAuthority(serverCA)
+	).WithServerCertificateIssuer(serverCA)
 
 	idSvc := service.NewIdentityService(
 		sqlite.NewIdentityStore(db),

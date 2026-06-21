@@ -27,6 +27,7 @@ import (
 
 	"github.com/godaddy/ans/internal/adapter/auth"
 	"github.com/godaddy/ans/internal/adapter/cert"
+	"github.com/godaddy/ans/internal/adapter/challenge"
 	"github.com/godaddy/ans/internal/adapter/didresolver"
 	"github.com/godaddy/ans/internal/adapter/dns"
 	"github.com/godaddy/ans/internal/adapter/docsui"
@@ -126,24 +127,21 @@ func run(cfgPath string) error {
 	if err != nil {
 		return fmt.Errorf("init identity ca: %w", err)
 	}
-	// Optional server CA — enables the serverCsrPEM path at
-	// registration and renewal. When the config block is absent the
-	// RA accepts only BYOC (serverCertificatePEM).
-	var serverCA port.ServerCertificateAuthority
-	if cfg.CA.Server != nil && cfg.CA.Server.DataDir != "" {
-		sca, caErr := cert.NewServerSelfCA(
-			cfg.CA.Server.DataDir, cfg.CA.Server.Org, cfg.CA.Server.ValidityDays)
-		if caErr != nil {
-			return fmt.Errorf("init server ca: %w", caErr)
+	// Optional server certificate issuer — enables the serverCsrPEM
+	// path at registration and renewal. When the config block is
+	// absent the RA accepts only BYOC (serverCertificatePEM).
+	// `ca.server.type` selects the adapter: "self" (default) is the
+	// in-process self-signed CA; "acme" is an external RFC 8555
+	// provider such as Let's Encrypt. Both implement the same
+	// port.ServerCertificateIssuer order lifecycle.
+	var serverCA port.ServerCertificateIssuer
+	if cfg.CA.Server != nil {
+		serverCA, err = buildServerIssuer(cfg.CA.Server, logger)
+		if err != nil {
+			return err
 		}
-		serverCA = sca
-		logger.Info().
-			Str("dataDir", cfg.CA.Server.DataDir).
-			Str("org", cfg.CA.Server.Org).
-			Int("validityDays", cfg.CA.Server.ValidityDays).
-			Msg("server CA ready — serverCsrPEM path enabled")
 	} else {
-		logger.Info().Msg("no server CA configured — serverCsrPEM path disabled (BYOC-only)")
+		logger.Info().Msg("no server issuer configured — serverCsrPEM path disabled (BYOC-only)")
 	}
 	// In local-dev, accept self-signed BYOC certs. Production must
 	// remove WithSkipChainVerify in its config factory.
@@ -182,7 +180,8 @@ func run(cfgPath string) error {
 		KeyID:      signerKeyID,
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
-		WithServerCertificateAuthority(serverCA).
+		WithHTTPChallengeVerifier(challenge.NewHTTPVerifier()).
+		WithServerCertificateIssuer(serverCA).
 		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL)
 
 	// Verified identities — the "who" behind the agents. Shares the
@@ -346,6 +345,12 @@ func run(cfgPath string) error {
 	go service.RunExpiryChecker(expctx, renewals, certsStore, logger, service.ExpiryCheckerOptions{
 		Interval: 5 * time.Minute,
 	})
+	// Registration-side twin: PENDING_VALIDATION registrations whose
+	// challenge window lapsed flip to EXPIRED, per the spec's
+	// "not cancellable and will auto-expire" contract.
+	go service.RunAgentExpiryChecker(expctx, agents, logger, service.ExpiryCheckerOptions{
+		Interval: 5 * time.Minute,
+	})
 	defer expCancel()
 
 	addr := fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port)
@@ -448,6 +453,32 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 // auth.OIDCProvider since they share Middleware().
 type providerWithAnonymous interface {
 	Middleware() func(http.Handler) http.Handler
+}
+
+// buildServerIssuer builds the configured server certificate issuer.
+// Config validation has already checked the per-type required fields.
+func buildServerIssuer(s *config.CAServer, logger zerolog.Logger) (port.ServerCertificateIssuer, error) {
+	if s.IsACME() {
+		issuer, err := cert.NewACMEIssuer(s.ACME.DirectoryURL, s.ACME.Email, s.ACME.DataDir, cert.WithLogger(logger))
+		if err != nil {
+			return nil, fmt.Errorf("init acme issuer: %w", err)
+		}
+		logger.Info().
+			Str("directoryURL", s.ACME.DirectoryURL).
+			Str("dataDir", s.ACME.DataDir).
+			Msg("ACME issuer ready — serverCsrPEM path enabled (provider-issued certs)")
+		return issuer, nil
+	}
+	sca, err := cert.NewServerSelfCA(s.DataDir, s.Org, s.ValidityDays)
+	if err != nil {
+		return nil, fmt.Errorf("init server ca: %w", err)
+	}
+	logger.Info().
+		Str("dataDir", s.DataDir).
+		Str("org", s.Org).
+		Int("validityDays", s.ValidityDays).
+		Msg("server CA ready — serverCsrPEM path enabled")
+	return sca, nil
 }
 
 // selectDNSVerifier returns the configured DNS adapter. Returns a

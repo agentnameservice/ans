@@ -61,6 +61,23 @@ type AgentStore interface {
 		filter ListFilter,
 	) (*CursorPage[*domain.AgentRegistration], error)
 
+	// ExpireLapsedPendingValidation atomically transitions to EXPIRED
+	// every registration that is still PENDING_VALIDATION with a
+	// PENDING certificate order whose challenge window lapsed at or
+	// before now, returning the number transitioned. The agent-expiry
+	// sweeper uses it to honor the spec's "PENDING_VALIDATION
+	// registrations are not cancellable and will auto-expire".
+	//
+	// The transition is a single guarded write — not a read-then-save
+	// — so a verify-acme that advances the same row (to PENDING_DNS,
+	// or to a non-PENDING order state) between scans cannot be
+	// clobbered: such a row simply no longer matches. In-flight
+	// (order ISSUING) and terminally-failed (order FAILED)
+	// registrations are excluded; they leave PENDING_VALIDATION
+	// through the cancel route instead, per domain.Cancel's
+	// eligibility rule.
+	ExpireLapsedPendingValidation(ctx context.Context, now time.Time) (int64, error)
+
 	// Delete removes the registration with the given ID. Used only for
 	// administrative cleanup; normal lifecycle uses Revoke.
 	Delete(ctx context.Context, id int64) error

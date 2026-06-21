@@ -91,33 +91,42 @@ func ComputeRequiredDNSRecords(reg *AgentRegistration, tlPublicBaseURL string) [
 
 	// TLSA record for certificate binding. Every registration has a
 	// server cert — either BYOC (operator-submitted) or CSR-signed
-	// (RA issues via its configured `ServerCertificateAuthority`).
-	// Both paths land through the same ByocServerCertificate struct,
-	// so `reg.ServerCert` is set for any registration that's reached
+	// (issued via the configured `ServerCertificateIssuer`). Both
+	// paths land through the same ByocServerCertificate struct, so
+	// `reg.ServerCert` is set for any registration that's reached
 	// verify-dns.
-	//
-	// `3 1 1 <hex>` = DANE-EE + SubjectPublicKeyInfo + SHA-256
-	// (RFC 6698). Required=false: operators whose zones aren't
-	// DNSSEC-signed can't produce a trustworthy TLSA record, so the
-	// RA doesn't block verify-dns on its presence. The verify layer
-	// enforces a stricter rule at query time: when a TLSA response
-	// IS DNSSEC-validated, its value must match the expected
-	// fingerprint (otherwise an attacker rewrote the record in a
-	// signed zone — the worst failure mode). That post-verify
-	// check lives alongside the verifier, not in the record set.
 	if reg.ServerCert == nil {
 		return records
 	}
-	records = append(records, ExpectedDNSRecord{
+	records = append(records, TLSARecordForCert(fqdn, reg.ServerCert.Fingerprint))
+
+	return records
+}
+
+// TLSARecordForCert builds the DANE-EE TLSA record binding a server
+// certificate fingerprint to the FQDN. Shared between the
+// registration record set and the renewal status responses (the
+// operator updates this record after every renewal — it fingerprints
+// the new leaf).
+//
+// `3 1 1 <hex>` = DANE-EE + SubjectPublicKeyInfo + SHA-256
+// (RFC 6698). Required=false: operators whose zones aren't
+// DNSSEC-signed can't produce a trustworthy TLSA record, so the
+// RA doesn't block verify-dns on its presence. The verify layer
+// enforces a stricter rule at query time: when a TLSA response
+// IS DNSSEC-validated, its value must match the expected
+// fingerprint (otherwise an attacker rewrote the record in a
+// signed zone — the worst failure mode). That post-verify
+// check lives alongside the verifier, not in the record set.
+func TLSARecordForCert(fqdn, fingerprint string) ExpectedDNSRecord {
+	return ExpectedDNSRecord{
 		Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
 		Type:     DNSRecordTLSA,
-		Value:    fmt.Sprintf("3 1 1 %s", reg.ServerCert.Fingerprint),
+		Value:    fmt.Sprintf("3 1 1 %s", fingerprint),
 		Purpose:  PurposeCertificateBinding,
 		Required: false,
 		TTL:      3600,
-	})
-
-	return records
+	}
 }
 
 func protocolToANSValue(p Protocol) string {

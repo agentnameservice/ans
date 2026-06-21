@@ -39,6 +39,9 @@ func TestDomainError_Unwrap(t *testing.T) {
 
 	u := NewUnauthorizedError("X", "x")
 	assert.ErrorIs(t, u, ErrUnauthorized)
+
+	ua := NewUnavailableError("X", "x")
+	assert.ErrorIs(t, ua, ErrUnavailable)
 }
 
 func TestNewInternalError_WrapsCause(t *testing.T) {

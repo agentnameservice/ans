@@ -1673,7 +1673,7 @@ components:
             HATEOAS link hrefs. Recommended for backport to v1.
         status:
           type: string
-          enum: [PENDING_VALIDATION, PENDING_DNS]
+          enum: [PENDING_VALIDATION, PENDING_CERTS, PENDING_DNS]
         ansName:
           type: string
           example: ans://v1.0.0.external-domain.com
@@ -1707,7 +1707,7 @@ components:
       properties:
         action:
           type: string
-          enum: [CONFIGURE_DNS, CONFIGURE_HTTP, VERIFY_DNS, VALIDATE_DOMAIN, WAIT]
+          enum: [CONFIGURE_DNS, CONFIGURE_HTTP, VERIFY_DNS, VALIDATE_DOMAIN, WAIT, CANCEL]
         description:
           type: string
         endpoint:

@@ -192,6 +192,32 @@ log:
 	}
 }
 
+// TestRAConfig_Validate_ACMEServerIssuer pins the valid-acme arm:
+// a complete acme block passes validation.
+func TestRAConfig_Validate_ACMEServerIssuer(t *testing.T) {
+	dir := t.TempDir()
+	c := defaultRAConfig()
+	c.Auth.Static = &AuthStatic{APIKey: "x"}
+	c.CA.Self.DataDir = dir
+	c.Keys.File.Path = dir
+	c.Store.SQLite.Path = filepath.Join(dir, "db")
+	c.CA.Server = &CAServer{Type: "acme", ACME: &CAServerACME{
+		DirectoryURL: "https://acme-staging-v02.api.letsencrypt.org/directory",
+		Email:        "ops@example.com",
+		DataDir:      dir,
+	}}
+	c.DNS.Type = "lookup" // acme requires the real verifier
+	if err := c.Validate(); err != nil {
+		t.Fatalf("valid acme config rejected: %v", err)
+	}
+	if !c.CA.Server.IsACME() {
+		t.Error("IsACME must report true for type acme")
+	}
+	if (&CAServer{}).IsACME() {
+		t.Error("IsACME must report false for the self default")
+	}
+}
+
 // ----- RAConfig.Validate error branches -----
 
 func TestRAConfig_Validate_Errors(t *testing.T) {
@@ -216,11 +242,29 @@ func TestRAConfig_Validate_Errors(t *testing.T) {
 		{"missing ca.self.data-dir", func(c *RAConfig) { c.CA.Self.DataDir = "" }, "ca.self.data-dir"},
 		{"invalid ca.self.validity-days", func(c *RAConfig) { c.CA.Self.ValidityDays = 0 }, "validity-days"},
 		{"server CA missing data-dir", func(c *RAConfig) {
-			c.CA.Server = &CAServerSelf{ValidityDays: 7}
+			c.CA.Server = &CAServer{ValidityDays: 7}
 		}, "ca.server.data-dir"},
 		{"server CA bad validity", func(c *RAConfig) {
-			c.CA.Server = &CAServerSelf{DataDir: dir, ValidityDays: 0}
+			c.CA.Server = &CAServer{DataDir: dir, ValidityDays: 0}
 		}, "ca.server.validity-days"},
+		{"acme missing block", func(c *RAConfig) {
+			c.CA.Server = &CAServer{Type: "acme"}
+		}, "ca.server.acme block"},
+		{"acme missing directory-url", func(c *RAConfig) {
+			c.CA.Server = &CAServer{Type: "acme", ACME: &CAServerACME{DataDir: dir}}
+		}, "directory-url"},
+		{"acme missing data-dir", func(c *RAConfig) {
+			c.CA.Server = &CAServer{Type: "acme", ACME: &CAServerACME{DirectoryURL: "https://acme.example/dir"}}
+		}, "acme.data-dir"},
+		{"unsupported server issuer type", func(c *RAConfig) {
+			c.CA.Server = &CAServer{Type: "vault"}
+		}, "ca.server.type"},
+		{"acme issuer with noop dns", func(c *RAConfig) {
+			c.CA.Server = &CAServer{Type: "acme", ACME: &CAServerACME{
+				DirectoryURL: "https://acme.example/dir", DataDir: dir,
+			}}
+			c.DNS.Type = "noop"
+		}, "requires dns.type 'lookup'"},
 		{"unsupported dns.type", func(c *RAConfig) { c.DNS.Type = "bind" }, "dns.type"},
 		{"unsupported keys.type", func(c *RAConfig) { c.Keys.Type = "vault" }, "keys.type"},
 		{"missing keys.file.path", func(c *RAConfig) { c.Keys.File.Path = "" }, "keys.file.path"},

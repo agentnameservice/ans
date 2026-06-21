@@ -87,9 +87,10 @@ IDENTITY_CSR_PEM=$(cat "$CSR_DIR/identity.csr")
 
 # ----- Generate server CSR (DNS SAN = agent FQDN) -----
 #
-# Matches the reference's default registration shape: the RA signs
-# the server TLS cert through its configured ServerCertificateAuthority
-# port. The demo config wires a ServerSelfCA that handles this.
+# The RA opens a certificate order via its configured
+# ServerCertificateIssuer port and finalizes it at verify-acme. The
+# demo wires the in-process self-signed CA by default, or Let's
+# Encrypt with start.sh --with-acme.
 cat >"$CSR_DIR/server.cnf" <<CNF
 [req]
 distinguished_name = req_dn
@@ -149,6 +150,16 @@ ok "agentId=$AGENT_ID (saved to $LAST_AGENT_FILE)"
 
 if [ "$REGISTER_ONLY" = "1" ]; then
   header "--register-only: stopping before activation"
+  # Surface the domain-control challenge artifacts the owner must
+  # publish before verify-acme. With the self-signed issuer the noop
+  # DNS verifier accepts anything; with --with-acme these are the
+  # provider's real challenges and one of them must actually be live
+  # (scripts/demo/acme-verify.sh drives the rest of that flow).
+  TXT_NAME=$(printf '%s' "$REG_RESP" | jq -r '.challenges[]? | select(.type=="DNS_01") | .dnsRecord.name // empty')
+  TXT_VALUE=$(printf '%s' "$REG_RESP" | jq -r '.challenges[]? | select(.type=="DNS_01") | .dnsRecord.value // empty')
+  if [ -n "$TXT_NAME" ]; then
+    note "to validate domain control, publish: TXT $TXT_NAME = $TXT_VALUE"
+  fi
   printf "%s\n" "$AGENT_ID"
   exit 0
 fi
