@@ -254,6 +254,18 @@ func TestVerifierAuthorization(t *testing.T) {
 			t.Fatalf("want LEI_VERIFIER_UNAVAILABLE, got %v", err)
 		}
 	})
+	// A 200 carrying no LEI (empty body or {}) must fail closed: an empty
+	// LEI reads downstream as the noop waiver of the AID↔LEI binding, so
+	// returning {Authorized:true, LEI:""} would silently degrade the
+	// production verifier to noop semantics. Mirror the empty-AID guard.
+	for _, body := range []string{"", "{}", `{"lei":""}`} {
+		t.Run("200 without LEI unavailable", func(t *testing.T) {
+			v := newVerifierFor(t, &vleiServer{authStatus: http.StatusOK, authBody: body})
+			if _, err := v.Authorization(ctx, "EAID"); !isCode(err, "LEI_VERIFIER_UNAVAILABLE") {
+				t.Fatalf("body %q: want LEI_VERIFIER_UNAVAILABLE, got %v", body, err)
+			}
+		})
+	}
 	t.Run("non-qb64 AID rejected before dial", func(t *testing.T) {
 		v := newVerifierFor(t, &vleiServer{authStatus: http.StatusOK, authBody: `{"lei":"L1"}`})
 		if _, err := v.Authorization(ctx, "../signature/verify"); !isCode(err, "LEI_SUBJECT_AID_INVALID") {

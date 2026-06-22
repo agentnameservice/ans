@@ -216,6 +216,10 @@ func (v *Verifier) Authorization(ctx context.Context, subjectAID string) (port.A
 	}
 	switch status {
 	case http.StatusOK:
+		if auth.LEI == "" {
+			v.logFailure("authorize", "verifier authorized the AID but returned no LEI (failing closed)", status, nil)
+			return port.AuthorizationResult{}, v.unavailable("authorize")
+		}
 		return port.AuthorizationResult{Authorized: true, LEI: auth.LEI}, nil
 	case http.StatusUnauthorized, http.StatusNotFound:
 		// 401: presented but not authorized; 404: not yet processed.
