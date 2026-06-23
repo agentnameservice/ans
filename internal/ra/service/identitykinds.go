@@ -73,6 +73,13 @@ type ProofSubmission struct {
 // by VerifyControlRequest in spec/api-spec-v2.yaml: EXACTLY ONE proof
 // family is set per request (JWS kinds → signedProofs; lei →
 // cesrSignature).
+//
+// Checks value-presence, not the spec oneOf's literal key-presence:
+// the plain []string/string types collapse absent, null, and empty to
+// the same zero value, so key-presence is not recoverable here. Value-
+// presence is stricter — it rejects a body with no usable proof rather
+// than deferring to a per-kind verifier — diverging only on a body with
+// both keys present but one empty, which routes by the non-empty family.
 func (s ProofSubmission) validateExactlyOneFamily() error {
 	hasJWS := len(s.SignedProofs) > 0
 	hasCESR := s.CESRSignature != ""

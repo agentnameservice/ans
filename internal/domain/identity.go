@@ -14,7 +14,7 @@ type IdentifierKind string
 // Identifier kinds. A kind being *recognized* here is independent of
 // it being *enabled* — the service layer dispatches per kind and
 // returns IDENTIFIER_KIND_UNSUPPORTED for kinds this deployment has
-// no control verifier for (lei is recognized but postponed).
+// no control verifier wired for.
 const (
 	// KindDIDWeb — did:web. The authoritative keys live in the DID
 	// document fetched from the operator's web host; control is
@@ -26,8 +26,8 @@ const (
 	KindDIDKey IdentifierKind = "did:key"
 
 	// KindLEI — an ISO 17442 Legal Entity Identifier, proven through
-	// a vLEI credential presentation. Postponed: recognized so the
-	// error is precise, but no control verifier ships yet.
+	// a vLEI credential presentation verified by the LEIControlVerifier
+	// port (noop quickstart adapter, or the real vlei-verifier client).
 	KindLEI IdentifierKind = "lei"
 )
 
