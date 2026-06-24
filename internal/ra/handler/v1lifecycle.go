@@ -94,12 +94,12 @@ func (h *V1LifecycleHandler) VerifyACME(w http.ResponseWriter, r *http.Request) 
 	}
 	WriteJSON(w, http.StatusAccepted, v1AgentStatusResponse{
 		Status:         string(res.Registration.Status),
-		Phase:          phaseFromStatus(res.Registration.Status),
-		CompletedSteps: completedStepsFor(res.Registration.Status),
-		PendingSteps:   pendingStepsFor(res.Registration.Status),
+		Phase:          phaseFor(res.Registration),
+		CompletedSteps: completedStepsFor(res.Registration),
+		PendingSteps:   pendingStepsFor(res.Registration),
 		CreatedAt:      res.Registration.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:      res.Now.Format("2006-01-02T15:04:05Z07:00"),
-		ExpiresAt:      rfc3339Zero(res.Registration.ACMEChallenge.ExpiresAt),
+		ExpiresAt:      rfc3339Zero(res.Registration.CertOrder.ExpiresAt),
 	})
 }
 
@@ -125,12 +125,12 @@ func (h *V1LifecycleHandler) VerifyDNS(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusAccepted, v1AgentStatusResponse{
 		Status:         string(res.Registration.Status),
-		Phase:          phaseFromStatus(res.Registration.Status),
-		CompletedSteps: completedStepsFor(res.Registration.Status),
-		PendingSteps:   pendingStepsFor(res.Registration.Status),
+		Phase:          phaseFor(res.Registration),
+		CompletedSteps: completedStepsFor(res.Registration),
+		PendingSteps:   pendingStepsFor(res.Registration),
 		CreatedAt:      res.Registration.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:      res.Now.Format("2006-01-02T15:04:05Z07:00"),
-		ExpiresAt:      rfc3339Zero(res.Registration.ACMEChallenge.ExpiresAt),
+		ExpiresAt:      rfc3339Zero(res.Registration.CertOrder.ExpiresAt),
 	})
 }
 

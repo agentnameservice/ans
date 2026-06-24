@@ -6,6 +6,7 @@ import (
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/tl/event"
+	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
 	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
 )
 
@@ -101,5 +102,46 @@ func (v1Codec) ParseAndBuild(
 		return nil, nil, fmt.Errorf("service: canonicalize V1 inner: %w", err)
 	}
 	env := eventv1.BuildEnvelope(logID, &inner, keyID, sig)
+	return env, canonical, nil
+}
+
+// identityCodec implements envelopeCodec for the identity event
+// family — the shape the RA's `/v2/ans/identities/*` routes emit to
+// the `/v1/internal/identities/event` ingest lane. Same producer
+// lane, same tree; the inner event is keyed by identityId.
+//
+// The cross-lane guard lives in the closed enums: an AGENT_* body
+// fails this codec's `inner.Validate()` (unknown eventType, missing
+// identityId) with 422 INVALID_EVENT, exactly as an IDENTITY_* body
+// fails the agent codecs.
+type identityCodec struct{}
+
+// ParseAndBuild unmarshals raw into `identityevent.Event`, validates
+// it, stamps the verified raID, canonicalizes, and wraps in an
+// identity envelope.
+func (identityCodec) ParseAndBuild(
+	raw []byte,
+	raID, keyID, sig, logID string,
+) (event.Signable, []byte, error) {
+	var inner identityevent.Event
+	if err := json.Unmarshal(raw, &inner); err != nil {
+		return nil, nil, domain.NewValidationError("INVALID_EVENT_BODY", err.Error())
+	}
+	if err := inner.Validate(); err != nil {
+		return nil, nil, domain.NewValidationError("INVALID_EVENT", err.Error())
+	}
+	if inner.RaID == "" {
+		inner.RaID = raID
+	} else if inner.RaID != raID {
+		return nil, nil, domain.NewValidationError(
+			"RAID_MISMATCH",
+			fmt.Sprintf("inner event raId %q does not match signed raId %q", inner.RaID, raID),
+		)
+	}
+	canonical, err := identityevent.CanonicalizeEvent(&inner)
+	if err != nil {
+		return nil, nil, fmt.Errorf("service: canonicalize identity inner: %w", err)
+	}
+	env := identityevent.BuildEnvelope(logID, &inner, keyID, sig)
 	return env, canonical, nil
 }

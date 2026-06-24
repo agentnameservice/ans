@@ -177,6 +177,7 @@ func run(cfgPath string) error {
 	// underlying Tessera reader gets torn down.
 	defer logSvc.Close()
 	badgeSvc := service.NewBadgeService(logSvc)
+	identityBadgeSvc := service.NewIdentityBadgeService(logSvc, badgeSvc)
 
 	// Receipt + status-token generators reuse the single signing
 	// key. Matches the reference TL's deployed topology: one KMS key
@@ -257,7 +258,7 @@ func run(cfgPath string) error {
 	}
 
 	h := handler.NewHandlers(
-		logSvc, badgeSvc, receiptSvc, statusTokenSvc,
+		logSvc, badgeSvc, identityBadgeSvc, receiptSvc, statusTokenSvc,
 		checkpointSvc, schemaSvc, rootKeysBody,
 	)
 	h.Mount(r, lg.DataDir())
@@ -405,6 +406,7 @@ func buildAuth(ctx context.Context, cfg *config.TLConfig) (authMiddlewareProvide
 			// covered here — that route requires the Bearer key.
 			opts = append(opts,
 				auth.WithAnonymousPath("/v1/agents/"),
+				auth.WithAnonymousPath("/v1/identities/"),
 				auth.WithAnonymousPath("/v1/log/"),
 				auth.WithAnonymousPath("/checkpoint"),
 				auth.WithAnonymousPath("/root-keys"),
@@ -425,6 +427,7 @@ func buildAuth(ctx context.Context, cfg *config.TLConfig) (authMiddlewareProvide
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
 			auth.WithOIDCAnonymousPath("/docs"),
 			auth.WithOIDCAnonymousPath("/v1/agents/"),
+			auth.WithOIDCAnonymousPath("/v1/identities/"),
 			auth.WithOIDCAnonymousPath("/v1/log/"),
 			auth.WithOIDCAnonymousPath("/checkpoint"),
 			auth.WithOIDCAnonymousPath("/root-keys"),

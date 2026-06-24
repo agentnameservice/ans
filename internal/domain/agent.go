@@ -10,25 +10,6 @@ const (
 	maxDescriptionLength = 150
 )
 
-// ACMEChallenge captures the DNS-01 challenge token issued to an
-// operator at registration time. Zero-value when no challenge is
-// active (agent is past PENDING_DNS, or the registration predates
-// challenge-persistence).
-//
-// ans emits DNS-01 only — the reference api-spec ChallengeInfo
-// declares both DNS_01 and HTTP_01 options, but the ans deviation
-// (documented in CLAUDE.md) skips HTTP_01. Future support can land
-// by extending this struct with HTTP01Token + KeyAuthorization.
-type ACMEChallenge struct {
-	DNS01Token string    `json:"dns01Token,omitempty"`
-	ExpiresAt  time.Time `json:"expiresAt,omitzero"`
-}
-
-// IsZero reports whether the challenge is unset.
-func (c ACMEChallenge) IsZero() bool {
-	return c.DNS01Token == "" && c.ExpiresAt.IsZero()
-}
-
 // RegistrationDetails holds metadata about an agent registration.
 type RegistrationDetails struct {
 	RegistrationTimestamp time.Time `json:"registrationTimestamp"`
@@ -79,12 +60,13 @@ type AgentRegistration struct {
 	// ServerCert is the BYOC server certificate (if submitted).
 	ServerCert *ByocServerCertificate `json:"serverCert,omitempty"`
 
-	// IdentityCSR is the most recent pending identity CSR on this
-	// registration. Initially populated at registration time; can be
-	// replaced by a rotation via POST /certificates/identity (which
-	// flips the previous one to SIGNED once the CA issues the new
-	// cert). Historical CSRs persist in the csrs table — the one
-	// embedded here is a "fast path" cache for the status handler.
+	// IdentityCSR is the most recent identity CSR on this
+	// registration: PENDING between registration and verify-acme
+	// (which signs it once domain control is proven), and SIGNED
+	// thereafter. A rotation via POST /certificates/identity is signed
+	// at submission and replaces this slot with the new SIGNED CSR.
+	// Historical CSRs persist in the csrs table — the one embedded
+	// here is a "fast path" cache for the status handler.
 	IdentityCSR *AgentCSR `json:"identityCsr,omitempty"`
 
 	// ServerCSR is the most recent pending server CSR on this
@@ -96,12 +78,14 @@ type AgentRegistration struct {
 	// SupersedesRegistrationID is the ID of the previous version (for supersession).
 	SupersedesRegistrationID int64 `json:"supersedesRegistrationId,omitempty"`
 
-	// ACMEChallenge holds the DNS-01 challenge token issued at
-	// registration time. Zero-value when the agent is past the
-	// PENDING_DNS stage (or predates the challenge-persistence
-	// migration). ans is DNS-01-only per the documented no-HTTP-01
-	// deviation.
-	ACMEChallenge ACMEChallenge `json:"acmeChallenge,omitzero"`
+	// CertOrder tracks the certificate order and its domain-control
+	// challenges for this registration. CSR-path registrations carry
+	// the provider order returned by `ServerCertificateIssuer.
+	// CreateOrder`; BYOC registrations carry a self-issued validation
+	// order (OrderRef empty) because domain control must be proven
+	// even when no certificate is being issued. Zero-value for
+	// registrations predating order persistence.
+	CertOrder CertificateOrder `json:"certOrder,omitzero"`
 
 	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// for this registration. Each value names one family — typically
@@ -234,15 +218,20 @@ func (r *AgentRegistration) Activate(now time.Time) error {
 
 // AdvanceToPendingDNS transitions from PENDING_VALIDATION to PENDING_DNS,
 // which is the state the registration enters once domain-control
-// validation (ACME) succeeds and the DNS records the operator must
-// configure have been computed.
+// validation (ACME) succeeds AND the certificate order completed —
+// the DNS records the operator must configure (notably TLSA) can only
+// be computed once the server certificate exists.
 //
-// The V2 spec (spec/api-spec-v2.yaml) and the reference RA both use a
-// three-state pending chain of PENDING_VALIDATION → PENDING_DNS →
-// ACTIVE. There is no intermediate PENDING_CERTS state: certificate
-// issuance is internal work that happens within either
-// PENDING_VALIDATION or PENDING_DNS and does not need its own exposed
-// lifecycle state.
+// The agent lifecycle enum stays exactly as the V2 spec's
+// `AgentLifecycleStatus` defines it. Certificate issuance in flight is
+// NOT a lifecycle state: it is tracked on `CertOrder.State`
+// (PENDING → ISSUING → COMPLETED) and surfaced as derived views —
+// `RegistrationPending.status = PENDING_CERTS` and `AgentStatus.phase
+// = CERTIFICATE_ISSUANCE` — while the lifecycle status remains
+// PENDING_VALIDATION. Synchronous issuers (the self-signed CA) pass
+// through the ISSUING window in-process; asynchronous issuers (ACME
+// providers) park the agent there until a re-driven verify-acme
+// finalizes the order.
 func (r *AgentRegistration) AdvanceToPendingDNS() error {
 	return r.transitionTo(StatusPendingDNS)
 }
@@ -286,12 +275,30 @@ func (r *AgentRegistration) Revoke(reason RevocationReason, now time.Time) error
 	return nil
 }
 
-// Cancel transitions a PENDING registration to REVOKED (idempotent cancel).
+// Cancel transitions a PENDING registration to REVOKED.
+//
+// Eligibility follows the spec's revoke-route contract: the
+// PENDING_CERTS phase (order ISSUING or terminally FAILED) and
+// PENDING_DNS are cancellable; a registration still awaiting its
+// domain-control challenge (PENDING_VALIDATION with the order
+// PENDING) is not — it auto-expires when the challenge window
+// lapses. Legacy registrations without a persisted order are
+// cancellable: they have no challenge window to expire on, so cancel
+// is their only exit.
 func (r *AgentRegistration) Cancel(now time.Time) error {
+	// Validation-class (422), not invalid-state (409): Cancel is
+	// reached only through the revoke route, whose canonical spec
+	// documents 422 for an unprocessable request and carries no 409.
 	if !r.Status.IsPending() {
-		return NewInvalidStateError(
+		return NewValidationError(
 			"CANNOT_CANCEL",
 			fmt.Sprintf("can only cancel pending registrations, current status: %s", r.Status),
+		)
+	}
+	if r.Status == StatusPendingValidation && r.CertOrder.State == OrderStatePending {
+		return NewValidationError(
+			"CANNOT_CANCEL",
+			"registration is awaiting domain validation and will auto-expire when the challenge window lapses",
 		)
 	}
 	r.Status = StatusRevoked

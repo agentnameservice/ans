@@ -133,7 +133,7 @@ func TestMapV1RenewalStatus_ActiveAndFailed(t *testing.T) {
 			UpdatedAt: now,
 		},
 	}
-	resp := mapV1RenewalStatus("agent-1", pending)
+	resp := mapV1RenewalStatus("agent-1", &service.GetRenewalResult{Renewal: pending, FQDN: "a.example.com"})
 	if resp.CsrID != "csr-1" {
 		t.Errorf("csr: %q", resp.CsrID)
 	}
@@ -148,7 +148,7 @@ func TestMapV1RenewalStatus_ActiveAndFailed(t *testing.T) {
 	failed := *pending
 	failed.FailureReason = "dns lookup failed"
 	failed.Validation.Status = domain.ValidationFailed
-	resp2 := mapV1RenewalStatus("agent-1", &failed)
+	resp2 := mapV1RenewalStatus("agent-1", &service.GetRenewalResult{Renewal: &failed, FQDN: "a.example.com"})
 	if resp2.FailureReason != "dns lookup failed" {
 		t.Errorf("failure reason lost: %q", resp2.FailureReason)
 	}
@@ -288,7 +288,7 @@ func TestMapRenewalStatus_FailureReasonField(t *testing.T) {
 			ExpiresAt: now.Add(-time.Hour),
 		},
 	}
-	resp := mapRenewalStatus("agent-1", failed)
+	resp := mapRenewalStatus("agent-1", &service.GetRenewalResult{Renewal: failed, FQDN: "a.example.com"})
 	if resp.FailureReason != "validation expired" {
 		t.Errorf("FailureReason: got %q want validation expired", resp.FailureReason)
 	}
@@ -307,7 +307,7 @@ func TestMapRenewalStatus_NoFailureReason(t *testing.T) {
 			ExpiresAt: now.Add(time.Hour),
 		},
 	}
-	resp := mapRenewalStatus("agent-1", pending)
+	resp := mapRenewalStatus("agent-1", &service.GetRenewalResult{Renewal: pending, FQDN: "a.example.com"})
 	if resp.FailureReason != "" {
 		t.Errorf("FailureReason should be empty for non-failed renewal; got %q", resp.FailureReason)
 	}

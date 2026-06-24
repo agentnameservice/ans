@@ -59,6 +59,12 @@ tags:
     description: Agent certificate revocation operations
   - name: Certificate Management
     description: Certificate retrieval, CSR submission, and renewal operations
+  - name: Verified Identities
+    description: |
+      The "who" behind agents — owner-level identities (did:web,
+      did:key) proven through challenge-bound control proofs, sealed
+      on their own Transparency Log stream, and linked to the owner's
+      agents
 
 # Global security requirement. Every path inherits this and can
 # override with `security: []` to declare itself anonymous. The
@@ -889,6 +895,443 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
+  # ──────────────────────────────────────────────────────────────────
+  # Verified Identities — the "who" behind agents
+  #
+  # An identity is a first-class object owned by the authenticated
+  # principal (the same owner as the agents), proven through a
+  # per-kind control proof, sealed onto its own Transparency Log
+  # stream, and linked to any number of that owner's agents. The
+  # agent registration surface above is unchanged — agents carry no
+  # identity fields; the association is the links sub-resource.
+  #
+  # The single security invariant: the RA seals an identity
+  # attestation only after control is PROVEN — a challenge-bound
+  # signature verified against the identifier's authoritative keys —
+  # never on resolution alone.
+  # ──────────────────────────────────────────────────────────────────
+  /ans/identities:
+    post:
+      tags:
+        - Verified Identities
+      summary: Register a verified identity
+      description: |
+        Registers an identifier (the kind — `did:web`, `did:key` — is
+        inferred from the value's lexical form, never caller-asserted)
+        and returns the challenge round to sign: one entry per
+        eligible key, all over a single anti-replay nonce. The
+        identity is created in `PENDING_CONTROL`; nothing is sealed
+        until verify-control passes.
+
+        Re-POSTing the same value while the row is `PENDING_CONTROL`
+        is the idempotent re-add: the same `identityId` returns with
+        a fresh nonce (the prior nonce is superseded). A value
+        already verified — by this owner or any other — returns 409
+        `IDENTIFIER_DUPLICATE`. Kinds without an enabled control
+        verifier (`lei`, postponed) return 422
+        `IDENTIFIER_KIND_UNSUPPORTED`.
+      operationId: registerIdentity
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityRegistrationRequest'
+      responses:
+        '202':
+          description: Identity registered — challenges to sign
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityChallengeResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Identifier already verified (IDENTIFIER_DUPLICATE)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid or unsupported identifier
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    get:
+      tags:
+        - Verified Identities
+      summary: List my identities
+      description: |
+        Returns one page of the caller's identities, newest first, in
+        the same limit + opaque-cursor envelope as
+        `GET /v2/ans/agents` (`AgentListResponse`): the collection
+        array is named `items`, alongside `returnedCount`, `limit`,
+        `nextCursor`, and `hasMore`. Pass `nextCursor` back as
+        `cursor` for the next page; a null `nextCursor` is the last
+        page.
+      operationId: listIdentities
+      parameters:
+        - name: limit
+          in: query
+          required: false
+          schema: { type: integer, default: 20, minimum: 1, maximum: 100 }
+        - name: cursor
+          in: query
+          required: false
+          schema: { type: string }
+          description: Opaque cursor from the previous page's nextCursor
+      responses:
+        '200':
+          description: One page of the caller's identities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityListResponse'
+        '401':
+          description: Authentication failed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/identities/{identityId}:
+    get:
+      tags:
+        - Verified Identities
+      summary: Get identity detail
+      description: |
+        Returns the identity plus its live links. Ownership-scoped:
+        an identity that doesn't exist or isn't the caller's returns
+        404 (existence is hidden).
+      operationId: getIdentity
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      responses:
+        '200':
+          description: Identity detail
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityDetails'
+        '404':
+          description: Identity not found or not accessible
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+    put:
+      tags:
+        - Verified Identities
+      summary: Rotate / replace the identifier
+      description: |
+        Stages a same-kind replacement and returns fresh challenges
+        over it. Until the new proof lands the previously sealed
+        state stands; a replacement that never verifies expires with
+        its nonce. On a clean verify-control the RA swaps the value
+        and seals ONE `IDENTITY_UPDATED` event — regardless of how
+        many agents are linked. Cross-kind replacement is rejected
+        (revoke and register a new identity instead).
+      operationId: rotateIdentity
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityRegistrationRequest'
+      responses:
+        '202':
+          description: Rotation staged — fresh challenges to sign
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityChallengeResponse'
+        '403':
+          description: Caller does not own this identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Identity not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Identity is not in a rotatable state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid replacement value (incl. IDENTIFIER_KIND_MISMATCH)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/identities/{identityId}/verify-control:
+    post:
+      tags:
+        - Verified Identities
+      summary: Prove control of the identifier
+      description: |
+        Submits the control proofs: one compact JWS per proven key,
+        each payload equal — verbatim — to the served `signingInput`
+        (clients never canonicalize; the RA checks payload equality
+        before verifying any signature). Every proof must verify
+        against the identifier's AUTHORITATIVE key for its `kid`
+        (resolved from the DID document for `did:web`, decoded from
+        the identifier for `did:key`); one bad proof fails the call
+        closed. The nonce is consumed exactly once, inside the
+        success transaction — a failed attempt does not consume it.
+
+        JWS bearing unrecognized `crit` header parameters are
+        rejected (RFC 7515 §4.1.11) — this verifier implements no
+        critical extensions.
+
+        Seal-before-success: the RA seals `IDENTITY_VERIFIED` /
+        `IDENTITY_UPDATED` on the identity's own Transparency Log
+        stream — every proven key sealed self-verifyingly (public
+        key + signed proof) — and reports success ONLY after the TL
+        acknowledges the seal; the row transition commits with that
+        acknowledgment, so anything this API reports as set up is
+        resolvable in the TL at that moment. If the TL is
+        unavailable the call fails 503 `TL_UNAVAILABLE`, retryable:
+        the nonce is NOT consumed and the prior state stands.
+      operationId: verifyIdentityControl
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/VerifyControlRequest'
+      responses:
+        '200':
+          description: Control proven — identity VERIFIED, event sealed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityDetails'
+        '403':
+          description: Caller does not own this identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Identity not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            Challenge state error — `PRICC_TOKEN_EXPIRED`,
+            `PRICC_TOKEN_ALREADY_USED`, `IDENTIFIER_CHALLENGE_EXPIRED`
+            — the identity is revoked, a concurrent verify attempt
+            holds the seal claim (`VERIFICATION_IN_FLIGHT` — retry
+            shortly; the claim expires within ~30s), or the
+            identifier is already verified by another owner
+            (`IDENTIFIER_DUPLICATE`). Recovery from an expired nonce
+            is the idempotent re-add (re-POST the same value).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: |
+            Proof rejected — `PRICC_SIGNATURE_INVALID`,
+            `DID_VERIFICATION_METHOD_INVALID`, `DID_RESOLUTION_FAILED`,
+            `DID_DOCUMENT_ID_MISMATCH`, `IDENTIFIER_PROOF_INVALID`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable; the nonce is NOT consumed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/identities/{identityId}/revoke:
+    post:
+      tags:
+        - Verified Identities
+      summary: Revoke the identity
+      description: |
+        Transitions a VERIFIED identity to REVOKED and seals ONE
+        `IDENTITY_REVOKED` event. A POST (state change), never a
+        DELETE: an identity cannot be deleted — its history is
+        append-only in the Transparency Log. Propagation to every
+        linked agent's badge is the TL's read-time join, not a write
+        fan-out.
+
+        Seal-before-success: the row flips only after the TL
+        acknowledges the seal. TL unavailable → 503 `TL_UNAVAILABLE`,
+        retryable, the identity stays VERIFIED.
+      operationId: revokeIdentity
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      responses:
+        '200':
+          description: Identity revoked, event sealed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityDetails'
+        '403':
+          description: Caller does not own this identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Identity not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Identity is not VERIFIED (nothing sealed to revoke)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable, nothing changed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/identities/{identityId}/links:
+    post:
+      tags:
+        - Verified Identities
+      summary: Link agents to the identity
+      description: |
+        Binds a batch of the caller's agents to the identity — a
+        single owner-gated call with no challenge and no signature:
+        the caller MUST own the identity AND every named agent (key
+        possession never authorizes a link). The whole batch seals as
+        ONE `IDENTITY_LINKED` event on the IDENTITY stream carrying
+        the agent ids; an agent's own stream and audit history are
+        never written by identity operations. Already-linked agents
+        are skipped idempotently; a call that links nothing new seals
+        nothing.
+
+        Liveness gate: links attach only while the identity is
+        VERIFIED, and every named agent must be live — ACTIVE or
+        DEPRECATED; a terminal or pre-activation agent fails the
+        whole batch with 422 `AGENT_NOT_LINKABLE` (all-or-nothing,
+        matching the one-event batch semantics). The route is
+        per-owner rate limited (429-equivalent `RATE_LIMITED`).
+
+        Seal-before-success: success is reported only after the TL
+        acknowledges the `IDENTITY_LINKED` seal; link rows commit
+        with the acknowledgment. TL unavailable → 503
+        `TL_UNAVAILABLE`, retryable, nothing linked.
+      operationId: linkIdentityAgents
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IdentityLinkRequest'
+      responses:
+        '200':
+          description: Batch linked (count of newly-created links)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/IdentityLinkResponse'
+        '403':
+          description: Caller does not own this identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Identity, or a named agent, not found / not the caller's
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: Identity is not VERIFIED (IDENTITY_NOT_VERIFIED)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '422':
+          description: Invalid link request (empty or oversized batch — INVALID_LINK_REQUEST), or a named agent is not live (AGENT_NOT_LINKABLE — links require ACTIVE or DEPRECATED; rejected all-or-nothing)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable, nothing linked)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /ans/identities/{identityId}/links/{agentId}:
+    delete:
+      tags:
+        - Verified Identities
+      summary: Unlink an agent
+      description: |
+        Ends one association and seals `IDENTITY_UNLINKED` on the
+        identity stream. The association's history persists in the
+        identity's audit chain and the raw log tiles; unlinked pairs
+        may be re-linked later. Shares the link route's per-owner
+        rate limit.
+
+        Seal-before-success: the link row flips only after the TL
+        acknowledges the seal. TL unavailable → 503 `TL_UNAVAILABLE`,
+        retryable, the link stands.
+      operationId: unlinkIdentityAgent
+      parameters:
+        - $ref: '#/components/parameters/IdentityIdPath'
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '204':
+          description: Link removed, event sealed
+        '403':
+          description: Caller does not own this identity
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Identity or live link not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable, nothing changed)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
 
 components:
   # ──────────────────────────────────────────────────────────────────
@@ -922,6 +1365,14 @@ components:
       schema:
         type: string
         format: uuid
+
+    IdentityIdPath:
+      name: identityId
+      in: path
+      description: Unique identifier of the verified identity (UUIDv7)
+      required: true
+      schema:
+        type: string
 
   # ──────────────────────────────────────────────────────────────────
   # Schemas
@@ -1229,6 +1680,16 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Link'
+        identities:
+          type: array
+          description: |
+            Additive, optional, COMPUTED — the verified identities
+            currently linked to this agent, joined from the link rows
+            at read time. Never stored on the registration; identity
+            rotation/revocation is visible here immediately with zero
+            agent-side writes.
+          items:
+            $ref: '#/components/schemas/LinkedIdentity'
       required:
         - agentId
         - ansName
@@ -1286,7 +1747,7 @@ components:
             HATEOAS link hrefs. Recommended for backport to v1.
         status:
           type: string
-          enum: [PENDING_VALIDATION, PENDING_DNS]
+          enum: [PENDING_VALIDATION, PENDING_CERTS, PENDING_DNS]
         ansName:
           type: string
           example: ans://v1.0.0.external-domain.com
@@ -1320,7 +1781,7 @@ components:
       properties:
         action:
           type: string
-          enum: [CONFIGURE_DNS, CONFIGURE_HTTP, VERIFY_DNS, VALIDATE_DOMAIN, WAIT]
+          enum: [CONFIGURE_DNS, CONFIGURE_HTTP, VERIFY_DNS, VALIDATE_DOMAIN, WAIT, CANCEL]
         description:
           type: string
         endpoint:
@@ -1665,3 +2126,243 @@ components:
                 type: string
                 description: |
                   The required value; equals record.value.
+
+    # ────────────────────────────────────────────────────────────────
+    # Verified Identities
+    # ────────────────────────────────────────────────────────────────
+    IdentityRegistrationRequest:
+      type: object
+      description: |
+        Registers (POST) or rotates (PUT) an identifier. The kind is
+        inferred from the value's lexical form — `did:web:` prefix,
+        `did:key:` prefix, or a 20-character LEI (recognized but
+        postponed) — never caller-asserted.
+      properties:
+        value:
+          type: string
+          description: The identifier to prove control of
+          example: did:web:identity.acme-corp.com
+      required:
+        - value
+
+    IdentityChallengeResponse:
+      type: object
+      description: |
+        The 202 challenge round. Every entry shares the same
+        anti-replay nonce and the same signingInput — the input is
+        key-independent; entries enumerate the keys the resolver
+        could see in advance (a single unkeyed entry when it could
+        not — name keys via the JWS `kid` header at verify time).
+      properties:
+        identityId:
+          type: string
+          description: RA-assigned UUIDv7 — the TL stream key
+        kind:
+          type: string
+          enum: ['did:web', 'did:key', 'lei']
+        value:
+          type: string
+          description: The canonical identifier this round proves
+        status:
+          $ref: '#/components/schemas/IdentityLifecycleStatus'
+        nonce:
+          type: string
+          description: Base64url 32-byte single-use anti-replay nonce
+        expiresAt:
+          type: string
+          format: date-time
+        challenges:
+          type: array
+          items:
+            $ref: '#/components/schemas/IdentityProofChallenge'
+      required:
+        - identityId
+        - kind
+        - value
+        - status
+        - nonce
+        - expiresAt
+        - challenges
+
+    IdentityProofChallenge:
+      type: object
+      properties:
+        kid:
+          type: string
+          description: |
+            Verification-method id eligible to sign this round
+            (omitted when the resolver could not enumerate keys)
+          example: did:web:identity.acme-corp.com#key-1
+        signingInput:
+          type: string
+          description: |
+            Base64url of the exact RFC 8785 (JCS) canonical
+            IdentityProofInput bytes — {identifier, identityId,
+            nonce, purpose:"ans:identity-proof:v1", raId, scheme}. A
+            compact JWS's payload segment MUST equal this string
+            verbatim; clients never canonicalize.
+      required:
+        - signingInput
+
+    VerifyControlRequest:
+      type: object
+      description: |
+        One compact JWS per proven key. Supported algorithms match
+        what the verifier implements: EdDSA (Ed25519), ES256
+        (ECDSA P-256), and RS256 (RSA >= 2048). Key-agreement keys
+        (X25519) and curves without a verifier (secp256k1,
+        P-384/521) are rejected with a precise error.
+      properties:
+        signedProofs:
+          type: array
+          minItems: 1
+          maxItems: 16
+          items:
+            type: string
+            description: |
+              Compact JWS over the served signingInput. The protected
+              header carries `kid` (the claimed verification method)
+              and MAY carry `jwk` (the signer's public key — required
+              by the quickstart noop resolver, ignored by the web
+              resolver, which always uses the resolved document).
+      required:
+        - signedProofs
+
+    IdentityLifecycleStatus:
+      type: string
+      enum: [PENDING_CONTROL, VERIFIED, REVOKED]
+      description: |
+        PENDING_CONTROL → VERIFIED → REVOKED. Rotation keeps the row
+        VERIFIED (the staged replacement proves control before
+        anything changes).
+
+    IdentityListResponse:
+      type: object
+      description: |
+        Ownership-scoped, cursor-paginated list of the caller's
+        verified identities. Mirrors `AgentListResponse`: the
+        collection array is named `items` per the standard REST
+        collection-response convention shared across the v2 surface.
+      properties:
+        items:
+          type: array
+          description: List of identities owned by the caller
+          items:
+            $ref: '#/components/schemas/IdentityDetails'
+        returnedCount:
+          type: integer
+          description: Number of identities in this response
+        limit:
+          type: integer
+          description: Limit that was applied
+        nextCursor:
+          type: string
+          nullable: true
+          description: |
+            Opaque cursor for the next page. Pass as the `cursor` query
+            parameter to retrieve the next page. Null when there are no
+            more results.
+        hasMore:
+          type: boolean
+          description: Whether more results exist beyond this page
+      required:
+        - items
+        - returnedCount
+        - limit
+        - hasMore
+
+    IdentityDetails:
+      type: object
+      properties:
+        identityId:
+          type: string
+        kind:
+          type: string
+          enum: ['did:web', 'did:key', 'lei']
+        value:
+          type: string
+        status:
+          $ref: '#/components/schemas/IdentityLifecycleStatus'
+        proofMethod:
+          type: string
+          description: Control proof that verified this identity
+          enum: [did-web-sig, did-key-sig, lei-vlei-acdc]
+        pendingValue:
+          type: string
+          description: Staged rotation replacement (empty unless rotating)
+        verifiedAt:
+          type: string
+          format: date-time
+        createdAt:
+          type: string
+          format: date-time
+        linkedAgents:
+          type: array
+          description: Live links (detail responses only)
+          items:
+            type: object
+            properties:
+              agentId:
+                type: string
+                format: uuid
+              linkedAt:
+                type: string
+                format: date-time
+            required:
+              - agentId
+      required:
+        - identityId
+        - kind
+        - value
+        - status
+        - createdAt
+
+    IdentityLinkRequest:
+      type: object
+      description: |
+        The batch of the caller's agents to bind — one owner-gated
+        call, no challenge, no signature; the whole batch seals as
+        ONE IDENTITY_LINKED event on the identity stream.
+      properties:
+        agentIds:
+          type: array
+          minItems: 1
+          maxItems: 256
+          items:
+            type: string
+            format: uuid
+      required:
+        - agentIds
+
+    IdentityLinkResponse:
+      type: object
+      properties:
+        linked:
+          type: integer
+          description: Newly-created links (already-linked agents are skipped)
+      required:
+        - linked
+
+    LinkedIdentity:
+      type: object
+      description: One computed identities[] entry on AgentDetails.
+      properties:
+        identityId:
+          type: string
+        kind:
+          type: string
+          enum: ['did:web', 'did:key', 'lei']
+        value:
+          type: string
+        identityStatus:
+          type: string
+          enum: [VERIFIED, REVOKED]
+          description: The identity's CURRENT status — reflects its stream now
+        linkedAt:
+          type: string
+          format: date-time
+      required:
+        - identityId
+        - kind
+        - value
+        - identityStatus

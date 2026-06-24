@@ -1,7 +1,9 @@
 package service
 
 import (
+	"context"
 	"crypto/sha256"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
@@ -75,6 +77,48 @@ func applyDiscoveryProfiles(reg *domain.AgentRegistration, req RegisterRequest) 
 	}
 	reg.DiscoveryProfiles = out
 	return nil
+}
+
+// loadServerCert returns the agent's latest valid server certificate,
+// or (nil, nil) when none is on file. A genuinely-absent cert
+// (ErrNotFound) is normal — CSR-path registrations may not have one
+// yet, and ComputeRequiredDNSRecords simply omits the TLSA record.
+//
+// Any OTHER store error is propagated. Callers fold this cert into
+// terminal, immutable artifacts — the TLSA record an operator
+// publishes, and the serverCerts[] of the signed AGENT_REGISTERED leaf
+// in the append-only log. Swallowing a transient store failure (busy
+// timeout, I/O) would silently drop the cert and emit a permanently
+// wrong attestation from a recoverable fault, so absence and failure
+// must never be conflated here.
+func (s *RegistrationService) loadServerCert(
+	ctx context.Context, agentID string,
+) (*domain.ByocServerCertificate, error) {
+	cert, err := s.byoc.FindLatestValidByAgentID(ctx, agentID)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, nil //nolint:nilnil // (nil, nil) signals "no server cert on file"; callers distinguish via the nil pointer and skip the TLSA record
+		}
+		return nil, err
+	}
+	return cert, nil
+}
+
+// serialFromCertPEM parses the certificate and returns its serial as
+// lowercase hex — the same encoding issuers report at signing time.
+// Fallback for stored certificates persisted before serial tracking
+// landed (migration 009); rows written since carry the serial
+// directly.
+func serialFromCertPEM(pemStr string) (string, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil || block.Type != "CERTIFICATE" {
+		return "", errors.New("service: cert PEM has no CERTIFICATE block")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("service: parse certificate: %w", err)
+	}
+	return fmt.Sprintf("%x", cert.SerialNumber), nil
 }
 
 // fingerprintOf returns the SHA-256 fingerprint of the DER certificate

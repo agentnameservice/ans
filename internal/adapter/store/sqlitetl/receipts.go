@@ -41,24 +41,22 @@ func (s *ReceiptStore) Store(
 	return mapSQLErr(err)
 }
 
-// FindByAgentID returns the cached receipt for an agent's latest
-// event at the given tree size, or (nil, nil) if no cached receipt
-// exists. Unlike GetLatestByAgentID this scopes to a specific tree
-// size so the ReceiptService can key its cache on (agent,
-// treeSize) rather than (leafIndex, treeSize) — agents can have
-// multiple events in the log but the receipt we want is always the
-// latest one covered by the current checkpoint.
-func (s *ReceiptStore) FindByAgentID(
+// FindByLeafIndex returns the cached receipt for a specific
+// (leaf_index, tree_size) pair — the table's natural UNIQUE key — or
+// (nil, nil) if no cached receipt exists. The pair fully determines
+// the receipt's payload (same event bytes + same inclusion proof),
+// and unlike an agent-keyed lookup it works identically for agent
+// and identity subjects (identity events carry no agent id).
+func (s *ReceiptStore) FindByLeafIndex(
 	ctx context.Context,
-	agentID string,
+	leafIndex uint64,
 	treeSize uint64,
 ) (*ReceiptRecord, error) {
 	var r ReceiptRecord
 	err := s.db.db.GetContext(ctx, &r,
 		`SELECT id, leaf_index, agent_id, tree_size, receipt_blob, created_at_ms
          FROM tl_receipts
-         WHERE agent_id = ? AND tree_size = ?
-         ORDER BY leaf_index DESC LIMIT 1`, agentID, treeSize)
+         WHERE leaf_index = ? AND tree_size = ?`, leafIndex, treeSize)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, nil //nolint:nilnil // (nil, nil) signals "no cached receipt for this tree size"

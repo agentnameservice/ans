@@ -18,11 +18,23 @@ import (
 // routes assume the ownership middleware has already run.
 type LifecycleHandler struct {
 	svc *service.RegistrationService
+	// identities, when set, decorates agent detail responses with the
+	// computed identities[] view (design §5.4) — the verified
+	// identities currently linked to the agent. Optional so the
+	// agent surface has zero hard dependency on the identity feature.
+	identities *service.IdentityService
 }
 
 // NewLifecycleHandler constructs a LifecycleHandler.
 func NewLifecycleHandler(svc *service.RegistrationService) *LifecycleHandler {
 	return &LifecycleHandler{svc: svc}
+}
+
+// WithIdentityViews attaches the identity service used to compute the
+// additive identities[] field on agent detail responses.
+func (h *LifecycleHandler) WithIdentityViews(identities *service.IdentityService) *LifecycleHandler {
+	h.identities = identities
+	return h
 }
 
 // ----- GET /v2/ans/agents -----
@@ -91,7 +103,16 @@ func (h *LifecycleHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, mapAgentDetails(res, r, h.svc))
+	details := mapAgentDetails(res, r, h.svc)
+	if h.identities != nil {
+		linked, lerr := h.identities.LinkedIdentitiesForAgent(r.Context(), agentID)
+		if lerr != nil {
+			WriteError(w, lerr)
+			return
+		}
+		details.Identities = mapLinkedIdentities(linked)
+	}
+	WriteJSON(w, http.StatusOK, details)
 }
 
 // ----- GET /v2/ans/agents/{agentId}/certificates/identity -----
@@ -285,7 +306,11 @@ func (h *LifecycleHandler) VerifyRenewalACME(w http.ResponseWriter, r *http.Requ
 
 // ----- POST /v2/ans/agents/{agentId}/verify-acme -----
 
-// VerifyACME handles POST .../verify-acme. No request body.
+// VerifyACME handles POST .../verify-acme. No request body. Always
+// 202: domain validation succeeded and certificates are either issued
+// (status PENDING_DNS, phase DNS_PROVISIONING) or still being
+// finalized by an asynchronous issuer (status PENDING_VALIDATION,
+// phase CERTIFICATE_ISSUANCE — the caller re-POSTs to re-drive).
 func (h *LifecycleHandler) VerifyACME(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyACME(r.Context(), agentID, service.VerifyInput{})
@@ -295,12 +320,12 @@ func (h *LifecycleHandler) VerifyACME(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusAccepted, agentStatus{
 		Status:         string(res.Registration.Status),
-		Phase:          phaseFromStatus(res.Registration.Status),
-		CompletedSteps: completedStepsFor(res.Registration.Status),
-		PendingSteps:   pendingStepsFor(res.Registration.Status),
+		Phase:          phaseFor(res.Registration),
+		CompletedSteps: completedStepsFor(res.Registration),
+		PendingSteps:   pendingStepsFor(res.Registration),
 		CreatedAt:      res.Registration.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:      res.Now.Format("2006-01-02T15:04:05Z07:00"),
-		ExpiresAt:      rfc3339Zero(res.Registration.ACMEChallenge.ExpiresAt),
+		ExpiresAt:      rfc3339Zero(res.Registration.CertOrder.ExpiresAt),
 	})
 }
 
@@ -328,12 +353,12 @@ func (h *LifecycleHandler) VerifyDNS(w http.ResponseWriter, r *http.Request) {
 
 	WriteJSON(w, http.StatusAccepted, agentStatus{
 		Status:         string(res.Registration.Status),
-		Phase:          phaseFromStatus(res.Registration.Status),
-		CompletedSteps: completedStepsFor(res.Registration.Status),
-		PendingSteps:   pendingStepsFor(res.Registration.Status),
+		Phase:          phaseFor(res.Registration),
+		CompletedSteps: completedStepsFor(res.Registration),
+		PendingSteps:   pendingStepsFor(res.Registration),
 		CreatedAt:      res.Registration.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
 		UpdatedAt:      res.Now.Format("2006-01-02T15:04:05Z07:00"),
-		ExpiresAt:      rfc3339Zero(res.Registration.ACMEChallenge.ExpiresAt),
+		ExpiresAt:      rfc3339Zero(res.Registration.CertOrder.ExpiresAt),
 	})
 }
 

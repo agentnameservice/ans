@@ -16,6 +16,11 @@ var (
 	ErrUnauthorized = errors.New("unauthorized")
 	ErrCertificate  = errors.New("certificate")
 	ErrInternal     = errors.New("internal")
+	// ErrUnavailable marks a transient upstream failure: the request
+	// was valid but a dependency (the TL, the vlei-verifier) could
+	// not confirm it. Maps to 503; the operation is retryable and no
+	// state was consumed.
+	ErrUnavailable = errors.New("unavailable")
 )
 
 // Error is the base error type for all domain errors.
@@ -63,6 +68,11 @@ func NewUnauthorizedError(code, message string) *Error {
 // NewInternalError creates an internal domain error wrapping a cause.
 func NewInternalError(code, message string, cause error) *Error {
 	return &Error{Code: code, Message: message, Cause: fmt.Errorf("%w: %w", ErrInternal, cause)}
+}
+
+// NewUnavailableError creates a retryable upstream-unavailable error.
+func NewUnavailableError(code, message string) *Error {
+	return &Error{Code: code, Message: message, Cause: ErrUnavailable}
 }
 
 // Error implements the error interface.

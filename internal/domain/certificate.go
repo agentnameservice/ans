@@ -88,11 +88,20 @@ func (c AgentCSR) MarkRejected(reason string, processedAt time.Time) (AgentCSR, 
 
 // StoredCertificate represents a certificate stored in the system.
 type StoredCertificate struct {
-	InternalID          int64             `json:"internalId"`
-	CSRID               string            `json:"csrId"`
-	CertificateType     CertificateType   `json:"certificateType"`
-	CertificatePEM      string            `json:"certificatePem"`
-	ChainPEM            string            `json:"chainPem,omitempty"`
+	InternalID      int64           `json:"internalId"`
+	CSRID           string          `json:"csrId"`
+	CertificateType CertificateType `json:"certificateType"`
+	CertificatePEM  string          `json:"certificatePem"`
+	ChainPEM        string          `json:"chainPem,omitempty"`
+	// SerialNumber is the issued certificate's serial (lowercase hex),
+	// captured at issuance so CA-side revocation never re-parses the
+	// PEM. Empty on rows persisted before serial tracking landed.
+	SerialNumber string `json:"serialNumber,omitempty"`
+	// CertificateRef is the issuing provider's opaque handle for this
+	// certificate (cloud-CA resource name/ARN, ACME certificate URL).
+	// Empty for the in-process self-signed CAs, which revoke by
+	// serial alone.
+	CertificateRef      string            `json:"certificateRef,omitempty"`
 	Status              CertificateStatus `json:"status"`
 	ExpirationTimestamp time.Time         `json:"expirationTimestamp"`
 	IssueTimestamp      time.Time         `json:"issueTimestamp"`

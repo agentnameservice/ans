@@ -16,6 +16,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/adapter/cert"
+	"github.com/godaddy/ans/internal/adapter/dns"
 	"github.com/godaddy/ans/internal/adapter/eventbus"
 	"github.com/godaddy/ans/internal/adapter/keymanager"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
@@ -69,7 +70,7 @@ func TestRegistration_NoSigner(t *testing.T) {
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateAuthority(fx.serverCA)
+	).WithServerCertificateIssuer(fx.serverCA)
 
 	// Use a fresh ANS name + matching CSR + matching endpoints so
 	// every validation that checks FQDN/SAN passes.
@@ -126,7 +127,7 @@ func TestRegistration_RollsBackOnPartialFailure(t *testing.T) {
 		fx.agents, failingEndpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateAuthority(fx.serverCA)
+	).WithServerCertificateIssuer(fx.serverCA)
 
 	if _, err := svc.RegisterAgent(context.Background(), fx.req); err == nil {
 		t.Fatal("RegisterAgent should have surfaced the endpoint-store error")
@@ -201,7 +202,7 @@ func TestRevoke_RollsBackOnOutboxFailure(t *testing.T) {
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, &failingOutbox{}, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateAuthority(fx.serverCA)
+	).WithServerCertificateIssuer(fx.serverCA)
 
 	if _, err := svc.Revoke(context.Background(), agentID, service.RevokeInput{
 		Reason: domain.RevocationKeyCompromise,
@@ -267,7 +268,7 @@ type regFixture struct {
 	renewals     port.RenewalStore
 	validator    port.CertificateValidator
 	identityCA   port.IdentityCertificateAuthority
-	serverCA     port.ServerCertificateAuthority
+	serverCA     port.ServerCertificateIssuer
 	bus          port.EventBus
 	discoveryReg port.ProfileRegistry
 	signerPubPEM string
@@ -336,7 +337,10 @@ func newRegFixture(t *testing.T) *regFixture {
 		KeyManager: km,
 		KeyID:      "ra-signer",
 		RaID:       "ra-test",
-	}).WithServerCertificateAuthority(serverCA)
+	}).WithServerCertificateIssuer(serverCA).
+		// The challenge gate is unconditional; the noop verifier plays
+		// the quickstart role (accepts any published state).
+		WithDNSVerifier(dns.NewNoopVerifier())
 
 	// Build a valid identity CSR whose URI SAN matches the ANS name
 	// and a server CSR whose DNS SAN matches the FQDN.

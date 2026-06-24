@@ -1,5 +1,7 @@
 package domain
 
+import "fmt"
+
 // DiscoveryProfile names one DNS record family the RA can emit for an
 // agent registration. A registration carries a *set* of profiles
 // (AgentRegistration.DiscoveryProfiles); operators publishing the union
@@ -103,4 +105,36 @@ type ExpectedDNSRecord struct {
 	Purpose  DNSRecordPurpose `json:"purpose"`
 	Required bool             `json:"required"`
 	TTL      int              `json:"ttl"`
+}
+
+// TLSARecordForCert builds the single DANE-EE TLSA record binding a
+// server certificate fingerprint to the FQDN at the default TLS port
+// (`_443._tcp.{fqdn}`). It is the server-cert renewal path's analog of
+// the registration record set: the renewal status responses surface the
+// new leaf's record so the operator can update DNS after a rollover.
+//
+// The registration record set emits one TLSA per distinct TLS endpoint
+// port via the discovery profiles
+// (internal/adapter/discovery/ans.TLSARecord); this helper covers the
+// single-record renewal-status DTO, which carries the freshly-issued
+// leaf's fingerprint rather than reading reg.ServerCert.
+//
+// `3 0 1 <hex>` = DANE-EE + full-certificate + SHA-256 (RFC 6698).
+// Selector 0 (full cert), not 1 (SPKI): the hex is the certificate
+// fingerprint — a SHA-256 over the full DER cert (internal/crypto/x509.go
+// CertificateFingerprint) — so selector 0 is what matches those bytes.
+//
+// Required=false: a TLSA record is only trustworthy in a DNSSEC-signed
+// zone, which the domain layer cannot know. The verify layer enforces
+// the stricter rule at query time: a DNSSEC-validated TLSA response MUST
+// match the expected fingerprint.
+func TLSARecordForCert(fqdn, fingerprint string) ExpectedDNSRecord {
+	return ExpectedDNSRecord{
+		Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
+		Type:     DNSRecordTLSA,
+		Value:    fmt.Sprintf("3 0 1 %s", fingerprint),
+		Purpose:  PurposeCertificateBinding,
+		Required: false,
+		TTL:      3600,
+	}
 }

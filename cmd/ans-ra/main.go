@@ -27,6 +27,8 @@ import (
 
 	"github.com/godaddy/ans/internal/adapter/auth"
 	"github.com/godaddy/ans/internal/adapter/cert"
+	"github.com/godaddy/ans/internal/adapter/challenge"
+	"github.com/godaddy/ans/internal/adapter/didresolver"
 	"github.com/godaddy/ans/internal/adapter/dns"
 	"github.com/godaddy/ans/internal/adapter/docsui"
 	"github.com/godaddy/ans/internal/adapter/eventbus"
@@ -96,6 +98,8 @@ func run(cfgPath string) error {
 	byoc := sqlite.NewByocCertificateStore(db)
 	renewals := sqlite.NewRenewalStore(db)
 	outbox := sqlite.NewOutboxStore(db)
+	identityStore := sqlite.NewIdentityStore(db)
+	identityLinks := sqlite.NewIdentityLinkStore(db)
 
 	// Crypto.
 	km, err := keymanager.NewFileKeyManager(cfg.Keys.File.Path)
@@ -124,24 +128,21 @@ func run(cfgPath string) error {
 	if err != nil {
 		return fmt.Errorf("init identity ca: %w", err)
 	}
-	// Optional server CA — enables the serverCsrPEM path at
-	// registration and renewal. When the config block is absent the
-	// RA accepts only BYOC (serverCertificatePEM).
-	var serverCA port.ServerCertificateAuthority
-	if cfg.CA.Server != nil && cfg.CA.Server.DataDir != "" {
-		sca, caErr := cert.NewServerSelfCA(
-			cfg.CA.Server.DataDir, cfg.CA.Server.Org, cfg.CA.Server.ValidityDays)
-		if caErr != nil {
-			return fmt.Errorf("init server ca: %w", caErr)
+	// Optional server certificate issuer — enables the serverCsrPEM
+	// path at registration and renewal. When the config block is
+	// absent the RA accepts only BYOC (serverCertificatePEM).
+	// `ca.server.type` selects the adapter: "self" (default) is the
+	// in-process self-signed CA; "acme" is an external RFC 8555
+	// provider such as Let's Encrypt. Both implement the same
+	// port.ServerCertificateIssuer order lifecycle.
+	var serverCA port.ServerCertificateIssuer
+	if cfg.CA.Server != nil {
+		serverCA, err = buildServerIssuer(cfg.CA.Server, logger)
+		if err != nil {
+			return err
 		}
-		serverCA = sca
-		logger.Info().
-			Str("dataDir", cfg.CA.Server.DataDir).
-			Str("org", cfg.CA.Server.Org).
-			Int("validityDays", cfg.CA.Server.ValidityDays).
-			Msg("server CA ready — serverCsrPEM path enabled")
 	} else {
-		logger.Info().Msg("no server CA configured — serverCsrPEM path disabled (BYOC-only)")
+		logger.Info().Msg("no server issuer configured — serverCsrPEM path disabled (BYOC-only)")
 	}
 	// In local-dev, accept self-signed BYOC certs. Production must
 	// remove WithSkipChainVerify in its config factory.
@@ -149,6 +150,14 @@ func run(cfgPath string) error {
 
 	// DNS verifier.
 	var dnsVerifier = selectDNSVerifier(cfg)
+
+	// did:web resolver — noop (quickstart) or hardened web fetch,
+	// the identity surface's analog of the DNS verifier selection.
+	didResolver := selectDIDResolver(cfg, logger)
+	logger.Info().
+		Str("resolver", cfg.Identity.Resolver.Type).
+		Dur("challengeTTL", cfg.Identity.ChallengeTTL).
+		Msg("verified-identity surface configured")
 
 	logger.Info().
 		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
@@ -188,7 +197,33 @@ func run(cfgPath string) error {
 		KeyID:      signerKeyID,
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
-		WithServerCertificateAuthority(serverCA)
+		WithHTTPChallengeVerifier(challenge.NewHTTPVerifier()).
+		WithServerCertificateIssuer(serverCA)
+
+	// Verified identities — the "who" behind the agents. Shares the
+	// producer signer with the registration service: one RA, one
+	// producer identity on every TL lane. Identity events seal
+	// SYNCHRONOUSLY (seal-before-success, design §5.6.1): they never
+	// ride the outbox, so the service gets the TL client directly. A
+	// disabled TL client means identity sealing operations fail
+	// closed with TL_UNAVAILABLE — there is no "seal later" mode.
+	var identitySealer service.IdentityEventSealer
+	if !cfg.TLClient.Disabled {
+		identitySealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout)
+	} else {
+		logger.Warn().Msg("TL client disabled — identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
+	}
+	identitySvc := service.NewIdentityService(
+		identityStore, identityLinks, agents, didResolver, identitySealer, db,
+	).WithSigner(service.EventSigner{
+		KeyManager: km,
+		KeyID:      signerKeyID,
+		RaID:       cfg.Signer.RaID,
+	}).WithChallengeTTL(cfg.Identity.ChallengeTTL).
+		WithRegisterRateLimit(cfg.Identity.RegisterRateLimit).
+		WithLinkRateLimit(cfg.Identity.LinkRateLimit).
+		WithSealTimeout(cfg.Identity.SealTimeout).
+		WithLogger(logger)
 
 	// HTTP.
 	r := chi.NewRouter()
@@ -223,7 +258,7 @@ func run(cfgPath string) error {
 	// routes (GET) 404 on not-owned to hide existence; write routes
 	// (POST) 403 so authenticated operators understand it's an
 	// authorization failure (spec §26, §370).
-	lifeH := handler.NewLifecycleHandler(regSvc)
+	lifeH := handler.NewLifecycleHandler(regSvc).WithIdentityViews(identitySvc)
 	r.Get("/v2/ans/agents", lifeH.List)
 
 	readOwnership := ramiddleware.ReadOwnership(agents)
@@ -245,6 +280,21 @@ func run(cfgPath string) error {
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.SubmitServerCertRenewal)
 	r.With(writeOwnership).Delete("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.CancelServerCertRenewal)
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/server/renewal/verify-acme", lifeH.VerifyRenewalACME)
+
+	// Verified-identity routes (V2 only — the V1 lane is frozen).
+	// Ownership is enforced inside the IdentityService (reads hide
+	// existence with 404, writes split 404/403) because the owner
+	// gate is the link mechanism's security boundary and the service
+	// loads the aggregate anyway.
+	idH := handler.NewIdentityHandler(identitySvc)
+	r.Post("/v2/ans/identities", idH.Register)
+	r.Get("/v2/ans/identities", idH.List)
+	r.Get("/v2/ans/identities/{identityId}", idH.Detail)
+	r.Put("/v2/ans/identities/{identityId}", idH.Rotate)
+	r.Post("/v2/ans/identities/{identityId}/verify-control", idH.VerifyControl)
+	r.Post("/v2/ans/identities/{identityId}/revoke", idH.Revoke)
+	r.Post("/v2/ans/identities/{identityId}/links", idH.Link)
+	r.Delete("/v2/ans/identities/{identityId}/links/{agentId}", idH.Unlink)
 
 	// V1 RA surface — byte-for-byte parity with the reference V1 API
 	// spec. Shares the same RegistrationService as the V2 routes;
@@ -313,6 +363,12 @@ func run(cfgPath string) error {
 	// activity is negligible.
 	expctx, expCancel := context.WithCancel(ctx)
 	go service.RunExpiryChecker(expctx, renewals, certsStore, logger, service.ExpiryCheckerOptions{
+		Interval: 5 * time.Minute,
+	})
+	// Registration-side twin: PENDING_VALIDATION registrations whose
+	// challenge window lapsed flip to EXPIRED, per the spec's
+	// "not cancellable and will auto-expire" contract.
+	go service.RunAgentExpiryChecker(expctx, agents, logger, service.ExpiryCheckerOptions{
 		Interval: 5 * time.Minute,
 	})
 	defer expCancel()
@@ -464,6 +520,32 @@ func assertRegistryDomainCoherence(reg port.ProfileRegistry) error {
 	return nil
 }
 
+// buildServerIssuer builds the configured server certificate issuer.
+// Config validation has already checked the per-type required fields.
+func buildServerIssuer(s *config.CAServer, logger zerolog.Logger) (port.ServerCertificateIssuer, error) {
+	if s.IsACME() {
+		issuer, err := cert.NewACMEIssuer(s.ACME.DirectoryURL, s.ACME.Email, s.ACME.DataDir, cert.WithLogger(logger))
+		if err != nil {
+			return nil, fmt.Errorf("init acme issuer: %w", err)
+		}
+		logger.Info().
+			Str("directoryURL", s.ACME.DirectoryURL).
+			Str("dataDir", s.ACME.DataDir).
+			Msg("ACME issuer ready — serverCsrPEM path enabled (provider-issued certs)")
+		return issuer, nil
+	}
+	sca, err := cert.NewServerSelfCA(s.DataDir, s.Org, s.ValidityDays)
+	if err != nil {
+		return nil, fmt.Errorf("init server ca: %w", err)
+	}
+	logger.Info().
+		Str("dataDir", s.DataDir).
+		Str("org", s.Org).
+		Int("validityDays", s.ValidityDays).
+		Msg("server CA ready — serverCsrPEM path enabled")
+	return sca, nil
+}
+
 // selectDNSVerifier returns the configured DNS adapter. Returns a
 // port.DNSVerifier so the service layer can wire it directly.
 //
@@ -482,5 +564,19 @@ func selectDNSVerifier(cfg *config.RAConfig) port.DNSVerifier {
 		return dns.NewLookupVerifier(opts...)
 	default:
 		return dns.NewNoopVerifier()
+	}
+}
+
+// selectDIDResolver returns the configured did:web resolver adapter —
+// the identity surface's analog of selectDNSVerifier. "web" performs
+// the hardened HTTPS fetch (WebPKI + SSRF dialer guards); the default
+// "noop" synthesizes documents from the submitted proofs' embedded
+// keys for self-contained local development.
+func selectDIDResolver(cfg *config.RAConfig, logger zerolog.Logger) port.DIDResolver {
+	switch cfg.Identity.Resolver.Type {
+	case "web":
+		return didresolver.NewWebResolver(didresolver.WithLogger(logger))
+	default:
+		return didresolver.NewNoopResolver()
 	}
 }

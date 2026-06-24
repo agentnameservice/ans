@@ -1,4 +1,4 @@
--- 006_agent_discovery_profiles.sql
+-- 010_agent_discovery_profiles.sql
 -- Persist the operator's chosen set of DNS record families on the
 -- registration row so verify-acme / verify-dns / badge responses
 -- carry the same shape the operator chose at registration time.

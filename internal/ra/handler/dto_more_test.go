@@ -23,7 +23,7 @@ func mustReq(t *testing.T, method, target string) *http.Request {
 	return httptest.NewRequest(method, target, nil)
 }
 
-func TestPhaseFromStatus_AllArms(t *testing.T) {
+func TestPhaseFor_AllArms(t *testing.T) {
 	cases := map[domain.RegistrationStatus]string{
 		domain.StatusPendingValidation:       "DOMAIN_VALIDATION",
 		domain.StatusPendingDNS:              "DNS_PROVISIONING",
@@ -31,21 +31,31 @@ func TestPhaseFromStatus_AllArms(t *testing.T) {
 		domain.RegistrationStatus("UNKNOWN"): "INITIALIZATION",
 	}
 	for status, want := range cases {
-		if got := phaseFromStatus(status); got != want {
-			t.Errorf("phaseFromStatus(%q): got %q want %q", status, got, want)
+		reg := &domain.AgentRegistration{Status: status}
+		if got := phaseFor(reg); got != want {
+			t.Errorf("phaseFor(%q): got %q want %q", status, got, want)
 		}
+	}
+	// CERTIFICATE_ISSUANCE is derived from the order, not the
+	// lifecycle: PENDING_VALIDATION + ISSUING order reports it.
+	issuing := &domain.AgentRegistration{
+		Status:    domain.StatusPendingValidation,
+		CertOrder: domain.CertificateOrder{State: domain.OrderStateIssuing},
+	}
+	if got := phaseFor(issuing); got != "CERTIFICATE_ISSUANCE" {
+		t.Errorf("phaseFor(issuing): got %q want CERTIFICATE_ISSUANCE", got)
 	}
 }
 
 func TestCompletedStepsFor_AllArms(t *testing.T) {
 	cases := map[domain.RegistrationStatus][]string{
-		domain.StatusPendingDNS: {"DOMAIN_VALIDATION"},
+		domain.StatusPendingDNS: {"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE"},
 		domain.StatusActive:     {"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE", "DNS_PROVISIONING"},
 		// Default arm (any other status) returns nil.
 		domain.StatusPendingValidation: nil,
 	}
 	for status, want := range cases {
-		got := completedStepsFor(status)
+		got := completedStepsFor(&domain.AgentRegistration{Status: status})
 		if len(got) != len(want) {
 			t.Errorf("completedStepsFor(%q): got %v want %v", status, got, want)
 			continue
@@ -65,7 +75,7 @@ func TestPendingStepsFor_AllArms(t *testing.T) {
 		domain.StatusActive:            nil, // default arm
 	}
 	for status, want := range cases {
-		got := pendingStepsFor(status)
+		got := pendingStepsFor(&domain.AgentRegistration{Status: status})
 		if len(got) != len(want) {
 			t.Errorf("pendingStepsFor(%q): got %v want %v", status, got, want)
 			continue
@@ -183,12 +193,12 @@ func TestRFC3339Zero_BothArms(t *testing.T) {
 }
 
 // buildRegistrationChallenges short-circuits to nil for a registration
-// whose ACMEChallenge is zero (the post-active-after-restore case).
+// whose CertOrder is zero (the post-active-after-restore case).
 // Pre-coverage only the populated branch was hit.
 func TestBuildRegistrationChallenges_NoChallengeYieldsNil(t *testing.T) {
 	reg := &domain.AgentRegistration{}
 	if got := buildRegistrationChallenges(reg); got != nil {
-		t.Errorf("zero ACMEChallenge should yield nil challenges; got %v", got)
+		t.Errorf("zero CertOrder should yield nil challenges; got %v", got)
 	}
 }
 
