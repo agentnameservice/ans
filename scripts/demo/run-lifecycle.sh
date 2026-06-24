@@ -440,7 +440,7 @@ header "20. GET /v2/ans/agents/$AGENT_ID/catalog-entry  (AI Catalog record)"
 # assertion below is the guard: a 422/error body has no matching
 # .identifier and fails it.
 CAT_ENTRY=$(curl_json GET "/v2/ans/agents/$AGENT_ID/catalog-entry")
-want_urn="urn:ai:${AGENT_HOST}:agents:${AGENT_HOST%%.*}"
+want_urn="urn:air:${AGENT_HOST}:agents:${AGENT_HOST%%.*}"
 want_receipt="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}/receipt"
 want_badge="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}"
 printf '%s' "$CAT_ENTRY" | jq -e \

@@ -226,7 +226,7 @@ func deriveLabel(agentHost string) string {
 // segment is the registration's own agentHost, so a registry reads the
 // publisher domain directly from the identifier.
 func buildURN(agentHost, label string) string {
-	return "urn:ai:" + agentHost + ":agents:" + label
+	return "urn:air:" + agentHost + ":agents:" + label
 }
 
 // buildPublisher builds the Publisher block (§3.7). ANS has no verified

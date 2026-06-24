@@ -100,7 +100,7 @@ reg_ineligible() {
 RAND="$(openssl rand -hex 4)"
 HOST="catalog-host-$RAND.example.com"
 LABEL="${HOST%%.*}"
-URN="urn:ai:$HOST:agents:$LABEL"
+URN="urn:air:$HOST:agents:$LABEL"
 OTHER="catalog-other-$RAND.example.com"
 
 # ──────────────────────────────────────────────────────────────────

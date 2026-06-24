@@ -89,7 +89,7 @@ func TestBuildEntry_SingleA2A_Golden(t *testing.T) {
 		t.Fatalf("BuildEntry: %v", err)
 	}
 
-	const want = `{"identifier":"urn:ai:ai-agent.acmecorp.com:agents:ai-agent",` +
+	const want = `{"identifier":"urn:air:ai-agent.acmecorp.com:agents:ai-agent",` +
 		`"displayName":"Acme Support Agent",` +
 		`"description":"Customer-support agent for Acme retail accounts.",` +
 		`"version":"2.1.0",` +
@@ -98,7 +98,7 @@ func TestBuildEntry_SingleA2A_Golden(t *testing.T) {
 		`"updatedAt":"2026-06-12T17:03:11Z",` +
 		`"publisher":{"identifier":"ai-agent.acmecorp.com","displayName":"ai-agent.acmecorp.com","identityType":"dns"},` +
 		`"metadata":{"ansName":"ans://v2.1.0.ai-agent.acmecorp.com","agentHost":"ai-agent.acmecorp.com","badgeUrl":"https://transparency-log.example.com/v1/agents/550e8400-e29b-41d4-a716-446655440000"},` +
-		`"trustManifest":{"identity":"urn:ai:ai-agent.acmecorp.com:agents:ai-agent","attestations":[{"type":"ANS-Registration","uri":"https://transparency-log.example.com/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt","mediaType":"application/scitt-receipt+cose"}]}}`
+		`"trustManifest":{"identity":"urn:air:ai-agent.acmecorp.com:agents:ai-agent","attestations":[{"type":"ANS-Registration","uri":"https://transparency-log.example.com/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt","mediaType":"application/scitt-receipt+cose"}]}}`
 
 	if got := mustJSON(t, entry); got != want {
 		t.Errorf("entry JSON mismatch:\n got: %s\nwant: %s", got, want)

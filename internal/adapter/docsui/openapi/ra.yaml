@@ -2134,9 +2134,9 @@ components:
           type: string
           description: |
             Stable, version-spanning lineage handle
-            `urn:ai:{agentHost}:agents:{label}`, where `{label}` is the
+            `urn:air:{agentHost}:agents:{label}`, where `{label}` is the
             leftmost DNS label of agentHost. Never the per-version agentId.
-          example: urn:ai:ai-agent.acmecorp.com:agents:ai-agent
+          example: urn:air:ai-agent.acmecorp.com:agents:ai-agent
         displayName:
           type: string
           maxLength: 64
@@ -2288,7 +2288,7 @@ components:
       properties:
         identity:
           type: string
-          example: urn:ai:ai-agent.acmecorp.com:agents:ai-agent
+          example: urn:air:ai-agent.acmecorp.com:agents:ai-agent
         attestations:
           type: array
           description: |

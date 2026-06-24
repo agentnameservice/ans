@@ -35,7 +35,7 @@ func TestBuildHostDocument_HostObjectAndEntries(t *testing.T) {
 	if len(doc.Entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(doc.Entries))
 	}
-	if doc.Entries[0].Identifier != "urn:ai:"+host+":agents:ai-agent" {
+	if doc.Entries[0].Identifier != "urn:air:"+host+":agents:ai-agent" {
 		t.Errorf("entry identifier = %q", doc.Entries[0].Identifier)
 	}
 
@@ -141,15 +141,15 @@ func TestBuildHostDocument_NilRegSkipped(t *testing.T) {
 // host = one lineage label) but the slice-3 multi-host export will.
 func TestSortEntries(t *testing.T) {
 	entries := []Entry{
-		{Identifier: "urn:ai:b.example.com:agents:b", Version: "1.0.0"},
-		{Identifier: "urn:ai:a.example.com:agents:a", Version: "2.0.0"},
-		{Identifier: "urn:ai:a.example.com:agents:a", Version: "1.0.0"},
+		{Identifier: "urn:air:b.example.com:agents:b", Version: "1.0.0"},
+		{Identifier: "urn:air:a.example.com:agents:a", Version: "2.0.0"},
+		{Identifier: "urn:air:a.example.com:agents:a", Version: "1.0.0"},
 	}
 	sortEntries(entries)
 	want := []struct{ id, ver string }{
-		{"urn:ai:a.example.com:agents:a", "1.0.0"},
-		{"urn:ai:a.example.com:agents:a", "2.0.0"},
-		{"urn:ai:b.example.com:agents:b", "1.0.0"},
+		{"urn:air:a.example.com:agents:a", "1.0.0"},
+		{"urn:air:a.example.com:agents:a", "2.0.0"},
+		{"urn:air:b.example.com:agents:b", "1.0.0"},
 	}
 	for i, w := range want {
 		if entries[i].Identifier != w.id || entries[i].Version != w.ver {

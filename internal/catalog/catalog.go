@@ -2,7 +2,7 @@
 // aggregate. It is the single generation seam (IMPL-ai-catalog §10): every
 // emitted catalog shape — the per-agent CatalogEntry today, the per-host
 // document and population export later — is composed here, so the pending
-// IANA churn (the urn:ai NID, the application/ai-catalog+json media type,
+// IANA churn (the urn:air NID, the application/ai-catalog+json media type,
 // the type/mediaType discriminator rename) lands in one place.
 //
 // ANS is a producer only: every byte is derived from the RA's own
@@ -14,7 +14,7 @@
 //
 // Authoritative shape: the AI Catalog draft of 2026-06-11. Field names,
 // the one-of url|data invariant, and the media types follow that draft;
-// the projection choices (the urn:ai:{host}:agents:{label} lineage handle,
+// the projection choices (the urn:air:{host}:agents:{label} lineage handle,
 // the ANS-Registration attestation, the {ansName,agentHost,badgeUrl}
 // metadata) follow IMPL-ai-catalog-generation.md.
 package catalog
@@ -57,7 +57,7 @@ const (
 // specVersion (§2).
 type Entry struct {
 	// Identifier is the stable, version-spanning lineage handle
-	// urn:ai:{agentHost}:agents:{label} (§3.3) — never the per-version
+	// urn:air:{agentHost}:agents:{label} (§3.3) — never the per-version
 	// agentId. MUST.
 	Identifier string `json:"identifier"`
 	// DisplayName is the agent's human-readable name (≤64). MUST.
