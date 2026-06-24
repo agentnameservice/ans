@@ -266,3 +266,27 @@ func (c *Client) SealIdentityEvent(ctx context.Context, innerCanonical []byte, p
 			"the transparency log rejected the identity event", err)
 	}
 }
+
+// SealAgentEvent submits a producer-signed AGENT event on the V1 or V2
+// ingest lane and returns only after the TL acknowledges the seal — the
+// client half of seal-before-success for agent ACTIVATION (ANS-1 §12.3:
+// "the RA MUST NOT activate without a sealed event"). Used by the
+// registration service to seal AGENT_REGISTERED inline at verify-dns,
+// before the agent is reported ACTIVE. Error mapping mirrors
+// SealIdentityEvent: transient → TL_UNAVAILABLE (retryable, nothing
+// consumed — the activation can be retried), permanent → TL_REJECTED_EVENT
+// (the RA produced an event the TL refuses — a pipeline bug operators must
+// see). schemaVersion selects the lane ("V1" or "V2").
+func (c *Client) SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) error {
+	_, err := c.Append(ctx, schemaVersion, innerCanonical, producerSig)
+	switch {
+	case err == nil:
+		return nil
+	case IsTransient(err):
+		return domain.NewUnavailableError("TL_UNAVAILABLE",
+			"the transparency log did not confirm the seal; activation is retryable and nothing was consumed")
+	default:
+		return domain.NewInternalError("TL_REJECTED_EVENT",
+			"the transparency log rejected the agent event", err)
+	}
+}

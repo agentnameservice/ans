@@ -7,10 +7,10 @@
 #   2. GET    /v1/agents/{id}                                    (detail, PENDING_VALIDATION — challenges[] only, no dnsRecords yet)
 #   3. POST   /v1/agents/{id}/verify-acme                        (→ PENDING_DNS; no V1 TL emit; issues identity + server certs)
 #   4. GET    /v1/agents/{id}                                    (detail, PENDING_DNS — production dnsRecords with real TLSA fingerprint)
-#   5. POST   /v1/agents/{id}/verify-dns                         (→ ACTIVE; emits V1 AGENT_REGISTERED)
+#   5. POST   /v1/agents/{id}/verify-dns                         (→ ACTIVE; seals V1 AGENT_REGISTERED inline)
 #   6. GET    /v1/agents/{id}                                    (detail, now ACTIVE)
 #   7. GET    /v1/agents/{id}/certificates/identity              (issued cert)
-#   8. Wait for the outbox worker to push the one V1 event to the TL
+#   8. Confirm the inline-sealed V1 AGENT_REGISTERED leaf is durable in the TL
 #   9. GET    TL /v1/agents/{id}/audit                           (shape: schemaVersion=V1)
 #  10. GET    TL /v1/agents/{id}                                 (badge: schemaVersion=V1)
 #  11. POST   /v1/agents/{id}/revoke                             (emits V1 AGENT_REVOKED)
@@ -19,11 +19,15 @@
 #   - V1 emits NO TL leaf at register or verify-acme — only on
 #     verify-dns (terminal AGENT_REGISTERED) and revoke (terminal
 #     AGENT_REVOKED).
+#   - verify-dns seals AGENT_REGISTERED INLINE (seal-before-success):
+#     the RA reports ACTIVE only after the TL acknowledges the leaf.
+#     Revoke still rides the outbox worker (async terminal delivery).
 #   - Badge/audit responses carry `schemaVersion: "V1"` so SDK
 #     parsers pick the V1 envelope shape.
-#   - The TL's `/v1/internal/agents/event` ingest route receives the
-#     V1 envelopes (not `/v2/...`) because the outbox worker routes
-#     per-row by schema_version.
+#   - Both rails target the TL's `/v1/internal/agents/event` ingest
+#     route (not `/v2/...`): the inline sealer stamps schemaVersion=V1
+#     for AGENT_REGISTERED, and the outbox worker routes the
+#     AGENT_REVOKED row by its schema_version column.
 #
 # Usage:
 #   scripts/demo/run-lifecycle-v1.sh                            # random host, version 1.0.0
@@ -183,7 +187,7 @@ curl_json GET "/v1/agents/$AGENT_ID" >/dev/null
 # V1 invariant: the FIRST TL leaf V1 agents ever receive is
 # AGENT_REGISTERED, emitted exactly here. (V2 equivalent emits
 # AGENT_ACTIVE.)
-header "5. POST /v1/agents/$AGENT_ID/verify-dns  (→ ACTIVE; emits V1 AGENT_REGISTERED)"
+header "5. POST /v1/agents/$AGENT_ID/verify-dns  (→ ACTIVE; seals V1 AGENT_REGISTERED inline)"
 if [ -n "${ANS_DNS_ZONE:-}" ] && [ -x "$BIN/ans-dns" ]; then
   note "installing agent records into $ANS_DNS_ZONE via ans-dns"
   "$BIN/ans-dns" install --zone "$ANS_DNS_ZONE" --api-key "$RA_API_KEY" "$RA_URL" "$AGENT_ID"
@@ -201,15 +205,18 @@ curl_json GET "/v1/agents/$AGENT_ID" >/dev/null
 header "7. GET /v1/agents/$AGENT_ID/certificates/identity"
 curl_json GET "/v1/agents/$AGENT_ID/certificates/identity" >/dev/null
 
-# ----- 8. Wait for outbox worker -----
+# ----- 8. Confirm the inline-sealed V1 AGENT_REGISTERED leaf -----
 #
-# V1 differs from V2 here: V2 writes 3 outbox rows across a register
-# → verify-acme → verify-dns lifecycle. V1 writes ONE row — only the
-# terminal AGENT_REGISTERED on verify-dns ACTIVE. This step proves
-# the "V1 lifecycle emits exactly one leaf" invariant end-to-end.
-header "8. Wait for outbox worker to push 1 V1 event to the TL"
+# The single terminal AGENT_REGISTERED leaf is sealed INLINE at the
+# verify-dns ACTIVE transition (seal-before-success) on both lanes —
+# verify-dns above only returned ACTIVE because the TL acknowledged
+# the seal, so the leaf is already durable here. This poll is a
+# confirmation (succeeds on the first try, modulo audit-projection
+# lag), and it proves the "V1 lifecycle seals exactly one leaf"
+# invariant end-to-end: no register/verify-acme leaf, just this one.
+header "8. Confirm the inline-sealed V1 AGENT_REGISTERED leaf is durable in the TL"
 poll_tl_audit "$AGENT_ID" 1 30
-ok "TL received the single V1 AGENT_REGISTERED event"
+ok "TL has the single V1 AGENT_REGISTERED leaf (sealed inline at activation)"
 
 # ----- 9. V1 audit (schemaVersion=V1) -----
 #

@@ -55,7 +55,8 @@ func TestVerifyDNS_TransientServerCertError_Aborts(t *testing.T) {
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
-	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier())
+	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier()).
+		WithAgentSealer(&recordingAgentSealer{})
 
 	// Register + verify-acme with the store healthy so the CSR-issued
 	// server cert is persisted and the agent reaches the pre-DNS state.
@@ -161,7 +162,7 @@ func rebuildWithIssuer(fx *regFixture, issuer port.ServerCertificateIssuer, dnsV
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
-	).WithServerCertificateIssuer(issuer)
+	).WithServerCertificateIssuer(issuer).WithAgentSealer(&recordingAgentSealer{})
 	if dnsV != nil {
 		svc = svc.WithDNSVerifier(dnsV)
 	}
@@ -998,7 +999,8 @@ func TestGetServerCertRenewal_TransientServerCertError_Propagates(t *testing.T) 
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
-	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier())
+	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier()).
+		WithAgentSealer(&recordingAgentSealer{})
 
 	agentID := registerAndActivate(t, fx, svc)
 	// BYOC renewal completes synchronously, leaving a completed renewal
