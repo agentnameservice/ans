@@ -859,7 +859,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		KeyID:      "ra-signer",
 		RaID:       "ra-test",
 	}).WithDNSVerifier(dns.NewNoopVerifier()).
-		WithServerCertificateAuthority(serverCA)
+		WithServerCertificateIssuer(serverCA)
 
 	r := chi.NewRouter()
 	regH := handler.NewRegistrationHandler(svc, zerolog.Nop())

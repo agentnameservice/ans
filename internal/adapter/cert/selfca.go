@@ -21,7 +21,6 @@ import (
 	"time"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 )
 
@@ -131,17 +130,22 @@ func (c *SelfCA) IssueIdentityCertificate(
 	}, nil
 }
 
-// RevokeCertificate marks a certificate as revoked. The in-process CRL
-// is not yet published; revocations are tracked in memory and surfaced
-// through transparency-log events.
+// RevokeCertificate marks a certificate as revoked by serial.
+// Idempotent per the port contract. The in-process CRL is not
+// published; revocations are tracked in memory (and authoritatively
+// through transparency-log events) — production deployments that need
+// CRL/OCSP distribution swap in a cloud private-CA adapter at this
+// port.
 func (c *SelfCA) RevokeCertificate(
 	ctx context.Context,
-	serialNumber string,
-	reason domain.RevocationReason,
+	req port.RevokeCertificateRequest,
 ) error {
+	if req.SerialNumber == "" {
+		return errors.New("cert: revoke: serial number is required")
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.revoked[serialNumber] = struct{}{}
+	c.revoked[req.SerialNumber] = struct{}{}
 	return nil
 }
 
@@ -181,7 +185,7 @@ func (c *SelfCA) loadRoot(keyPath, certPath string) error {
 		return fmt.Errorf("cert: read root key: %w", err)
 	}
 	keyBlock, _ := pem.Decode(keyBytes)
-	if keyBlock == nil || keyBlock.Type != "PRIVATE KEY" {
+	if keyBlock == nil || keyBlock.Type != pemTypePrivateKey {
 		return errors.New("cert: root key is not a PKCS#8 PRIVATE KEY PEM")
 	}
 	key, err := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
@@ -253,7 +257,7 @@ func (c *SelfCA) createRoot(keyPath, certPath string) error {
 		return fmt.Errorf("cert: marshal root key: %w", err)
 	}
 	if err := os.WriteFile(keyPath,
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privDER}), 0o600); err != nil {
+		pem.EncodeToMemory(&pem.Block{Type: pemTypePrivateKey, Bytes: privDER}), 0o600); err != nil {
 		return fmt.Errorf("cert: write root key: %w", err)
 	}
 	// 0o644 (world-readable) is intentional: the root cert is a

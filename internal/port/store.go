@@ -2,6 +2,7 @@ package port
 
 import (
 	"context"
+	"time"
 
 	"github.com/godaddy/ans/internal/domain"
 )
@@ -59,6 +60,23 @@ type AgentStore interface {
 		ownerID string,
 		filter ListFilter,
 	) (*CursorPage[*domain.AgentRegistration], error)
+
+	// ExpireLapsedPendingValidation atomically transitions to EXPIRED
+	// every registration that is still PENDING_VALIDATION with a
+	// PENDING certificate order whose challenge window lapsed at or
+	// before now, returning the number transitioned. The agent-expiry
+	// sweeper uses it to honor the spec's "PENDING_VALIDATION
+	// registrations are not cancellable and will auto-expire".
+	//
+	// The transition is a single guarded write — not a read-then-save
+	// — so a verify-acme that advances the same row (to PENDING_DNS,
+	// or to a non-PENDING order state) between scans cannot be
+	// clobbered: such a row simply no longer matches. In-flight
+	// (order ISSUING) and terminally-failed (order FAILED)
+	// registrations are excluded; they leave PENDING_VALIDATION
+	// through the cancel route instead, per domain.Cancel's
+	// eligibility rule.
+	ExpireLapsedPendingValidation(ctx context.Context, now time.Time) (int64, error)
 
 	// Delete removes the registration with the given ID. Used only for
 	// administrative cleanup; normal lifecycle uses Revoke.
@@ -205,4 +223,97 @@ type FeedReader interface {
 	// the cursor (or the oldest retained row when the cursor is empty
 	// or unknown). It returns at most q.Limit rows.
 	ReadFeed(ctx context.Context, q FeedQuery) ([]FeedRow, error)
+}
+
+// IdentityStore persists VerifiedIdentity aggregates (the "who" —
+// owned by a providerId, independent of any agent).
+type IdentityStore interface {
+	// Save upserts the aggregate. The storage layer enforces the two
+	// uniqueness rules with partial indexes: one live (non-REVOKED)
+	// row per (provider, kind, value), and one VERIFIED row per
+	// (kind, value) across all owners — first to prove wins; a save
+	// that loses the race maps to a conflict error.
+	Save(ctx context.Context, identity *domain.VerifiedIdentity) error
+
+	// FindByID returns the identity with the given identityId.
+	FindByID(ctx context.Context, identityID string) (*domain.VerifiedIdentity, error)
+
+	// FindLive returns the owner's non-REVOKED row for (kind, value),
+	// or a not-found error. Drives the idempotent re-add: a re-POST
+	// of the same value while PENDING_CONTROL returns the same
+	// identity with a fresh challenge.
+	FindLive(ctx context.Context, providerID string, kind domain.IdentifierKind, value string) (*domain.VerifiedIdentity, error)
+
+	// ExistsVerified reports whether ANY owner holds a VERIFIED row
+	// for (kind, value) — early duplicate feedback at register time.
+	// The authoritative guard is the proven-uniqueness index at
+	// verify time.
+	ExistsVerified(ctx context.Context, kind domain.IdentifierKind, value string) (bool, error)
+
+	// ListByOwner returns the principal's identities, newest first,
+	// cursor-paginated with the same opaque-cursor convention as the
+	// agent list (§5.6.1 pagination inherits, never invents).
+	ListByOwner(ctx context.Context, providerID string, limit int, cursor string) (*CursorPage[*domain.VerifiedIdentity], error)
+
+	// ConsumeChallenge atomically consumes the live challenge nonce:
+	// a conditional update that succeeds only while the stored nonce
+	// matches, is unconsumed, and is unexpired. Exactly one of two
+	// concurrent verify-control calls can win (the TOCTOU guard);
+	// the loser receives an invalid-state error. MUST be called
+	// inside the verify-control success transaction.
+	ConsumeChallenge(ctx context.Context, identityID, nonce string, now time.Time) error
+
+	// ClaimChallenge takes the short-TTL provisional claim on the
+	// live nonce before the seal-before-success TL round trip
+	// (design §5.6.1): a conditional update that succeeds only while
+	// the nonce matches, is unconsumed, and is not already claimed
+	// by an attempt fresher than staleBefore. Serializes concurrent
+	// verify-control attempts so at most one can seal; the loser
+	// gets an invalid-state error. A claim is NOT consumption.
+	ClaimChallenge(ctx context.Context, identityID, nonce string, now, staleBefore time.Time) error
+
+	// ReleaseChallenge releases a provisional claim after a failed
+	// attempt so the registrant can retry until the nonce expires
+	// (§3.2 failed-attempts-don't-consume). Best-effort: releasing
+	// an already-consumed or superseded nonce is a no-op.
+	ReleaseChallenge(ctx context.Context, identityID, nonce string) error
+
+	// StageChallenge persists a freshly issued challenge (and any
+	// staged pending_value) onto an EXISTING row, conditionally on
+	// the status and nonce observed at load time and on no live seal
+	// claim — the optimistic-concurrency guard that stops a re-add /
+	// rotate from clobbering a concurrently committed verify or
+	// revoke (their commits race the resolver fetch between load and
+	// persist). Never writes status, value, or verified_at: issuing
+	// a challenge is not a state transition. A failed condition maps
+	// to a precise conflict error.
+	StageChallenge(ctx context.Context, identity *domain.VerifiedIdentity, expectedStatus domain.IdentityStatus, expectedNonce string, staleBefore time.Time) error
+
+	// MarkRevoked flips a VERIFIED row to REVOKED conditionally —
+	// the seal-before-success Phase C commit for Revoke. The status
+	// condition (not a blind save) means a verify or rotate that
+	// committed during the revoke's TL round trip is never clobbered
+	// with stale column values. Zero rows → conflict.
+	MarkRevoked(ctx context.Context, identityID string, now time.Time) error
+}
+
+// IdentityLinkStore persists identity↔agent link rows. Rows are
+// read-side caches of the sealed IDENTITY_LINKED / IDENTITY_UNLINKED
+// events; UNLINKED rows are history and never block re-linking.
+type IdentityLinkStore interface {
+	// Link upserts a live link for the pair. Returns true when a new
+	// link was created, false when the pair was already live
+	// (idempotent — an already-linked agent in a batch is not an
+	// error, and is excluded from the sealed batch event).
+	Link(ctx context.Context, identityID, agentID string, now time.Time) (bool, error)
+
+	// Unlink flips the live link to UNLINKED. Not-found error when no
+	// live link exists.
+	Unlink(ctx context.Context, identityID, agentID string, now time.Time) error
+
+	// ListLiveByIdentity returns the identity's live links.
+	ListLiveByIdentity(ctx context.Context, identityID string) ([]*domain.IdentityLink, error)
+
+	// ListLiveByAgent returns the agent's live links.
+	ListLiveByAgent(ctx context.Context, agentID string) ([]*domain.IdentityLink, error)
 }

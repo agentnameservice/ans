@@ -205,13 +205,19 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 		})
 	}
 
-	// BYOC server cert — operator-supplied at registration.
+	// Server cert (BYOC or CSR-signed): folded into the terminal V1
+	// attestation. A transient store error must abort — this leaf is
+	// signed and appended to the append-only log, so swallowing it
+	// would emit a permanently wrong attestation from a recoverable
+	// fault.
 	var primaryServer *eventv1.CertificateInfo
 	var validServer []eventv1.CertificateInfoExtended
-	var byocCert *domain.ByocServerCertificate
-	if byoc, berr := s.byoc.FindLatestValidByAgentID(ctx, reg.AgentID); berr == nil && byoc != nil {
-		byocCert = byoc
-		fp := "SHA256:" + byoc.Fingerprint
+	byocCert, berr := s.loadServerCert(ctx, reg.AgentID)
+	if berr != nil {
+		return nil, berr
+	}
+	if byocCert != nil {
+		fp := "SHA256:" + byocCert.Fingerprint
 		primaryServer = &eventv1.CertificateInfo{
 			Fingerprint: fp,
 			CertType:    "X509-DV-SERVER",
@@ -219,7 +225,7 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 		validServer = []eventv1.CertificateInfoExtended{{
 			Fingerprint: fp,
 			CertType:    "X509-DV-SERVER",
-			NotAfter:    byoc.ValidToTimestamp.UTC().Format(time.RFC3339),
+			NotAfter:    byocCert.ValidToTimestamp.UTC().Format(time.RFC3339),
 		}}
 	}
 

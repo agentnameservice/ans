@@ -74,6 +74,18 @@ func (s *ReceiptService) ForAgent(ctx context.Context, agentID string) (*Receipt
 	return s.buildOrFetch(ctx, rec)
 }
 
+// ForIdentity returns a receipt for the most recent event on an
+// identity's stream — the same COSE_Sign1 machinery as agent
+// receipts; receipts are leaf-scoped and don't care which read index
+// found the leaf.
+func (s *ReceiptService) ForIdentity(ctx context.Context, identityID string) (*Receipt, error) {
+	rec, err := s.log.LatestEventByIdentity(ctx, identityID)
+	if err != nil {
+		return nil, err
+	}
+	return s.buildOrFetch(ctx, rec)
+}
+
 // ForLeafIndex returns a receipt for a specific leaf.
 func (s *ReceiptService) ForLeafIndex(ctx context.Context, idx uint64) (*Receipt, error) {
 	rec, err := s.log.EventByLeafIndex(ctx, idx)
@@ -95,12 +107,13 @@ func (s *ReceiptService) buildOrFetch(ctx context.Context, rec *sqlitetl.EventRe
 		return nil, err
 	}
 
-	// Cache lookup by (leafIndex, treeSize). If a receipt was already
-	// minted for this exact pair it's byte-identical payload-wise
-	// (same event bytes + same proof); the CBOR signature isn't
-	// deterministic but the receipt is still cryptographically valid.
+	// Cache lookup by (leafIndex, treeSize) — the table's UNIQUE key.
+	// If a receipt was already minted for this exact pair it's
+	// byte-identical payload-wise (same event bytes + same proof);
+	// the CBOR signature isn't deterministic but the receipt is still
+	// cryptographically valid.
 	treeSize := uint64(proof.TreeSize) //nolint:gosec  // int64→uint64 always safe for tree sizes
-	if cached, cerr := s.receipts.FindByAgentID(ctx, rec.AgentID, treeSize); cerr == nil && cached != nil {
+	if cached, cerr := s.receipts.FindByLeafIndex(ctx, rec.LeafIndex, treeSize); cerr == nil && cached != nil {
 		return &Receipt{
 			Bytes:       cached.ReceiptBlob,
 			ContentType: receipt.MediaType,
@@ -143,8 +156,14 @@ func (s *ReceiptService) buildOrFetch(ctx context.Context, rec *sqlitetl.EventRe
 	}
 
 	// Cache best-effort — failure here doesn't prevent returning the
-	// receipt we just computed. The next request will recompute.
-	_ = s.receipts.Store(ctx, rec.LeafIndex, rec.AgentID, treeSize, coseBytes)
+	// receipt we just computed. The next request will recompute. The
+	// subject column is informational: the agent id for agent leaves,
+	// the identity id for identity leaves.
+	subjectID := rec.AgentID
+	if subjectID == "" {
+		subjectID = rec.IdentityID
+	}
+	_ = s.receipts.Store(ctx, rec.LeafIndex, subjectID, treeSize, coseBytes)
 
 	return &Receipt{
 		Bytes:       coseBytes,

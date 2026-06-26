@@ -43,8 +43,11 @@ func NewOutboxStore(db *DB) *OutboxStore { return &OutboxStore{db: db} }
 // preceded it — that's how we guarantee at-least-once delivery
 // without a dual-write window.
 //
-// schemaVersion must be "V1" or "V2"; the worker reads this value
-// to pick the matching TL ingest lane. An empty value is rejected.
+// schemaVersion must be "V1" or "V2"; the worker reads this value to
+// pick the matching TL ingest lane. An empty value is rejected.
+// Identity events do NOT ride the outbox — they seal synchronously
+// (design §5.6.1: seal-before-success), so there is no "IDENTITY"
+// lane here.
 func (s *OutboxStore) Enqueue(
 	ctx context.Context,
 	eventType, agentID, schemaVersion string,

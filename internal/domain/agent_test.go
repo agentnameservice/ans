@@ -182,6 +182,8 @@ func TestAgentRegistration_Revoke_FromPending(t *testing.T) {
 }
 
 func TestAgentRegistration_Cancel(t *testing.T) {
+	// Legacy shape (no persisted order): cancellable — there is no
+	// challenge window to auto-expire on, so cancel is the only exit.
 	reg := newValidRegistration(t)
 	reg.ClearEvents()
 	require.NoError(t, reg.Cancel(time.Now()))
@@ -190,7 +192,29 @@ func TestAgentRegistration_Cancel(t *testing.T) {
 
 	// Cannot cancel non-pending.
 	reg.Status = StatusActive
-	assert.ErrorIs(t, reg.Cancel(time.Now()), ErrInvalidState)
+	assert.ErrorIs(t, reg.Cancel(time.Now()), ErrValidation)
+
+	// Awaiting domain validation (order PENDING): not cancellable —
+	// per the spec it auto-expires when the challenge window lapses.
+	awaiting := newValidRegistration(t)
+	awaiting.CertOrder = NewSelfIssuedOrder("d", "h", time.Now().Add(time.Hour))
+	assert.ErrorIs(t, awaiting.Cancel(time.Now()), ErrValidation)
+
+	// Once validation is consumed (order ISSUING — the spec's
+	// PENDING_CERTS phase), cancel is allowed.
+	issuing := newValidRegistration(t)
+	issuing.CertOrder = NewSelfIssuedOrder("d", "h", time.Now().Add(time.Hour))
+	require.NoError(t, issuing.CertOrder.MarkIssuing())
+	require.NoError(t, issuing.Cancel(time.Now()))
+	assert.Equal(t, StatusRevoked, issuing.Status)
+
+	// PENDING_DNS with a completed order: cancellable.
+	pendingDNS := newValidRegistration(t)
+	pendingDNS.CertOrder = NewSelfIssuedOrder("d", "h", time.Now().Add(time.Hour))
+	require.NoError(t, pendingDNS.CertOrder.MarkCompleted())
+	require.NoError(t, pendingDNS.AdvanceToPendingDNS())
+	require.NoError(t, pendingDNS.Cancel(time.Now()))
+	assert.Equal(t, StatusRevoked, pendingDNS.Status)
 }
 
 func TestAgentRegistration_Fail(t *testing.T) {

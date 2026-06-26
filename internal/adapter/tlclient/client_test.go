@@ -10,6 +10,8 @@ import (
 	"time"
 
 	"github.com/godaddy/ans/internal/adapter/tlclient"
+
+	"github.com/godaddy/ans/internal/domain"
 )
 
 func TestAppend_Created(t *testing.T) {
@@ -272,4 +274,56 @@ func TestAppend_UnknownSchemaVersion(t *testing.T) {
 	if _, err := c.Append(context.Background(), "V9", []byte(`{"e":1}`), "sig"); err == nil {
 		t.Fatal("expected error on unknown schemaVersion")
 	}
+}
+
+// TestSealIdentityEvent_DomainErrorMapping pins the seal-before-
+// success client wrapper: success on TL ack; transient failures map
+// to ErrUnavailable (TL_UNAVAILABLE — retryable, nothing consumed);
+// TL schema rejections map to an internal TL_REJECTED_EVENT.
+func TestSealIdentityEvent_DomainErrorMapping(t *testing.T) {
+	t.Parallel()
+
+	t.Run("acknowledged seal succeeds on the IDENTITY lane", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/v1/internal/identities/event" {
+				t.Errorf("wrong ingest path: %s", r.URL.Path)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"logId":"01900000-0000-7000-8000-000000000002","success":true,"leafIndex":1,"leafHashHex":"ab","treeSize":2}`))
+		}))
+		defer srv.Close()
+		c := tlclient.New(srv.URL, "test-key", 5*time.Second)
+		if err := c.SealIdentityEvent(context.Background(), []byte(`{"eventType":"IDENTITY_VERIFIED"}`), "sig..jws"); err != nil {
+			t.Fatalf("seal: %v", err)
+		}
+	})
+
+	t.Run("5xx maps to ErrUnavailable", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusBadGateway)
+		}))
+		defer srv.Close()
+		c := tlclient.New(srv.URL, "test-key", 5*time.Second)
+		err := c.SealIdentityEvent(context.Background(), []byte(`{}`), "sig..jws")
+		if !errors.Is(err, domain.ErrUnavailable) {
+			t.Fatalf("want ErrUnavailable, got %v", err)
+		}
+	})
+
+	t.Run("4xx maps to internal TL_REJECTED_EVENT", func(t *testing.T) {
+		t.Parallel()
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			_, _ = w.Write([]byte(`{"detail":"INVALID_EVENT"}`))
+		}))
+		defer srv.Close()
+		c := tlclient.New(srv.URL, "test-key", 5*time.Second)
+		err := c.SealIdentityEvent(context.Background(), []byte(`{}`), "sig..jws")
+		var de *domain.Error
+		if !errors.As(err, &de) || de.Code != "TL_REJECTED_EVENT" {
+			t.Fatalf("want TL_REJECTED_EVENT, got %v", err)
+		}
+	})
 }

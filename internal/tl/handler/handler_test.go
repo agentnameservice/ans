@@ -887,6 +887,7 @@ func newTLTestbed(t *testing.T) *tlTestbed {
 		_ = lg.Close(cctx)
 	})
 	badgeSvc := service.NewBadgeService(logSvc)
+	identityBadgeSvc := service.NewIdentityBadgeService(logSvc, badgeSvc)
 	receiptGen, err := receiptpkg.NewKeyManagerGenerator(
 		context.Background(), tlKM, "tl-sign", "ans-test",
 	)
@@ -915,7 +916,7 @@ func newTLTestbed(t *testing.T) *tlTestbed {
 	// 6. Router.
 	r := chi.NewRouter()
 	h := handler.NewHandlers(
-		logSvc, badgeSvc, receiptSvc, statusSvc,
+		logSvc, badgeSvc, identityBadgeSvc, receiptSvc, statusSvc,
 		checkpointSvc, schemaSvc, rootKeysBody,
 	)
 	h.Mount(r, lg.DataDir())

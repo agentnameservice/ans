@@ -12,14 +12,21 @@ func defaultRAConfig() *RAConfig {
 			Static: &AuthStatic{APIKey: ""},
 		},
 		CA: CA{
-			Type: "self",
+			Type: caTypeSelf,
 			Self: &CASelf{
 				Org:          "ANS Local Dev CA",
 				ValidityDays: 365,
 				DataDir:      "./data/ra/ca",
 			},
 		},
-		DNS: DNS{Type: "noop"},
+		DNS: DNS{Type: verifierTypeNoop},
+		Identity: Identity{
+			Resolver:          IdentityResolver{Type: verifierTypeNoop},
+			ChallengeTTL:      time.Hour,
+			RegisterRateLimit: 10,
+			LinkRateLimit:     60,
+			SealTimeout:       5 * time.Second,
+		},
 		Keys: Keys{
 			Type: "file",
 			File: &KeysFile{Path: "./data/ra/keys"},

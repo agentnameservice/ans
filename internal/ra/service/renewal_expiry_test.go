@@ -41,12 +41,14 @@ func TestExpireRenewalsOnce_MarksStaleAsFailed(t *testing.T) {
 		ByocCertPEM:    "-----BEGIN CERTIFICATE-----\nabcd\n-----END CERTIFICATE-----",
 		CreatedAt:      pastExpiry.Add(-24 * time.Hour),
 		Validation: domain.RenewalValidation{
-			DNS01ChallengeToken:  "dns",
-			HTTP01ChallengeToken: "http",
-			Status:               domain.ValidationPending,
-			CreatedAt:            pastExpiry.Add(-24 * time.Hour),
-			ExpiresAt:            pastExpiry,
-			UpdatedAt:            pastExpiry.Add(-24 * time.Hour),
+			Challenges: []domain.Challenge{
+				{Type: domain.ChallengeTypeDNS01, Token: "dns"},
+				{Type: domain.ChallengeTypeHTTP01, Token: "http"},
+			},
+			Status:    domain.ValidationPending,
+			CreatedAt: pastExpiry.Add(-24 * time.Hour),
+			ExpiresAt: pastExpiry,
+			UpdatedAt: pastExpiry.Add(-24 * time.Hour),
 		},
 	}
 	if err := renewals.Save(ctx, r); err != nil {
@@ -113,12 +115,14 @@ func TestExpireRenewalsOnce_CSRPath_RejectsAttachedCSR(t *testing.T) {
 		ServerCsrID:    csr.CSRID,
 		CreatedAt:      pastExpiry.Add(-24 * time.Hour),
 		Validation: domain.RenewalValidation{
-			DNS01ChallengeToken:  "dns",
-			HTTP01ChallengeToken: "http",
-			Status:               domain.ValidationPending,
-			CreatedAt:            pastExpiry.Add(-24 * time.Hour),
-			ExpiresAt:            pastExpiry,
-			UpdatedAt:            pastExpiry.Add(-24 * time.Hour),
+			Challenges: []domain.Challenge{
+				{Type: domain.ChallengeTypeDNS01, Token: "dns"},
+				{Type: domain.ChallengeTypeHTTP01, Token: "http"},
+			},
+			Status:    domain.ValidationPending,
+			CreatedAt: pastExpiry.Add(-24 * time.Hour),
+			ExpiresAt: pastExpiry,
+			UpdatedAt: pastExpiry.Add(-24 * time.Hour),
 		},
 	}
 	if err := renewals.Save(ctx, r); err != nil {
@@ -169,12 +173,14 @@ func TestExpireRenewalsOnce_IgnoresCompletedRenewals(t *testing.T) {
 		CompletedAt:    now,
 		CreatedAt:      now.Add(-24 * time.Hour),
 		Validation: domain.RenewalValidation{
-			DNS01ChallengeToken:  "dns",
-			HTTP01ChallengeToken: "http",
-			Status:               domain.ValidationVerified,
-			CreatedAt:            now.Add(-24 * time.Hour),
-			ExpiresAt:            now.Add(-1 * time.Hour), // past, but completed
-			UpdatedAt:            now,
+			Challenges: []domain.Challenge{
+				{Type: domain.ChallengeTypeDNS01, Token: "dns"},
+				{Type: domain.ChallengeTypeHTTP01, Token: "http"},
+			},
+			Status:    domain.ValidationVerified,
+			CreatedAt: now.Add(-24 * time.Hour),
+			ExpiresAt: now.Add(-1 * time.Hour), // past, but completed
+			UpdatedAt: now,
 		},
 	}
 	if err := renewals.Save(ctx, r); err != nil {

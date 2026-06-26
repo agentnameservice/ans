@@ -24,6 +24,14 @@ type AgentStore struct {
 func NewAgentStore(db *DB) *AgentStore { return &AgentStore{db: db} }
 
 // agentRow maps a single agent_registrations row for scanning.
+//
+// The `acme_dns01_token` column is legacy: rows written before
+// migration 008 carried a single RA-generated DNS-01 token instead of
+// a certificate order. Readers synthesize a self-issued order from it
+// when the order columns are NULL; writers only fill the order
+// columns. `acme_challenge_expires_at_ms` is shared between both
+// generations — its semantic (challenge-window expiry) is unchanged,
+// so it stores the order expiry.
 type agentRow struct {
 	ID                       int64          `db:"id"`
 	AgentID                  string         `db:"agent_id"`
@@ -39,6 +47,9 @@ type agentRow struct {
 	SupersedesRegistrationID sql.NullInt64  `db:"supersedes_registration_id"`
 	ACMEDNS01Token           sql.NullString `db:"acme_dns01_token"`
 	ACMEChallengeExpiresAtMs sql.NullInt64  `db:"acme_challenge_expires_at_ms"`
+	CertOrderRef             sql.NullString `db:"cert_order_ref"`
+	CertOrderState           sql.NullString `db:"cert_order_state"`
+	CertOrderChallenges      sql.NullString `db:"cert_order_challenges"`
 	CreatedAtMs              int64          `db:"created_at_ms"`
 	UpdatedAtMs              int64          `db:"updated_at_ms"`
 }
@@ -67,13 +78,77 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 	if r.SupersedesRegistrationID.Valid {
 		reg.SupersedesRegistrationID = r.SupersedesRegistrationID.Int64
 	}
-	if r.ACMEDNS01Token.Valid {
-		reg.ACMEChallenge.DNS01Token = r.ACMEDNS01Token.String
+	order, err := certOrderFromRow(
+		r.CertOrderRef, r.CertOrderState, r.CertOrderChallenges,
+		r.ACMEDNS01Token, r.ACMEChallengeExpiresAtMs,
+	)
+	if err != nil {
+		return nil, err
 	}
-	if r.ACMEChallengeExpiresAtMs.Valid {
-		reg.ACMEChallenge.ExpiresAt = msToTime(r.ACMEChallengeExpiresAtMs.Int64)
-	}
+	reg.CertOrder = order
 	return reg, nil
+}
+
+// certOrderFromRow decodes the certificate order from its columns,
+// falling back to synthesizing a self-issued single-DNS-01 order from
+// the legacy token columns for rows written before migration 008.
+func certOrderFromRow(
+	ref, state, challengesJSON sql.NullString,
+	legacyDNS01 sql.NullString, legacyExpiresMs sql.NullInt64,
+) (domain.CertificateOrder, error) {
+	var order domain.CertificateOrder
+	if challengesJSON.Valid && challengesJSON.String != "" {
+		if err := json.Unmarshal([]byte(challengesJSON.String), &order.Challenges); err != nil {
+			return domain.CertificateOrder{}, fmt.Errorf("sqlite: decode cert_order_challenges: %w", err)
+		}
+		order.OrderRef = ref.String
+		order.State = domain.OrderState(state.String)
+		if legacyExpiresMs.Valid {
+			order.ExpiresAt = msToTime(legacyExpiresMs.Int64)
+		}
+		return order, nil
+	}
+	// Legacy row: single RA-generated DNS-01 token, implicitly PENDING
+	// while the agent still sits in a pre-validation state.
+	if legacyDNS01.Valid && legacyDNS01.String != "" {
+		order.State = domain.OrderStatePending
+		order.Challenges = []domain.Challenge{{
+			Type:  domain.ChallengeTypeDNS01,
+			Token: legacyDNS01.String,
+		}}
+		if legacyExpiresMs.Valid {
+			order.ExpiresAt = msToTime(legacyExpiresMs.Int64)
+		}
+	}
+	return order, nil
+}
+
+// certOrderColumns is the SQL-bindable representation of a
+// CertificateOrder. Zero orders bind as NULLs so legacy-row synthesis
+// stays distinguishable from an empty order.
+type certOrderColumns struct {
+	ref        any
+	state      any
+	challenges any
+	expiresMs  any
+}
+
+// certOrderToRow encodes the order for persistence. The challenge
+// array is stored verbatim as JSON.
+func certOrderToRow(order domain.CertificateOrder) (certOrderColumns, error) {
+	if order.IsZero() {
+		return certOrderColumns{}, nil
+	}
+	encoded, err := json.Marshal(order.Challenges)
+	if err != nil {
+		return certOrderColumns{}, fmt.Errorf("sqlite: encode cert_order_challenges: %w", err)
+	}
+	return certOrderColumns{
+		ref:        nullableString(order.OrderRef),
+		state:      string(order.State),
+		challenges: string(encoded),
+		expiresMs:  nullableMs(order.ExpiresAt),
+	}, nil
 }
 
 // Save inserts or updates an AgentRegistration. Endpoints, server cert,
@@ -85,6 +160,11 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 	}
 	now := time.Now().UnixMilli()
 
+	order, err := certOrderToRow(agent.CertOrder)
+	if err != nil {
+		return err
+	}
+
 	if agent.ID == 0 {
 		const q = `
             INSERT INTO agent_registrations (
@@ -92,9 +172,10 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 display_name, description,
                 registration_timestamp_ms, last_renewal_timestamp_ms,
                 supersedes_registration_id,
-                acme_dns01_token, acme_challenge_expires_at_ms,
+                cert_order_ref, cert_order_state, cert_order_challenges,
+                acme_challenge_expires_at_ms,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
 			agent.AgentID,
 			agent.OwnerID,
@@ -107,8 +188,8 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 			agent.Details.RegistrationTimestamp.UnixMilli(),
 			nullableMs(agent.Details.LastRenewalTimestamp),
 			nullableInt64(agent.SupersedesRegistrationID),
-			nullableString(agent.ACMEChallenge.DNS01Token),
-			nullableMs(agent.ACMEChallenge.ExpiresAt),
+			order.ref, order.state, order.challenges,
+			order.expiresMs,
 			now, now,
 		)
 		if err != nil {
@@ -129,18 +210,20 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
             description = ?,
             last_renewal_timestamp_ms = ?,
             supersedes_registration_id = ?,
-            acme_dns01_token = ?,
+            cert_order_ref = ?,
+            cert_order_state = ?,
+            cert_order_challenges = ?,
             acme_challenge_expires_at_ms = ?,
             updated_at_ms = ?
         WHERE id = ?`
-	_, err := s.db.extx(ctx).ExecContext(ctx, q,
+	_, err = s.db.extx(ctx).ExecContext(ctx, q,
 		string(agent.Status),
 		agent.Details.DisplayName,
 		agent.Details.Description,
 		nullableMs(agent.Details.LastRenewalTimestamp),
 		nullableInt64(agent.SupersedesRegistrationID),
-		nullableString(agent.ACMEChallenge.DNS01Token),
-		nullableMs(agent.ACMEChallenge.ExpiresAt),
+		order.ref, order.state, order.challenges,
+		order.expiresMs,
 		now,
 		agent.ID,
 	)
@@ -283,6 +366,41 @@ func (s *AgentStore) ListByOwner(
 	}, nil
 }
 
+// ExpireLapsedPendingValidation flips lapsed PENDING_VALIDATION rows
+// to EXPIRED in one guarded UPDATE and returns the count.
+//
+// The WHERE clause is the concurrency guard: a row is expired only
+// while it is still PENDING_VALIDATION, its challenge window
+// (acme_challenge_expires_at_ms — shared between the legacy
+// single-token era and the order era) has lapsed, AND its order is
+// still PENDING. A concurrent verify-acme that advances the row
+// (status → PENDING_DNS, or order → ISSUING/COMPLETED/FAILED) removes
+// it from the match set, so the sweep can never clobber a
+// successfully-validated registration or roll its order columns back.
+// Rows with a NULL expiry (pre-challenge-persistence registrations)
+// never match — they carry no window to expire on and remain
+// cancellable instead. Legacy rows have a NULL cert_order_state and
+// are matched by the IS NULL arm.
+func (s *AgentStore) ExpireLapsedPendingValidation(ctx context.Context, now time.Time) (int64, error) {
+	const q = `
+        UPDATE agent_registrations
+        SET status = 'EXPIRED', updated_at_ms = ?
+        WHERE status = 'PENDING_VALIDATION'
+          AND acme_challenge_expires_at_ms IS NOT NULL
+          AND acme_challenge_expires_at_ms <= ?
+          AND (cert_order_state IS NULL OR cert_order_state = 'PENDING')`
+	nowMs := now.UnixMilli()
+	res, err := s.db.extx(ctx).ExecContext(ctx, q, nowMs, nowMs)
+	if err != nil {
+		return 0, mapSQLErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("sqlite: expire lapsed registrations: rows affected: %w", err)
+	}
+	return n, nil
+}
+
 // Delete removes a registration by ID.
 func (s *AgentStore) Delete(ctx context.Context, id int64) error {
 	_, err := s.db.extx(ctx).ExecContext(ctx, `DELETE FROM agent_registrations WHERE id = ?`, id)
@@ -352,6 +470,3 @@ func decodeCursor(c string) (int64, error) {
 	}
 	return id, nil
 }
-
-// _ ensures encoding/json is used when sqlite rows encode JSON in future.
-var _ = json.Marshal

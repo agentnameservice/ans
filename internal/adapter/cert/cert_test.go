@@ -19,6 +19,7 @@ import (
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
+	"github.com/godaddy/ans/internal/port"
 )
 
 // ----- Test helpers -----
@@ -151,11 +152,27 @@ func TestSelfCA_RevokeAndIsRevoked(t *testing.T) {
 	if ca.IsRevoked(serial) {
 		t.Error("fresh CA should have no revocations")
 	}
-	if err := ca.RevokeCertificate(context.Background(), serial, domain.RevocationKeyCompromise); err != nil {
+	if err := ca.RevokeCertificate(context.Background(), port.RevokeCertificateRequest{
+		SerialNumber: serial,
+		Reason:       domain.RevocationKeyCompromise,
+	}); err != nil {
 		t.Fatalf("revoke: %v", err)
 	}
 	if !ca.IsRevoked(serial) {
 		t.Error("IsRevoked should be true after Revoke")
+	}
+	// Idempotent per the port contract.
+	if err := ca.RevokeCertificate(context.Background(), port.RevokeCertificateRequest{
+		SerialNumber: serial,
+		Reason:       domain.RevocationKeyCompromise,
+	}); err != nil {
+		t.Fatalf("re-revoke must be idempotent: %v", err)
+	}
+	// Serial is mandatory.
+	if err := ca.RevokeCertificate(context.Background(), port.RevokeCertificateRequest{
+		Reason: domain.RevocationKeyCompromise,
+	}); err == nil {
+		t.Error("want error for missing serial")
 	}
 }
 
@@ -212,16 +229,45 @@ func TestNewServerSelfCA_RespectsTTLOption(t *testing.T) {
 	}
 }
 
-func TestServerSelfCA_IssueServerCertificate_And_GetCA(t *testing.T) {
+func TestServerSelfCA_OrderLifecycle_And_GetCA(t *testing.T) {
 	ca, err := NewServerSelfCA(t.TempDir(), "ServerOrg", 365)
 	if err != nil {
 		t.Fatalf("new: %v", err)
 	}
+	// CreateOrder self-issues both challenge types with distinct
+	// tokens and a non-empty order ref.
+	order, err := ca.CreateOrder(context.Background(), "agent.example.com")
+	if err != nil {
+		t.Fatalf("create order: %v", err)
+	}
+	if order.OrderRef == "" || order.State != domain.OrderStatePending {
+		t.Errorf("order shape: ref=%q state=%q", order.OrderRef, order.State)
+	}
+	dns01, ok := order.ChallengeOfType(domain.ChallengeTypeDNS01)
+	if !ok || dns01.Token == "" {
+		t.Error("missing DNS-01 challenge")
+	}
+	http01, ok := order.ChallengeOfType(domain.ChallengeTypeHTTP01)
+	if !ok || http01.Token == "" {
+		t.Error("missing HTTP-01 challenge")
+	}
+	if dns01.Token == http01.Token {
+		t.Error("challenge tokens must be independent")
+	}
+	if order.ExpiresAt.Before(time.Now()) {
+		t.Error("order must expire in the future")
+	}
+
 	// CSR with DNS SAN matching expected FQDN.
 	csrPEM := buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"})
-	issued, err := ca.IssueServerCertificate(context.Background(), csrPEM, "agent.example.com")
+	issued, err := ca.FinalizeOrder(context.Background(), port.FinalizeOrderRequest{
+		OrderRef: order.OrderRef,
+		CSRPEM:   csrPEM,
+		FQDN:     "agent.example.com",
+		Verified: []domain.ChallengeType{domain.ChallengeTypeDNS01},
+	})
 	if err != nil {
-		t.Fatalf("issue: %v", err)
+		t.Fatalf("finalize: %v", err)
 	}
 	if issued.CertPEM == "" || issued.ChainPEM == "" {
 		t.Error("expected non-empty PEM output")
@@ -277,13 +323,59 @@ func TestServerSelfCA_LoadRoot_MalformedKey(t *testing.T) {
 	}
 }
 
-func TestServerSelfCA_IssueServerCertificate_RejectsBadCSR(t *testing.T) {
+func TestServerSelfCA_FinalizeOrder_RejectsBadCSR(t *testing.T) {
 	ca, _ := NewServerSelfCA(t.TempDir(), "o", 365)
 	// CN doesn't match, no DNS SAN → ValidateServerCSR rejects.
 	csrPEM := buildCSR(t, "other.example.com", nil, nil)
-	_, err := ca.IssueServerCertificate(context.Background(), csrPEM, "agent.example.com")
+	_, err := ca.FinalizeOrder(context.Background(), port.FinalizeOrderRequest{
+		CSRPEM: csrPEM,
+		FQDN:   "agent.example.com",
+	})
 	if err == nil {
 		t.Error("expected FQDN-mismatch rejection")
+	}
+}
+
+func TestServerSelfCA_CreateOrder_RequiresFQDN(t *testing.T) {
+	ca, _ := NewServerSelfCA(t.TempDir(), "o", 365)
+	if _, err := ca.CreateOrder(context.Background(), ""); err == nil {
+		t.Error("expected error for empty fqdn")
+	}
+}
+
+// TestServerSelfCA_FinalizeOrder_RequiresOrderRef pins the contract
+// guard: even though the stateless self-CA never looks anything up by
+// the order ref, it must reject an empty ref so a caller that drops the
+// persisted ref fails the same way it would against an ACME provider
+// rather than silently issuing.
+func TestServerSelfCA_FinalizeOrder_RequiresOrderRef(t *testing.T) {
+	ca, _ := NewServerSelfCA(t.TempDir(), "o", 365)
+	csrPEM := buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"})
+	_, err := ca.FinalizeOrder(context.Background(), port.FinalizeOrderRequest{
+		OrderRef: "",
+		CSRPEM:   csrPEM,
+		FQDN:     "agent.example.com",
+		Verified: []domain.ChallengeType{domain.ChallengeTypeDNS01},
+	})
+	if err == nil {
+		t.Error("expected error for empty order ref")
+	}
+}
+
+func TestNewServerSelfCA_RespectsOrderTTLOption(t *testing.T) {
+	ca, err := NewServerSelfCA(t.TempDir(), "org", 365, WithOrderTTL(3*time.Hour))
+	if err != nil {
+		t.Fatalf("new: %v", err)
+	}
+	if ca.orderTTL != 3*time.Hour {
+		t.Errorf("WithOrderTTL ignored: got %v", ca.orderTTL)
+	}
+	order, err := ca.CreateOrder(context.Background(), "agent.example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if remaining := time.Until(order.ExpiresAt); remaining > 3*time.Hour || remaining < 2*time.Hour {
+		t.Errorf("order expiry should honor the 3h TTL, got %v remaining", remaining)
 	}
 }
 
