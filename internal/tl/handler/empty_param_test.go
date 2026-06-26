@@ -35,7 +35,7 @@ func TestGetBadge_EmptyAgentID(t *testing.T) {
 	t.Parallel()
 	// Build a Handlers with all services nil; the empty-agentID guard
 	// fires before any service is touched.
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetBadge(rec, emptyParamReq(http.MethodGet, "/v1/agents/", "agentId"))
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -45,7 +45,7 @@ func TestGetBadge_EmptyAgentID(t *testing.T) {
 
 func TestGetAudit_EmptyAgentID(t *testing.T) {
 	t.Parallel()
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetAudit(rec, emptyParamReq(http.MethodGet, "/v1/agents//audit", "agentId"))
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -55,7 +55,7 @@ func TestGetAudit_EmptyAgentID(t *testing.T) {
 
 func TestGetReceipt_EmptyAgentID(t *testing.T) {
 	t.Parallel()
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetReceipt(rec, emptyParamReq(http.MethodGet, "/v1/agents//receipt", "agentId"))
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -69,7 +69,7 @@ func TestGetReceipt_EmptyAgentID(t *testing.T) {
 // unwired and clients see 501 rather than a misleading 500.
 func TestGetStatusToken_DisabledReturns501(t *testing.T) {
 	t.Parallel()
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetStatusToken(rec, emptyParamReq(http.MethodGet, "/v1/agents/x/status-token", "agentId"))
 	if rec.Code != http.StatusNotImplemented {
@@ -84,7 +84,7 @@ func TestGetStatusToken_DisabledReturns501(t *testing.T) {
 // "h.checkpoint == nil" branch.
 func TestGetCheckpointJSON_DisabledReturnsInternal(t *testing.T) {
 	t.Parallel()
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetCheckpointJSON(rec, httptest.NewRequest(http.MethodGet, "/v1/log/checkpoint", nil))
 	if rec.Code != http.StatusInternalServerError {
@@ -96,7 +96,7 @@ func TestGetCheckpointJSON_DisabledReturnsInternal(t *testing.T) {
 // same guard on the history route.
 func TestGetCheckpointHistory_DisabledReturnsInternal(t *testing.T) {
 	t.Parallel()
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetCheckpointHistory(rec, httptest.NewRequest(http.MethodGet, "/v1/log/checkpoint/history", nil))
 	if rec.Code != http.StatusInternalServerError {
@@ -108,7 +108,7 @@ func TestGetCheckpointHistory_DisabledReturnsInternal(t *testing.T) {
 // "h.schema == nil" branch.
 func TestGetSchema_DisabledReturnsInternal(t *testing.T) {
 	t.Parallel()
-	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil)
+	h := handler.NewHandlers(nil, nil, nil, nil, nil, nil, nil, nil)
 	rec := httptest.NewRecorder()
 	h.GetSchema(rec, emptyParamReq(http.MethodGet, "/v1/log/schema/V2", "version"))
 	if rec.Code != http.StatusInternalServerError {

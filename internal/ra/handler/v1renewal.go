@@ -34,8 +34,8 @@ import (
 // CERTIFICATE_RENEWED, V1 as AGENT_RENEWED.
 //
 // Both server-cert paths supported (matching the reference): operators
-// can submit `serverCsrPEM` to have the RA's
-// `ServerCertificateAuthority` port sign the cert, or
+// can submit `serverCsrPEM` to have the configured
+// `ServerCertificateIssuer` port issue the cert, or
 // `serverCertificatePEM` + chain for BYOC. Exactly one required.
 type V1RenewalHandler struct {
 	responder
@@ -124,10 +124,12 @@ func v1NextStepFor(agentID, status string) nextStep {
 			Description: "Complete ACME challenges then POST to verify-acme endpoint",
 		}
 	case renewalStatusIssuingCertificate:
+		// See nextStepFor: GET /renewal never re-drives the order; only
+		// a re-POST of verify-acme does.
 		return nextStep{
 			Action:      "WAIT",
-			Endpoint:    base + "/renewal",
-			Description: "Certificate issuance in progress, poll GET /renewal for TLSA record",
+			Endpoint:    base + "/renewal/verify-acme",
+			Description: "Certificate issuance in progress — POST verify-acme again to drive the order to completion",
 		}
 	case renewalStatusCompleted:
 		return nextStep{
@@ -156,6 +158,7 @@ func mapV1RenewalSubmission(agentID string, res *service.SubmitRenewalResult) re
 		RenewalType: string(r.RenewalType),
 		Status:      status,
 		CsrID:       res.CsrID,
+		Challenges:  buildRenewalChallenges(res.FQDN, r.Validation),
 		ExpiresAt:   r.Validation.ExpiresAt.Format(time.RFC3339),
 		NextStep:    v1NextStepFor(agentID, status),
 		Links: []linkRef{{
@@ -166,14 +169,19 @@ func mapV1RenewalSubmission(agentID string, res *service.SubmitRenewalResult) re
 }
 
 // mapV1RenewalStatus mirrors mapRenewalStatus with V1 next-step URLs.
-func mapV1RenewalStatus(agentID string, r *domain.ServerCertificateRenewal) renewalStatusResponse {
+func mapV1RenewalStatus(agentID string, res *service.GetRenewalResult) renewalStatusResponse {
+	r := res.Renewal
 	status := deriveRenewalStatus(r, time.Now())
 	resp := renewalStatusResponse{
-		RenewalType: string(r.RenewalType),
-		Status:      status,
-		CsrID:       r.ServerCsrID,
-		ExpiresAt:   r.Validation.ExpiresAt.Format(time.RFC3339),
-		NextStep:    v1NextStepFor(agentID, status),
+		RenewalType:   string(r.RenewalType),
+		Status:        status,
+		CsrID:         r.ServerCsrID,
+		TlsaDNSRecord: tlsaDTOFrom(res.TLSARecord),
+		ExpiresAt:     r.Validation.ExpiresAt.Format(time.RFC3339),
+		NextStep:      v1NextStepFor(agentID, status),
+	}
+	if status == renewalStatusPendingValidation {
+		resp.Challenges = buildRenewalChallenges(res.FQDN, r.Validation)
 	}
 	if r.FailureReason != "" {
 		resp.FailureReason = r.FailureReason
@@ -190,8 +198,9 @@ func mapV1RenewalVerification(agentID string, res *service.VerifyRenewalACMEResu
 		status = renewalStatusCompleted
 	}
 	return renewalVerificationResponse{
-		Status:   status,
-		CsrID:    r.ServerCsrID,
-		NextStep: v1NextStepFor(agentID, status),
+		Status:        status,
+		CsrID:         r.ServerCsrID,
+		TlsaDNSRecord: tlsaDTOFrom(res.TLSARecord),
+		NextStep:      v1NextStepFor(agentID, status),
 	}
 }

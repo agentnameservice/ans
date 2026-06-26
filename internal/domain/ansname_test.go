@@ -38,6 +38,18 @@ func TestNewAnsName(t *testing.T) {
 		assert.ErrorIs(t, err, ErrValidation)
 	})
 
+	t.Run("should reject IP-literal hosts", func(t *testing.T) {
+		// An ANS name binds a DNS hostname; accepting an IP would let a
+		// registrant aim the HTTP-01 challenge gate at an internal
+		// address (e.g. the cloud metadata endpoint). A dotted-quad
+		// would otherwise pass the per-label DNS checks as four numeric
+		// labels.
+		for _, ip := range []string{"169.254.169.254", "127.0.0.1", "10.0.0.1", "8.8.8.8"} {
+			_, err := NewAnsName(mustSemVer(1, 0, 0), ip)
+			assert.ErrorIsf(t, err, ErrValidation, "IP literal %q must be rejected", ip)
+		}
+	})
+
 	t.Run("should reject host over 253 chars", func(t *testing.T) {
 		// Build a 254-char hostname from repeating valid 63-char labels
 		// plus separators plus a 62-char tail: 63+1+63+1+63+1+62 = 254.
