@@ -172,13 +172,13 @@ paths:
           content:
             application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '500':
           description: Internal server error
           content:
             application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
 
   # ──────────────────────────────────────────────────────────────────
   # Management — ownership-scoped
@@ -2204,6 +2204,40 @@ components:
       required:
         - status
         - nextStep
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 problem details — the body every RA error response
+        carries, served as `application/problem+json`. `type`, `title`,
+        and `status` are always present; `detail` is the human-readable
+        explanation specific to this occurrence, and `code` is a stable,
+        machine-readable error identifier (read `code` for programmatic
+        handling, `detail` for display).
+      properties:
+        type:
+          type: string
+          description: A URI reference identifying the problem type.
+          example: about:blank
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+          example: Validation Failed
+        status:
+          type: integer
+          description: The HTTP status code for this occurrence.
+          example: 422
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        code:
+          type: string
+          description: Stable, machine-readable error code.
+          example: INVALID_LIMIT
+      required:
+        - type
+        - title
+        - status
 
     ErrorResponse:
       type: object

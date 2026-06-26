@@ -183,9 +183,15 @@ func sortScored(rows []scoredRow) {
 	})
 }
 
-// rfc3339 formats now for lexical comparison against the index's stored
-// RFC 3339 expires_at strings. The feed normalizes its timestamps so a
-// UTC RFC 3339 rendering compares chronologically.
+// rfc3339 renders now as a UTC, second-precision RFC 3339 string for the
+// "expires_at > ?" filter in search.go and explore.go. That comparison
+// is lexical (expires_at is a TEXT column), so it is chronologically
+// correct only when the stored values share this exact rendering. The
+// finder stores feed timestamps verbatim — project.ProjectedEntry
+// carries the producer's createdAt/expiresAt unchanged, it does not
+// normalize them — so soundness depends on the RA emitting canonical UTC
+// RFC 3339 (trailing "Z", no sub-second digits). A producer that emitted
+// a zone offset or fractional seconds would compare incorrectly here.
 func rfc3339(now time.Time) string {
 	return now.UTC().Format(time.RFC3339)
 }
