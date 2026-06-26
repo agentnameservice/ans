@@ -192,7 +192,7 @@ func (h *V1LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 func v1DNSMissingFrom(mismatches []service.DNSMismatch) []v1DNSRecordDTO {
 	out := make([]v1DNSRecordDTO, 0)
 	for _, m := range mismatches {
-		if m.Code != "MISSING" {
+		if !m.IsMissing() {
 			continue
 		}
 		out = append(out, v1DNSRecordDTO{
@@ -210,10 +210,11 @@ func v1DNSMissingFrom(mismatches []service.DNSMismatch) []v1DNSRecordDTO {
 func v1DNSIncorrectFrom(mismatches []service.DNSMismatch) []v1DNSMismatchDTO {
 	out := make([]v1DNSMismatchDTO, 0)
 	for _, m := range mismatches {
-		// MISMATCH and TLSA_DNSSEC_MISMATCH both surface here as
-		// incorrect-record entries. See dto.go's dnsIncorrectFrom
-		// for the DNSSEC-mismatch rationale.
-		if m.Code != "MISMATCH" && m.Code != "TLSA_DNSSEC_MISMATCH" {
+		// Present-but-wrong records — plain MISMATCH or DNSSEC tampering
+		// on TLSA/SVCB/HTTPS (<RECORD_TYPE>_DNSSEC_MISMATCH) — surface
+		// here as incorrect-record entries. See
+		// service.DNSMismatch.IsIncorrect for the classification.
+		if !m.IsIncorrect() {
 			continue
 		}
 		out = append(out, v1DNSMismatchDTO{

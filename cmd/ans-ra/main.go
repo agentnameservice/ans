@@ -36,6 +36,7 @@ import (
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	"github.com/godaddy/ans/internal/adapter/tlclient"
 	"github.com/godaddy/ans/internal/config"
+	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/handler"
 	ramiddleware "github.com/godaddy/ans/internal/ra/middleware"
@@ -173,17 +174,32 @@ func run(cfgPath string) error {
 	// Event bus.
 	bus := eventbus.NewInMemoryBus(logger)
 
+	// Discovery registry: composes the bundled ANS-family port.ProfileEmitter
+	// adapters (ANS_TXT, ANS_DNSAID) the V2 register / verify-dns paths walk
+	// to compute `dnsRecordsProvisioned[]`. Insertion order here pins the
+	// canonical-bytes emission order for the §4.4.2 union case
+	// (`[TXT×N, HTTPS, SVCB×N, badge, TLSA]`).
+	discoveryReg, err := service.NewDefaultProfileRegistry(cfg.TLClient.PublicBaseURL)
+	if err != nil {
+		return fmt.Errorf("init discovery registry: %w", err)
+	}
+	if err := assertRegistryDomainCoherence(discoveryReg); err != nil {
+		return fmt.Errorf("discovery registry coherence: %w", err)
+	}
+	logger.Info().
+		Strs("profiles", profileIDStrings(discoveryReg.IDs())).
+		Msg("discovery registry ready")
+
 	// Services.
 	regSvc := service.NewRegistrationService(
-		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db,
+		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      signerKeyID,
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
 		WithHTTPChallengeVerifier(challenge.NewHTTPVerifier()).
-		WithServerCertificateIssuer(serverCA).
-		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL)
+		WithServerCertificateIssuer(serverCA)
 
 	// Events feed service — projects delivered outbox rows into the
 	// public agent-events stream.
@@ -218,6 +234,10 @@ func run(cfgPath string) error {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+	// middleware.RealIP is deliberately NOT wired: chi 5.3 deprecates it
+	// as IP-spoofable (it trusts X-Forwarded-For / X-Real-IP regardless
+	// of whether a proxy set them), and nothing in this service reads
+	// RemoteAddr — no request logger, no rate limiter, no IP audit.
 	r.Use(middleware.Timeout(30 * time.Second))
 	// Stop browsers/proxies from MIME-sniffing responses away from
 	// their declared Content-Type. Cheap defense-in-depth; matters most
@@ -386,9 +406,10 @@ func run(cfgPath string) error {
 	logger.Info().Str("addr", addr).Msg("listening")
 	// Hardened timeouts:
 	//   - ReadHeaderTimeout caps slowloris-style header dribbling.
-	//   - WriteTimeout > the 30s chi handler timeout (line 176) so
-	//     chi gets the chance to write a clean 503 before the server
-	//     drops the connection on a slow handler/client.
+	//   - WriteTimeout > the 30s chi middleware.Timeout wired on the
+	//     router above, so chi gets the chance to write a clean 503
+	//     before the server drops the connection on a slow
+	//     handler/client.
 	//   - IdleTimeout caps how long an idle keep-alive connection
 	//     can sit on the runner; pairs with HTTP/1.1 connection reuse
 	//     for SDK clients while keeping a hard ceiling.
@@ -492,6 +513,54 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 // auth.OIDCProvider since they share Middleware().
 type providerWithAnonymous interface {
 	Middleware() func(http.Handler) http.Handler
+}
+
+// assertRegistryDomainCoherence verifies the discovery registry's
+// wired profiles are exactly the set domain advertises as valid via
+// domain.ValidDiscoveryProfiles(). Drift in either direction is a
+// startup misconfig: registry-only profile means request-side validation
+// rejects it (operator error noise); domain-only profile means
+// applyDiscoveryProfiles accepts a value verify-dns can never satisfy
+// (silent broken-by-omission). Both fail server start.
+// profileIDStrings converts the registry's typed profile IDs to the
+// plain strings the startup readiness log line wants.
+func profileIDStrings(ids []domain.DiscoveryProfile) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = string(id)
+	}
+	return out
+}
+
+func assertRegistryDomainCoherence(reg port.ProfileRegistry) error {
+	registryIDs := make(map[string]bool)
+	for _, id := range reg.IDs() {
+		registryIDs[string(id)] = true
+	}
+	domainIDs := make(map[string]bool)
+	for _, s := range domain.ValidDiscoveryProfiles() {
+		domainIDs[s] = true
+	}
+	// Build the drift lists by iterating the source slices (not the
+	// maps) so the error output is deterministic — reproducible failures
+	// matter when this trips at server start. The maps above stay for the
+	// O(1) cross-membership tests.
+	var registryOnly, domainOnly []string
+	for _, id := range reg.IDs() {
+		if !domainIDs[string(id)] {
+			registryOnly = append(registryOnly, string(id))
+		}
+	}
+	for _, s := range domain.ValidDiscoveryProfiles() {
+		if !registryIDs[s] {
+			domainOnly = append(domainOnly, s)
+		}
+	}
+	if len(registryOnly) > 0 || len(domainOnly) > 0 {
+		return fmt.Errorf("drift between registry.IDs() and domain.ValidDiscoveryProfiles(): registry-only=%v, domain-only=%v",
+			registryOnly, domainOnly)
+	}
+	return nil
 }
 
 // buildServerIssuer builds the configured server certificate issuer.

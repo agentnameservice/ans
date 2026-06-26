@@ -41,6 +41,14 @@ type registrationRequest struct {
 	ServerCsrPEM              string        `json:"serverCsrPEM,omitempty"`
 	ServerCertificatePEM      string        `json:"serverCertificatePEM,omitempty"`
 	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
+
+	// DiscoveryProfiles is the set of DNS record families the RA emits
+	// for this registration. Each element is one of "ANS_DNSAID" or
+	// "ANS_TXT". Typical values: ["ANS_TXT"] (default), ["ANS_DNSAID"],
+	// or ["ANS_DNSAID", "ANS_TXT"] (transition union).
+	// Empty/missing → ["ANS_TXT"]. Any invalid element rejected
+	// with 422 INVALID_DISCOVERY_PROFILE. See ANS_SPEC.md §4.4.2.
+	DiscoveryProfiles []string `json:"discoveryProfiles,omitempty"`
 }
 
 type endpointDTO struct {
@@ -161,6 +169,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		ServerCsrPEM:              req.ServerCsrPEM,
 		ServerCertificatePEM:      req.ServerCertificatePEM,
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
+		DiscoveryProfiles:         toDomainDiscoveryProfiles(req.DiscoveryProfiles),
 	})
 	if err != nil {
 		h.writeError(w, err)
@@ -168,6 +177,24 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJSON(w, http.StatusAccepted, mapRegistrationResponse(resp, r))
+}
+
+// toDomainDiscoveryProfiles converts the wire []string into the typed
+// domain slice. nil (field omitted in the JSON request) flows through
+// as nil and a non-nil empty slice (explicit `"discoveryProfiles": []`)
+// flows through as an empty non-nil []DiscoveryProfile; the service
+// layer normalizes both to DefaultDiscoveryProfiles(), so the
+// distinction no longer changes the outcome. Per-element validity and
+// duplicate deduplication live in applyDiscoveryProfiles.
+func toDomainDiscoveryProfiles(raw []string) []domain.DiscoveryProfile {
+	if raw == nil {
+		return nil
+	}
+	out := make([]domain.DiscoveryProfile, len(raw))
+	for i, s := range raw {
+		out[i] = domain.DiscoveryProfile(s)
+	}
+	return out
 }
 
 // mapEndpointsFromDTO converts the incoming JSON endpoints to the
