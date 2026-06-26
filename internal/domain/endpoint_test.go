@@ -68,6 +68,95 @@ func TestAgentEndpoint_Validate(t *testing.T) {
 		assert.ErrorIs(t, e.Validate(), ErrValidation)
 	})
 
+	// metadataUrl is emitted verbatim as the DNSAID `cap` SvcParam and
+	// embedded in the signed TL attestation, so it must be https and free
+	// of bytes that break the SVCB presentation form (whitespace would let
+	// the verifier's strings.Fields split inject a bogus SvcParam, or
+	// strand the agent in PENDING_DNS).
+	t.Run("reject http metadata url", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "http://agent.example.com/.well-known/mcp.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with whitespace", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/a b.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with quote or semicolon", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = `https://agent.example.com/.well-known/x";key65999=evil`
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with non-ascii", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/café.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	// Percent-encoded unsafe bytes clear the raw-string blocklist (the
+	// rawURL holds only `%` and hex digits — all printable, no literal
+	// space or semicolon) but url.Parse percent-DECODES them into u.Path,
+	// from which the DNSAID well-known SvcParam (key65409) suffix is
+	// derived. A decoded space (or `;`) splits the SvcParam on the
+	// verifier's strings.Fields and is unpublishable in any real zone,
+	// stranding the agent in PENDING_DNS. The decoded-path check rejects
+	// them at the registration boundary.
+	t.Run("reject metadata url with percent-encoded space", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/a%20b.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with percent-encoded semicolon", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/a%3Bb.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject overlong metadata url", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/" + strings.Repeat("a", 2100) + ".json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("accept clean https metadata url", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/mcp.json"
+		assert.NoError(t, e.Validate())
+	})
+
+	// Out-of-range ports parse fine through url.Parse but produce SVCB
+	// port= SvcParams and _<port>._tcp. TLSA owner names no DNS
+	// provider accepts — the boundary must reject them loudly instead
+	// of stranding the operator at verify-dns.
+	t.Run("reject port above 65535", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:99999/mcp"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject port zero", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:0/mcp"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject overflowing port literal", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:443443443443/mcp"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("accept explicit in-range port", func(t *testing.T) {
+		e := valid
+		e.AgentURL = "https://agent.example.com:8443/mcp"
+		assert.NoError(t, e.Validate())
+	})
+
 	t.Run("reject bad documentation url", func(t *testing.T) {
 		e := valid
 		e.DocumentationURL = "not a url"

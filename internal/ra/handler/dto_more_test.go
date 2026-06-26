@@ -193,12 +193,12 @@ func TestRFC3339Zero_BothArms(t *testing.T) {
 }
 
 // buildRegistrationChallenges short-circuits to nil for a registration
-// whose ACMEChallenge is zero (the post-active-after-restore case).
+// whose CertOrder is zero (the post-active-after-restore case).
 // Pre-coverage only the populated branch was hit.
 func TestBuildRegistrationChallenges_NoChallengeYieldsNil(t *testing.T) {
 	reg := &domain.AgentRegistration{}
 	if got := buildRegistrationChallenges(reg); got != nil {
-		t.Errorf("zero ACMEChallenge should yield nil challenges; got %v", got)
+		t.Errorf("zero CertOrder should yield nil challenges; got %v", got)
 	}
 }
 

@@ -1474,6 +1474,55 @@ components:
       type: string
       enum: [A2A, MCP, HTTP-API]
 
+    DiscoveryProfile:
+      type: string
+      enum: [ANS_DNSAID, ANS_TXT]
+      description: |
+        Names one DNS record family the RA can emit for an agent
+        registration. Used as the element type of discoveryProfiles[].
+        Each value provisions a complete record set, not a single
+        record — the bullets below enumerate exactly what an operator
+        must publish for that profile.
+
+        - ANS_DNSAID: the DNS-AID-aligned Consolidated Approach (RFC
+          9460). Opt-in while the profile is brought to full DNS-AID
+          conformance. Provisions:
+            1. One SVCB row per protocol endpoint at the bare FQDN
+               (ServiceMode `1 .`), carrying `alpn` (the protocol
+               token: a2a / mcp / x-http), `port` (the endpoint's TLS
+               port), `key65402` (bap, the agent protocol, always
+               present), and — when the endpoint supplies them —
+               `key65400` (cap, the metadataUrl capability locator),
+               `key65401` (cap-sha256, the base64url capability digest,
+               present only when the endpoint declared a metaDataHash),
+               and `key65409` (the well-known path suffix, emitted only
+               when metadataUrl sits at
+               https://{fqdn}/.well-known/<suffix>).
+               key65400/key65401/key65402/key65409 are the RFC 9460
+               §14.3.1 Private Use presentation of the DNS-AID draft-02
+               cap / cap-sha256 / bap / well-known SvcParams, which have
+               no IANA code point yet; the named forms are unpublishable
+               (strict RFC 9460 parsers reject them), so the keyNNNNN
+               forms are what reaches DNS. They switch back to named
+               forms if/when IANA registers the keys.
+            2. One `_ans-badge` TXT at `_ans-badge.{fqdn}` (the
+               transparency-log discovery hint).
+            3. One TLSA per distinct TLS port at `_<port>._tcp.{fqdn}`
+               binding the server certificate (DANE-EE, full cert,
+               SHA-256), emitted only when a server certificate exists.
+        - ANS_TXT: original `_ans` TXT shape (one row per protocol at
+          `_ans.{fqdn}`), supported indefinitely for operators with
+          existing zone-edit tooling that targets `_ans.{fqdn}`, and the
+          server default when discoveryProfiles is omitted. Emits an
+          HTTPS RR at the bare FQDN alongside carrying only `alpn=h2`
+          (an IANA-registered SvcParam — no keyNNNNN form is needed
+          here; the asymmetry with ANS_DNSAID is intentional), since
+          `_ans` TXT carries no connection hints. The HTTPS RR is
+          best-effort: operators on CNAME-fronted apexes cannot publish
+          a record at that name (RFC 1034 §3.6.2) and verification does
+          not require it. Provisions the same `_ans-badge` TXT and
+          per-port TLSA records as ANS_DNSAID.
+
     RevocationReason:
       type: string
       enum:
@@ -1521,11 +1570,43 @@ components:
             from this CSR at verify-acme. When omitted, the agent registers
             without an identity certificate and cannot add one later — it
             must register a new version instead.
+        discoveryProfiles:
+          type: array
+          items:
+            $ref: '#/components/schemas/DiscoveryProfile'
+          uniqueItems: true
+          minItems: 1
+          default: ["ANS_TXT"]
+          description: |
+            Set of DNS record families the RA tells the operator to
+            publish and emits in the AGENT_REGISTERED TL event's
+            attestations.dnsRecordsProvisioned[]. The computed records
+            surface to the client on GET /v2/ans/agents/{agentId} as
+            registrationPending.dnsRecords[] once the agent reaches
+            PENDING_DNS — not on the 202 register response, which
+            returns only the ACME challenge (production records are
+            deferred until verify-acme proves domain control and issues
+            the certificates the TLSA binding depends on).
+
+            Each value names one record family; an operator publishing
+            the union (DNS-AID-aligned SVCB plus the original `_ans` TXT
+            shape) sends both. Order is not significant.
+
+            Optional. Omitted (or an explicit empty array) normalizes to
+            the stable default ["ANS_TXT"] server-side; opt into
+            ["ANS_DNSAID"] explicitly. The `minItems`/`uniqueItems`
+            schema constraints are the canonical client contract for a
+            present array — validate before sending. A non-conformant
+            request (an explicit empty array, or duplicate values) is
+            handled defensively rather than rejected: empty is treated
+            as omitted and duplicates are ignored, but conformant
+            clients never send either.
+          example: ["ANS_TXT"]
       required:
         - agentDisplayName
-        - version
         - agentHost
         - endpoints
+        - version
 
     AgentRevocationRequest:
       type: object
@@ -1748,7 +1829,7 @@ components:
           type: string
         type:
           type: string
-          enum: [HTTPS, TLSA, TXT]
+          enum: [HTTPS, SVCB, TLSA, TXT]
         value:
           type: string
         priority:
@@ -1777,6 +1858,19 @@ components:
         metaDataUrl:
           type: string
           format: uri
+          maxLength: 2048
+          description: >-
+            Optional. The endpoint's metadata descriptor URL. Must be
+            https and free of whitespace, quotes, and other characters
+            that require SVCB presentation escaping — it is emitted
+            verbatim as the ANS_DNSAID `cap` SvcParam (key65400) and is
+            the document `cap-sha256` (key65401) digests. When it sits at
+            https://{agentHost}/.well-known/<suffix>, the suffix is also
+            advertised as the `well-known` SvcParam (key65409). NOTE: a
+            `cap` whose host differs from the agent FQDN is published
+            without an integrity pin unless metaDataHash is also supplied
+            — consumers SHOULD prefer a metaDataHash-pinned descriptor for
+            off-host metadata.
         metaDataHash:
           type: string
           pattern: '^SHA256:[a-f0-9]{64}$'
@@ -2045,8 +2139,13 @@ components:
                 $ref: '#/components/schemas/DnsRecord'
               found:
                 type: string
+                description: |
+                  The live record value observed when a record exists
+                  but does not match the required value.
               expected:
                 type: string
+                description: |
+                  The required value; equals record.value.
 
     # ────────────────────────────────────────────────────────────────
     # Verified Identities
