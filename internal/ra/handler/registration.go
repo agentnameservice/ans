@@ -40,10 +40,10 @@ type registrationRequest struct {
 	ServerCertificateChainPEM string        `json:"serverCertificateChainPEM,omitempty"`
 
 	// DiscoveryProfiles is the set of DNS record families the RA emits
-	// for this registration. Each element is one of "ANS_SVCB" or
-	// "ANS_TXT". Typical values: ["ANS_SVCB"] (default, recommended),
-	// ["ANS_TXT"], or ["ANS_SVCB", "ANS_TXT"] (transition union).
-	// Empty/missing → ["ANS_SVCB"]. Any invalid element rejected
+	// for this registration. Each element is one of "ANS_DNSAID" or
+	// "ANS_TXT". Typical values: ["ANS_TXT"] (default), ["ANS_DNSAID"],
+	// or ["ANS_DNSAID", "ANS_TXT"] (transition union).
+	// Empty/missing → ["ANS_TXT"]. Any invalid element rejected
 	// with 422 INVALID_DISCOVERY_PROFILE. See ANS_SPEC.md §4.4.2.
 	DiscoveryProfiles []string `json:"discoveryProfiles,omitempty"`
 }

@@ -5,21 +5,23 @@
 --
 -- Stored as a JSON array of CONSTANT_CASE strings matching the V2
 -- register schema's DiscoveryProfile enum:
---   "ANS_SVCB" — Consolidated Approach SVCB rows + shared records
---                (RFC 9460; recommended default).
---   "ANS_TXT"  — original `_ans` TXT shape + HTTPS RR + shared
---                records. Supported indefinitely for operators with
---                existing zone-edit tooling targeting `_ans.{fqdn}`.
+--   "ANS_DNSAID" — DNS-AID-aligned SVCB rows + shared records
+--                  (RFC 9460; opt-in).
+--   "ANS_TXT"    — original `_ans` TXT shape + HTTPS RR + shared
+--                  records. Supported indefinitely for operators with
+--                  existing zone-edit tooling targeting `_ans.{fqdn}`,
+--                  and the server default when discoveryProfiles is
+--                  omitted.
 --
 -- Examples:
---   '["ANS_SVCB"]'              — default for new V2 registrations
---   '["ANS_TXT"]'                — V1 lane + pre-PR rows
---   '["ANS_SVCB","ANS_TXT"]'     — §4.4.2 transition union
+--   '["ANS_TXT"]'                  — V1 lane, pre-PR rows, V2 default
+--   '["ANS_DNSAID"]'               — opt-in DNS-AID profile
+--   '["ANS_DNSAID","ANS_TXT"]'     — §4.4.2 transition union
 --
 -- Nullable to allow rows that pre-date this migration to load. The
 -- backfill below sets every such row to ["ANS_TXT"] because every
 -- agent registered before this PR shipped received the original
--- `_ans` TXT shape — defaulting them to ["ANS_SVCB"] would silently
+-- `_ans` TXT shape — defaulting them to ["ANS_DNSAID"] would silently
 -- demand SVCB records they were never told to publish. CHECK uses
 -- json_valid() (SQLite JSON1) so a malformed array fails at the
 -- storage boundary instead of silently coercing in the domain.

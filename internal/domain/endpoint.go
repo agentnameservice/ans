@@ -11,6 +11,11 @@ import (
 const (
 	maxFunctionTags = 20
 	maxTagLength    = 20
+	// maxMetadataURLLength bounds the operator-supplied metadataUrl. It
+	// is emitted verbatim as the DNSAID `cap` SvcParam and embedded in the
+	// signed TL attestation, so an unbounded value would bloat the
+	// append-only log and produce an unservable DNS record.
+	maxMetadataURLLength = 2048
 )
 
 var metadataHashPattern = regexp.MustCompile(`^SHA256:[a-f0-9]{64}$`)
@@ -69,7 +74,7 @@ func (e AgentEndpoint) Validate() error {
 	}
 
 	if e.MetadataURL != "" {
-		if err := validateURL(e.MetadataURL, "metadataUrl"); err != nil {
+		if err := validateMetadataURL(e.MetadataURL); err != nil {
 			return err
 		}
 	}
@@ -226,4 +231,55 @@ func validateURL(rawURL, fieldName string) error {
 		}
 	}
 	return nil
+}
+
+// validateMetadataURL enforces the constraints metadataUrl must satisfy
+// to be safely emitted as the DNSAID `cap` SvcParam (key65400) and
+// digested by `cap-sha256`: a well-formed https URL, bounded length, and
+// free of characters the SVCB presentation format escapes. The verifier
+// compares the expected record against the live record by splitting on
+// whitespace (strings.Fields) and first `=`, so a metadataUrl carrying a
+// space, quote, backslash, semicolon, or non-printable byte would either
+// inject a bogus SvcParam into the producer-signed attestation or break
+// verify-dns and strand the agent in PENDING_DNS — the same class of
+// self-inflicted failure validateURL already guards for out-of-range
+// ports. Reject it loudly at the registration boundary instead.
+func validateMetadataURL(rawURL string) error {
+	if err := validateURL(rawURL, "metadataUrl"); err != nil {
+		return err
+	}
+	// validateURL guarantees a successful parse, so the error is
+	// unreachable here.
+	u, _ := url.Parse(rawURL)
+	if u.Scheme != "https" {
+		return NewValidationError("INVALID_ENDPOINT", "metadataUrl must be an https URL")
+	}
+	if len(rawURL) > maxMetadataURLLength {
+		return NewValidationError(
+			"INVALID_ENDPOINT",
+			fmt.Sprintf("metadataUrl exceeds maximum length of %d characters", maxMetadataURLLength),
+		)
+	}
+	if strings.ContainsAny(rawURL, " \t\r\n\f\v\"\\;") || hasNonPrintableASCII(rawURL) {
+		return NewValidationError(
+			"INVALID_ENDPOINT",
+			"metadataUrl must not contain whitespace, quotes, or other characters that require SVCB presentation escaping",
+		)
+	}
+	return nil
+}
+
+// hasNonPrintableASCII reports whether s contains any rune outside the
+// printable ASCII range (0x20–0x7e). It complements the explicit
+// ContainsAny blocklist in validateMetadataURL: together they reject
+// exactly the bytes miekg/dns escapes when rendering an SVCB SvcParam,
+// keeping the published value byte-identical to what the verifier
+// observes.
+func hasNonPrintableASCII(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r > 0x7e {
+			return true
+		}
+	}
+	return false
 }

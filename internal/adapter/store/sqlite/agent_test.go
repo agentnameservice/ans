@@ -109,16 +109,16 @@ func TestAgentStore_DiscoveryProfilesRoundTrip(t *testing.T) {
 	}{
 		{
 			name:     "svcb_only",
-			profiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
-			want:     []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			profiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
+			want:     []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 		},
 		{
 			name: "union_preserves_order",
 			profiles: []domain.DiscoveryProfile{
-				domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT,
+				domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfileANSTXT,
 			},
 			want: []domain.DiscoveryProfile{
-				domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT,
+				domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfileANSTXT,
 			},
 		},
 		{

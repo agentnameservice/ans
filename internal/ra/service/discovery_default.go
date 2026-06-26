@@ -7,7 +7,7 @@ import (
 )
 
 // NewDefaultProfileRegistry returns a registry pre-wired with the
-// bundled ANS-family profiles (TXTProfile, SVCBProfile) in the canonical
+// bundled ANS-family profiles (TXTProfile, DNSAIDProfile) in the canonical
 // emission order — TXT first, SVCB second — that the V2 TL canonical
 // bytes for the union case were established at. cmd/ans-ra/main.go
 // uses it for production wiring; tests across the RA layer use it
@@ -18,7 +18,7 @@ import (
 // emits records in registry insertion order, and TL leaves carry
 // `dnsRecordsProvisioned[]` byte-for-byte from that ordering. Any
 // future production deployment that swaps in a different profile set
-// MUST construct the registry with TXTProfile and SVCBProfile in this
+// MUST construct the registry with TXTProfile and DNSAIDProfile in this
 // same relative order to preserve canonical-bytes parity for
 // existing agents.
 //
@@ -29,12 +29,12 @@ import (
 //
 // tlPublicBaseURL is the externally-reachable Transparency Log URL the
 // ANS profiles stamp into the family `_ans-badge` record's url= (see
-// ans.NewTXTProfile / ans.NewSVCBProfile). Empty — tests, or a deployment
+// ans.NewTXTProfile / ans.NewDNSAIDProfile). Empty — tests, or a deployment
 // without a public TL URL — falls the badge back to the agent's own
 // endpoint URL.
 func NewDefaultProfileRegistry(tlPublicBaseURL string) (port.ProfileRegistry, error) {
 	return registry.New(
 		ans.NewTXTProfile(tlPublicBaseURL),
-		ans.NewSVCBProfile(tlPublicBaseURL),
+		ans.NewDNSAIDProfile(tlPublicBaseURL),
 	)
 }

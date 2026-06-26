@@ -9,21 +9,26 @@ import (
 	"github.com/miekg/dns"
 )
 
-// svcbWithKeyNNNNN is the Consolidated Approach SVCB presentation the
-// RA's ANS_SVCB profile emits: ServiceMode `1 .` plus alpn, port, the
-// well-known suffix as the RFC 9460 §14.3.1 Private Use key65280, and
-// the capability digest as key65281. These keyNNNNN forms are what
-// makes the value publishable — see the named-form negative case below.
+// svcbValueKeyNNNNN is the DNS-AID-aligned SVCB presentation the RA's
+// ANS_DNSAID profile emits: ServiceMode `1 .` plus alpn, port, the
+// capability locator (key65400, a full https URL), the capability digest
+// (key65401), the agent protocol (key65402), and the well-known suffix
+// (key65409) — all RFC 9460 §14.3.1 Private Use keyNNNNN params. The
+// keyNNNNN forms are what make the value publishable — see the named-form
+// negative case below.
 const (
-	svcbValueKeyNNNNN = `1 . alpn=a2a port=443 key65280=agent-card.json key65281=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc`
-	// svcbValueNamedWK is the pre-fix named form. dns.NewRR rejects it
-	// (`bad SVCB key`), so answersFor drops it and the server returns no
-	// answer — the unpublishability that Fix A's no-migration argument
-	// rests on. ans-dns serving this value is indistinguishable from
-	// NXDOMAIN to a resolver.
-	svcbValueNamedWK = `1 . alpn=a2a port=443 wk=agent-card.json`
-	tlsaValueSel0    = `3 0 1 deadbeefcafe1234`
-	txtValue         = `v=ans1; version=1.0.0; p=a2a; mode=direct; url=https://agent.example.com/a2a`
+	svcbValueKeyNNNNN = `1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json key65401=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc key65402=a2a key65409=agent-card.json`
+	// svcbValueCapQuery exercises a cap locator carrying a query string —
+	// the `?` and `=` survive dns.NewRR and the serve path, proving the
+	// metadataUrl-as-cap round-trip the DNS-AID conformance change relies on.
+	svcbValueCapQuery = `1 . alpn=mcp port=443 key65400=https://agent.example.com/.well-known/mcp.json?v=2 key65402=mcp`
+	// svcbValueNamedCap is the unpublishable named form. dns.NewRR rejects
+	// it (`bad SVCB key`), so answersFor drops it and the server returns no
+	// answer — the unpublishability the keyNNNNN choice rests on. ans-dns
+	// serving this value is indistinguishable from NXDOMAIN to a resolver.
+	svcbValueNamedCap = `1 . alpn=a2a port=443 cap=https://agent.example.com/.well-known/agent-card.json`
+	tlsaValueSel0     = `3 0 1 deadbeefcafe1234`
+	txtValue          = `v=ans1; version=1.0.0; p=a2a; mode=direct; url=https://agent.example.com/a2a`
 )
 
 // TestAnswersFor_ServePathRoundTrip drives the serve path (answersFor)
@@ -43,29 +48,38 @@ func TestAnswersFor_ServePathRoundTrip(t *testing.T) {
 		wantInRR   string // substring required in the served RR string (when wantAnswer)
 	}{
 		{
-			name:       "svcb_keyNNNNN_parses_and_serves",
+			name:       "svcb_keyNNNNN_cap_locator_parses_and_serves",
 			record:     zoneRecord{Name: fqdn, Type: "SVCB", Value: svcbValueKeyNNNNN, TTL: 3600},
 			queryName:  fqdn,
 			queryType:  dns.TypeSVCB,
 			wantAnswer: true,
-			// dns.NewRR re-renders Private Use SvcParams quoted; pin the
-			// key numbers survive the round-trip.
-			wantInRR: `key65280="agent-card.json"`,
+			// dns.NewRR re-renders Private Use SvcParams quoted; pin that
+			// the cap URL (with `:` and `/`) survives the round-trip.
+			wantInRR: `key65400="https://agent.example.com/.well-known/agent-card.json"`,
 		},
 		{
-			name:       "svcb_keyNNNNN_carries_capability_digest",
+			name:       "svcb_keyNNNNN_carries_capability_digest_bap_and_well_known",
 			record:     zoneRecord{Name: fqdn, Type: "SVCB", Value: svcbValueKeyNNNNN, TTL: 3600},
 			queryName:  fqdn,
 			queryType:  dns.TypeSVCB,
 			wantAnswer: true,
-			wantInRR:   `key65281="CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"`,
+			wantInRR:   `key65401="CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"`,
 		},
 		{
-			name:       "svcb_named_wk_rejected_and_dropped",
-			record:     zoneRecord{Name: fqdn, Type: "SVCB", Value: svcbValueNamedWK, TTL: 3600},
+			name:       "svcb_cap_locator_with_query_string_round_trips",
+			record:     zoneRecord{Name: fqdn, Type: "SVCB", Value: svcbValueCapQuery, TTL: 3600},
 			queryName:  fqdn,
 			queryType:  dns.TypeSVCB,
-			wantAnswer: false, // dns.NewRR("… wk=…") errors → answersFor skips it
+			wantAnswer: true,
+			// The `?` and `=` of the query string survive parse + serve.
+			wantInRR: `key65400="https://agent.example.com/.well-known/mcp.json?v=2"`,
+		},
+		{
+			name:       "svcb_named_cap_rejected_and_dropped",
+			record:     zoneRecord{Name: fqdn, Type: "SVCB", Value: svcbValueNamedCap, TTL: 3600},
+			queryName:  fqdn,
+			queryType:  dns.TypeSVCB,
+			wantAnswer: false, // dns.NewRR("… cap=…") errors → answersFor skips it
 		},
 		{
 			name:       "txt_value_served_quoted",
@@ -127,7 +141,7 @@ func TestLoadZoneThenServe(t *testing.T) {
 	zoneJSON := `{
   "records": {
     "agent-1": [
-      {"name": "agent.example.com", "type": "SVCB", "value": "1 . alpn=a2a port=443 key65280=agent-card.json key65281=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc", "ttl": 3600},
+      {"name": "agent.example.com", "type": "SVCB", "value": "1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json key65401=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc key65402=a2a key65409=agent-card.json", "ttl": 3600},
       {"name": "_443._tcp.agent.example.com", "type": "TLSA", "value": "3 0 1 deadbeefcafe1234", "ttl": 3600}
     ]
   }
@@ -149,11 +163,11 @@ func TestLoadZoneThenServe(t *testing.T) {
 	if len(svcb) != 1 {
 		t.Fatalf("want one SVCB answer, got %d", len(svcb))
 	}
-	if !strings.Contains(svcb[0].String(), `key65280="agent-card.json"`) {
-		t.Errorf("SVCB answer missing key65280: %q", svcb[0].String())
+	if !strings.Contains(svcb[0].String(), `key65400="https://agent.example.com/.well-known/agent-card.json"`) {
+		t.Errorf("SVCB answer missing key65400 cap locator after disk round-trip: %q", svcb[0].String())
 	}
-	if !strings.Contains(svcb[0].String(), `key65281="CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"`) {
-		t.Errorf("SVCB answer missing key65281 capability digest after disk round-trip: %q", svcb[0].String())
+	if !strings.Contains(svcb[0].String(), `key65401="CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"`) {
+		t.Errorf("SVCB answer missing key65401 capability digest after disk round-trip: %q", svcb[0].String())
 	}
 
 	tlsa := answersFor(dns.Question{Name: dns.Fqdn("_443._tcp." + fqdn), Qtype: dns.TypeTLSA, Qclass: dns.ClassINET}, records)

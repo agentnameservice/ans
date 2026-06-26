@@ -13,15 +13,16 @@ import (
 // client's error-message fixtures can match.
 func TestValidDiscoveryProfiles(t *testing.T) {
 	got := ValidDiscoveryProfiles()
-	want := []string{"ANS_SVCB", "ANS_TXT"}
+	want := []string{"ANS_DNSAID", "ANS_TXT"}
 	assert.Equal(t, want, got)
 }
 
 // TestDefaultDiscoveryProfiles pins the default set applied when a V2
-// register request omits discoveryProfiles. {ANS_SVCB} per §4.4.2.
+// register request omits discoveryProfiles. Pinned to the stable
+// {ANS_TXT} family while ANS_DNSAID is brought to conformance.
 func TestDefaultDiscoveryProfiles(t *testing.T) {
 	got := DefaultDiscoveryProfiles()
-	want := []DiscoveryProfile{DiscoveryProfileANSSVCB}
+	want := []DiscoveryProfile{DiscoveryProfileANSTXT}
 	assert.Equal(t, want, got)
 }
 
@@ -33,11 +34,11 @@ func TestDiscoveryProfile_IsValid(t *testing.T) {
 		s    DiscoveryProfile
 		want bool
 	}{
-		{name: "ans_svcb_is_valid", s: DiscoveryProfileANSSVCB, want: true},
+		{name: "ans_dnsaid_is_valid", s: DiscoveryProfileANSDNSAID, want: true},
 		{name: "ans_txt_is_valid", s: DiscoveryProfileANSTXT, want: true},
 		{name: "empty_is_invalid", s: DiscoveryProfile(""), want: false},
 		{name: "unknown_is_invalid", s: DiscoveryProfile("UNKNOWN_FAMILY"), want: false},
-		{name: "lowercase_is_invalid", s: DiscoveryProfile("ans_svcb"), want: false},
+		{name: "lowercase_is_invalid", s: DiscoveryProfile("ans_dnsaid"), want: false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -55,7 +55,7 @@ func TestVerifyDNSRecords_Classification(t *testing.T) {
 
 	const (
 		svcbName = "agent.example.com"
-		svcbVal  = "1 . alpn=mcp port=443 key65280=mcp"
+		svcbVal  = "1 . alpn=mcp port=443 key65402=mcp"
 		txtName  = "_ans.agent.example.com"
 		txtVal   = "v=ans1; ..."
 	)

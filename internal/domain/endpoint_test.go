@@ -68,6 +68,47 @@ func TestAgentEndpoint_Validate(t *testing.T) {
 		assert.ErrorIs(t, e.Validate(), ErrValidation)
 	})
 
+	// metadataUrl is emitted verbatim as the DNSAID `cap` SvcParam and
+	// embedded in the signed TL attestation, so it must be https and free
+	// of bytes that break the SVCB presentation form (whitespace would let
+	// the verifier's strings.Fields split inject a bogus SvcParam, or
+	// strand the agent in PENDING_DNS).
+	t.Run("reject http metadata url", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "http://agent.example.com/.well-known/mcp.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with whitespace", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/a b.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with quote or semicolon", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = `https://agent.example.com/.well-known/x";key65999=evil`
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with non-ascii", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/café.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject overlong metadata url", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/" + strings.Repeat("a", 2100) + ".json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("accept clean https metadata url", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/mcp.json"
+		assert.NoError(t, e.Validate())
+	})
+
 	// Out-of-range ports parse fine through url.Parse but produce SVCB
 	// port= SvcParams and _<port>._tcp. TLSA owner names no DNS
 	// provider accepts — the boundary must reject them loudly instead

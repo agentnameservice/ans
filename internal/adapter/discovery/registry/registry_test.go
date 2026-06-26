@@ -34,25 +34,25 @@ func TestNew(t *testing.T) {
 		},
 		{
 			name:      "single_valid_profile",
-			profiles:  []port.ProfileEmitter{fakeProfile{id: domain.DiscoveryProfileANSSVCB}},
-			wantOrder: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			profiles:  []port.ProfileEmitter{fakeProfile{id: domain.DiscoveryProfileANSDNSAID}},
+			wantOrder: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 		},
 		{
 			name: "two_valid_profiles_preserve_argument_order",
 			profiles: []port.ProfileEmitter{
 				fakeProfile{id: domain.DiscoveryProfileANSTXT},
-				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+				fakeProfile{id: domain.DiscoveryProfileANSDNSAID},
 			},
 			wantOrder: []domain.DiscoveryProfile{
 				domain.DiscoveryProfileANSTXT,
-				domain.DiscoveryProfileANSSVCB,
+				domain.DiscoveryProfileANSDNSAID,
 			},
 		},
 		{
 			name: "duplicate_id_rejected",
 			profiles: []port.ProfileEmitter{
-				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
-				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+				fakeProfile{id: domain.DiscoveryProfileANSDNSAID},
+				fakeProfile{id: domain.DiscoveryProfileANSDNSAID},
 			},
 			wantErr: "duplicate profile ID",
 		},
@@ -66,7 +66,7 @@ func TestNew(t *testing.T) {
 		{
 			name: "invalid_id_rejected_after_valid_one",
 			profiles: []port.ProfileEmitter{
-				fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+				fakeProfile{id: domain.DiscoveryProfileANSDNSAID},
 				fakeProfile{id: domain.DiscoveryProfile("")},
 			},
 			wantErr: "is not a valid DiscoveryProfile",
@@ -89,7 +89,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestGet(t *testing.T) {
-	svcb := fakeProfile{id: domain.DiscoveryProfileANSSVCB}
+	svcb := fakeProfile{id: domain.DiscoveryProfileANSDNSAID}
 	txt := fakeProfile{id: domain.DiscoveryProfileANSTXT}
 	r, err := New(svcb, txt)
 	require.NoError(t, err)
@@ -100,7 +100,7 @@ func TestGet(t *testing.T) {
 		wantHit bool
 		wantID  domain.DiscoveryProfile
 	}{
-		{name: "hit_svcb", id: domain.DiscoveryProfileANSSVCB, wantHit: true, wantID: domain.DiscoveryProfileANSSVCB},
+		{name: "hit_svcb", id: domain.DiscoveryProfileANSDNSAID, wantHit: true, wantID: domain.DiscoveryProfileANSDNSAID},
 		{name: "hit_txt", id: domain.DiscoveryProfileANSTXT, wantHit: true, wantID: domain.DiscoveryProfileANSTXT},
 		{name: "miss_unknown_style", id: domain.DiscoveryProfile("UNKNOWN_FAMILY"), wantHit: false},
 		{name: "miss_empty_id", id: domain.DiscoveryProfile(""), wantHit: false},
@@ -125,7 +125,7 @@ func TestGet(t *testing.T) {
 func TestIDs_ReturnsCopy(t *testing.T) {
 	r, err := New(
 		fakeProfile{id: domain.DiscoveryProfileANSTXT},
-		fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+		fakeProfile{id: domain.DiscoveryProfileANSDNSAID},
 	)
 	require.NoError(t, err)
 
@@ -135,7 +135,7 @@ func TestIDs_ReturnsCopy(t *testing.T) {
 	second := r.IDs()
 	assert.Equal(t, []domain.DiscoveryProfile{
 		domain.DiscoveryProfileANSTXT,
-		domain.DiscoveryProfileANSSVCB,
+		domain.DiscoveryProfileANSDNSAID,
 	}, second, "mutating one IDs() result must not affect a subsequent call")
 }
 
@@ -145,14 +145,14 @@ func TestIDs_ReturnsCopy(t *testing.T) {
 func TestIDs_StableAcrossCalls(t *testing.T) {
 	r, err := New(
 		fakeProfile{id: domain.DiscoveryProfileANSTXT},
-		fakeProfile{id: domain.DiscoveryProfileANSSVCB},
+		fakeProfile{id: domain.DiscoveryProfileANSDNSAID},
 	)
 	require.NoError(t, err)
 
 	for range 100 {
 		assert.Equal(t, []domain.DiscoveryProfile{
 			domain.DiscoveryProfileANSTXT,
-			domain.DiscoveryProfileANSSVCB,
+			domain.DiscoveryProfileANSDNSAID,
 		}, r.IDs())
 	}
 }

@@ -80,8 +80,8 @@ type RegisterRequest struct {
 	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// in dnsRecordsProvisioned and tells the operator to publish.
 	// Each element is one of domain.ValidDiscoveryProfiles(); typical
-	// values are {ANS_SVCB} (default), {ANS_TXT}, or the
-	// {ANS_SVCB, ANS_TXT} transition union. Empty/nil normalizes to
+	// values are {ANS_TXT} (default), {ANS_DNSAID}, or the
+	// {ANS_DNSAID, ANS_TXT} transition union. Empty/nil normalizes to
 	// domain.DefaultDiscoveryProfiles(); any invalid element surfaces
 	// as INVALID_DISCOVERY_PROFILE before the aggregate is created.
 	DiscoveryProfiles []domain.DiscoveryProfile
@@ -182,7 +182,7 @@ type EventSigner struct {
 // runs at process start, never on a request path, so the no-panics-in-
 // request-paths rule (CLAUDE.md) is upheld. Production builds wire the
 // bundled ANS-family registry in cmd/ans-ra/main.go via
-// registry.New(ans.TXTProfile{}, ans.SVCBProfile{}); tests build the same
+// registry.New(ans.TXTProfile{}, ans.DNSAIDProfile{}); tests build the same
 // registry through service.NewDefaultProfileRegistry. There is no
 // optional builder.
 func NewRegistrationService(

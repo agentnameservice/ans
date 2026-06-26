@@ -105,7 +105,7 @@ func TestTXTProfile_Records(t *testing.T) {
 }
 
 // TestTXTProfile_RecordsIncludesFamilyTrustRecords pins that TXTProfile is
-// self-contained in the same way as SVCBProfile: it emits the family
+// self-contained in the same way as DNSAIDProfile: it emits the family
 // badge and TLSA records.
 func TestTXTProfile_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com",

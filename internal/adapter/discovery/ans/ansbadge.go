@@ -19,7 +19,7 @@ import (
 // the first endpoint's own URL. Pointing at the TL is the correct target —
 // badge verifiers resolve trust through the log, not the agent's host.
 //
-// Both ANS_SVCB and ANS_TXT styles call BadgeRecord. When both are in
+// Both ANS_DNSAID and ANS_TXT styles call BadgeRecord. When both are in
 // the resolved set the service walker dedupes on (Name, Type, Value),
 // so the badge lands once per registration regardless of style count.
 //

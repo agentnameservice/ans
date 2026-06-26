@@ -23,75 +23,115 @@ func mustReg(t *testing.T, host string, eps []domain.AgentEndpoint, cert *domain
 	}
 }
 
-func TestSVCBProfile_ID(t *testing.T) {
-	assert.Equal(t, domain.DiscoveryProfileANSSVCB, SVCBProfile{}.ID())
+func TestDNSAIDProfile_ID(t *testing.T) {
+	assert.Equal(t, domain.DiscoveryProfileANSDNSAID, DNSAIDProfile{}.ID())
 }
 
-// TestSVCBProfile_Records walks the SvcParam composition rules (alpn /
-// port / key65280 / key65281) the consolidated-draft fixes, plus the
-// always-Required default the service walker post-processes. The
-// well-known suffix and capability digest ride in RFC 9460 §14.3.1
-// Private Use keyNNNNN SvcParams (key65280 / key65281), not the named
-// forms `wk=` / `card-sha256=` — those have no IANA code point and the
-// miekg/dns zone parser rejects them.
-func TestSVCBProfile_Records(t *testing.T) {
+// TestDNSAIDProfile_Records walks the SvcParam composition rules the
+// DNS-AID-aligned profile emits: alpn, port, bap (key65402, always), cap
+// (key65400, from metadataUrl), cap-sha256 (key65401, from metadataHash),
+// and the well-known suffix (key65409, derived from the metadataUrl
+// path). The well-known suffix is sourced from where the metadata
+// document actually lives (metadataUrl), NOT from the protocol — an
+// endpoint with no metadataUrl carries no cap and no well-known. All
+// custom params ride in RFC 9460 §14.3.1 Private Use keyNNNNN form, never
+// the named DNS-AID forms (cap= / bap= / well-known=), which the
+// miekg/dns zone parser rejects.
+func TestDNSAIDProfile_Records(t *testing.T) {
 	const sampleMetadataHash = "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27"
 	const wantSampleCapBase64 = "CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc"
 
 	tests := []struct {
 		name        string
 		eps         []domain.AgentEndpoint
-		wantCount   int // svcb rows expected
-		wantPort    string
-		wantAlpn    string
-		wantWk      string // empty means MUST NOT appear (well-known suffix in key65280)
-		wantCap     string // empty means MUST NOT appear (capability digest in key65281)
-		wantNotPort string // value MUST NOT contain this string (e.g. wrong default)
+		wantCount   int
+		wantAlpn    string // e.g. "alpn=a2a"
+		wantBap     string // e.g. "key65402=a2a"
+		wantPort    string // e.g. "port=443"
+		wantCap     string // "" → key65400 MUST be absent
+		wantCapSHA  string // "" → key65401 MUST be absent
+		wantWk      string // "" → key65409 MUST be absent
+		wantNotPort string
 	}{
 		{
-			name: "a2a_https_default_port",
+			name: "a2a_no_metadata_url_omits_cap_and_wk",
 			eps: []domain.AgentEndpoint{
 				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"},
 			},
 			wantCount: 1,
-			wantPort:  "port=443",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "key65280=agent-card.json",
+			wantBap:   "key65402=a2a",
+			wantPort:  "port=443",
 		},
 		{
-			name: "mcp_emits_mcp_json_well_known",
+			name: "mcp_no_metadata_url",
 			eps: []domain.AgentEndpoint{
 				{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
 			},
 			wantCount: 1,
-			wantPort:  "port=443",
 			wantAlpn:  "alpn=mcp",
-			wantWk:    "key65280=mcp.json",
+			wantBap:   "key65402=mcp",
+			wantPort:  "port=443",
 		},
 		{
-			name: "http_api_omits_wk",
+			name: "http_api_maps_alpn_and_bap_to_x_http",
 			eps: []domain.AgentEndpoint{
 				{Protocol: domain.ProtocolHTTPAPI, AgentURL: "https://agent.example.com"},
 			},
 			wantCount: 1,
+			wantAlpn:  "alpn=x-http",
+			wantBap:   "key65402=x-http",
 			wantPort:  "port=443",
-			wantAlpn:  "alpn=http-api",
-			wantWk:    "", // HTTP-API has no per-protocol metadata file
 		},
 		{
-			name: "cap_sha256_present_when_endpoint_metadata_hash_set",
+			name: "cap_and_well_known_from_metadata_url",
+			eps: []domain.AgentEndpoint{
+				{
+					Protocol:    domain.ProtocolMCP,
+					AgentURL:    "https://agent.example.com/mcp",
+					MetadataURL: "https://agent.example.com/.well-known/mcp.json",
+				},
+			},
+			wantCount: 1,
+			wantAlpn:  "alpn=mcp",
+			wantBap:   "key65402=mcp",
+			wantPort:  "port=443",
+			wantCap:   "key65400=https://agent.example.com/.well-known/mcp.json",
+			wantWk:    "key65409=mcp.json",
+		},
+		{
+			name: "cap_sha256_present_when_metadata_hash_set",
 			eps: []domain.AgentEndpoint{
 				{
 					Protocol:     domain.ProtocolA2A,
 					AgentURL:     "https://agent.example.com",
+					MetadataURL:  "https://agent.example.com/.well-known/agent-card.json",
 					MetadataHash: sampleMetadataHash,
 				},
 			},
+			wantCount:  1,
+			wantAlpn:   "alpn=a2a",
+			wantBap:    "key65402=a2a",
+			wantPort:   "port=443",
+			wantCap:    "key65400=https://agent.example.com/.well-known/agent-card.json",
+			wantCapSHA: "key65401=" + wantSampleCapBase64,
+			wantWk:     "key65409=agent-card.json",
+		},
+		{
+			name: "off_path_metadata_url_emits_cap_but_no_well_known",
+			eps: []domain.AgentEndpoint{
+				{
+					Protocol:    domain.ProtocolMCP,
+					AgentURL:    "https://agent.example.com/mcp",
+					MetadataURL: "https://agent.example.com/metadata/mcp.json",
+				},
+			},
 			wantCount: 1,
+			wantAlpn:  "alpn=mcp",
+			wantBap:   "key65402=mcp",
 			wantPort:  "port=443",
-			wantAlpn:  "alpn=a2a",
-			wantWk:    "key65280=agent-card.json",
-			wantCap:   "key65281=" + wantSampleCapBase64,
+			wantCap:   "key65400=https://agent.example.com/metadata/mcp.json",
+			// metadataUrl not under /.well-known/ → no key65409
 		},
 		{
 			name: "non_443_port_from_url_authority",
@@ -99,9 +139,9 @@ func TestSVCBProfile_Records(t *testing.T) {
 				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com:8443"},
 			},
 			wantCount:   1,
-			wantPort:    "port=8443",
 			wantAlpn:    "alpn=a2a",
-			wantWk:      "key65280=agent-card.json",
+			wantBap:     "key65402=a2a",
+			wantPort:    "port=8443",
 			wantNotPort: "port=443",
 		},
 		{
@@ -110,25 +150,22 @@ func TestSVCBProfile_Records(t *testing.T) {
 				{Protocol: domain.ProtocolA2A, AgentURL: "http://agent.example.com"},
 			},
 			wantCount: 1,
-			wantPort:  "port=80",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "key65280=agent-card.json",
+			wantBap:   "key65402=a2a",
+			wantPort:  "port=80",
 		},
 		{
-			// First row asserted below; assertions on the A2A protocol's
-			// SvcParam composition (port, alpn, key65280). The MCP row's
-			// key65280=mcp.json is covered by the dedicated mcp test case
-			// above; here we only pin that the count is right and the row
-			// order tracks endpoint order.
+			// First row asserted below; pins count and that row order
+			// tracks endpoint order (A2A first).
 			name: "two_endpoints_emits_two_svcb_rows",
 			eps: []domain.AgentEndpoint{
 				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},
 				{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"},
 			},
 			wantCount: 2,
-			wantPort:  "port=443",
 			wantAlpn:  "alpn=a2a",
-			wantWk:    "key65280=agent-card.json",
+			wantBap:   "key65402=a2a",
+			wantPort:  "port=443",
 		},
 		{
 			name:      "zero_endpoints_emits_no_svcb_rows",
@@ -140,7 +177,7 @@ func TestSVCBProfile_Records(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			reg := mustReg(t, "agent.example.com", tc.eps, nil)
-			records := SVCBProfile{}.Records(reg)
+			records := DNSAIDProfile{}.Records(reg)
 
 			var svcbRows []domain.ExpectedDNSRecord
 			for _, r := range records {
@@ -149,7 +186,6 @@ func TestSVCBProfile_Records(t *testing.T) {
 				}
 			}
 			require.Len(t, svcbRows, tc.wantCount, "SVCB row count")
-
 			if tc.wantCount == 0 {
 				return
 			}
@@ -158,54 +194,49 @@ func TestSVCBProfile_Records(t *testing.T) {
 			assert.Equal(t, "agent.example.com", r.Name, "SVCB lives at the bare FQDN")
 			assert.Equal(t, domain.PurposeDiscovery, r.Purpose)
 			assert.Equal(t, 3600, r.TTL)
-			assert.True(t, r.Required, "SVCB always returns Required=true; service post-processes for the union case")
+			assert.True(t, r.Required, "DNSAID always returns Required=true; service post-processes for the union case")
 			assert.Contains(t, r.Value, `1 . `, "ServiceMode (priority 1) with TargetName .")
-			if tc.wantAlpn != "" {
-				assert.Contains(t, r.Value, tc.wantAlpn)
-			}
-			if tc.wantPort != "" {
-				assert.Contains(t, r.Value, tc.wantPort)
-			}
+			assert.Contains(t, r.Value, tc.wantAlpn)
+			assert.Contains(t, r.Value, tc.wantBap, "bap (key65402) MUST be present on every row")
+			assert.Contains(t, r.Value, tc.wantPort)
 			if tc.wantNotPort != "" {
 				assert.NotContains(t, r.Value, tc.wantNotPort)
-			}
-			if tc.wantWk != "" {
-				assert.Contains(t, r.Value, tc.wantWk)
-			} else {
-				assert.NotContains(t, r.Value, "key65280=",
-					"key65280 (well-known suffix) MUST be absent for protocols with no metadata file convention")
 			}
 			if tc.wantCap != "" {
 				assert.Contains(t, r.Value, tc.wantCap)
 			} else {
-				assert.NotContains(t, r.Value, "key65281=",
-					"key65281 (capability digest) MUST be absent when endpoint MetadataHash is empty")
+				assert.NotContains(t, r.Value, "key65400=", "key65400 (cap) MUST be absent without a metadataUrl")
 			}
-			// Named-form regression guards: every SVCB value must use the
-			// keyNNNNN Private Use presentation, never the unpublishable
-			// named forms. miekg/dns rejects `wk=` / `card-sha256=` at the
-			// zone parser (proven empirically), so a backslide here strands
-			// agents in PENDING_DNS under the lookup verifier.
-			assert.NotContains(t, r.Value, "wk=",
-				"named `wk=` SvcParam MUST NOT appear; key65280 is the publishable form")
-			assert.NotContains(t, r.Value, "cap-sha256",
-				"named `cap-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
-			assert.NotContains(t, r.Value, "card-sha256",
-				"legacy `card-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
+			if tc.wantCapSHA != "" {
+				assert.Contains(t, r.Value, tc.wantCapSHA)
+			} else {
+				assert.NotContains(t, r.Value, "key65401=", "key65401 (cap-sha256) MUST be absent without a metadataHash")
+			}
+			if tc.wantWk != "" {
+				assert.Contains(t, r.Value, tc.wantWk)
+			} else {
+				assert.NotContains(t, r.Value, "key65409=", "key65409 (well-known) MUST be absent unless metadataUrl is at /.well-known/")
+			}
+			// Named-form regression guards: never the unpublishable DNS-AID
+			// named forms; only the keyNNNNN Private Use presentation.
+			assert.NotContains(t, r.Value, "cap=", "named `cap=` MUST NOT appear; key65400 is the publishable form")
+			assert.NotContains(t, r.Value, "bap=", "named `bap=` MUST NOT appear; key65402 is the publishable form")
+			assert.NotContains(t, r.Value, "cap-sha256", "named `cap-sha256=` MUST NOT appear; key65401 is the publishable form")
+			assert.NotContains(t, r.Value, "well-known=", "named `well-known=` MUST NOT appear; key65409 is the publishable form")
 		})
 	}
 }
 
-// TestSVCBProfile_RecordsIncludesFamilyTrustRecords pins that SVCBProfile
-// is self-contained — it emits the family's badge and TLSA records too,
-// so registering ANS_SVCB alone produces a complete set without any
-// service-layer trust-record plumbing.
-func TestSVCBProfile_RecordsIncludesFamilyTrustRecords(t *testing.T) {
+// TestDNSAIDProfile_RecordsIncludesFamilyTrustRecords pins that
+// DNSAIDProfile is self-contained — it emits the family's badge and TLSA
+// records too, so registering ANS_DNSAID alone produces a complete set
+// without any service-layer trust-record plumbing.
+func TestDNSAIDProfile_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 	reg := mustReg(t, "agent.example.com",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		&domain.ByocServerCertificate{Fingerprint: "deadbeef"})
 
-	records := SVCBProfile{}.Records(reg)
+	records := DNSAIDProfile{}.Records(reg)
 
 	var sawBadge, sawTLSA bool
 	for _, r := range records {
@@ -218,8 +249,8 @@ func TestSVCBProfile_RecordsIncludesFamilyTrustRecords(t *testing.T) {
 			assert.True(t, strings.HasPrefix(r.Name, "_443._tcp."))
 		}
 	}
-	assert.True(t, sawBadge, "SVCB style must include the family `_ans-badge` record")
-	assert.True(t, sawTLSA, "SVCB style must include the TLSA record when ServerCert is set")
+	assert.True(t, sawBadge, "DNSAID profile must include the family `_ans-badge` record")
+	assert.True(t, sawTLSA, "DNSAID profile must include the TLSA record when ServerCert is set")
 }
 
 func TestMetadataHashToCapSHA256(t *testing.T) {

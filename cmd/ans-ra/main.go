@@ -174,7 +174,7 @@ func run(cfgPath string) error {
 	bus := eventbus.NewInMemoryBus(logger)
 
 	// Discovery registry: composes the bundled ANS-family port.ProfileEmitter
-	// adapters (ANS_TXT, ANS_SVCB) the V2 register / verify-dns paths walk
+	// adapters (ANS_TXT, ANS_DNSAID) the V2 register / verify-dns paths walk
 	// to compute `dnsRecordsProvisioned[]`. Insertion order here pins the
 	// canonical-bytes emission order for the §4.4.2 union case
 	// (`[TXT×N, HTTPS, SVCB×N, badge, TLSA]`).

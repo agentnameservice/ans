@@ -224,7 +224,7 @@ func TestApplyDiscoveryProfiles(t *testing.T) {
 			name: "v1_pins_to_ans_txt_ignoring_request_field",
 			req: RegisterRequest{
 				SchemaVersion:     "V1",
-				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			},
 			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
 		},
@@ -250,9 +250,9 @@ func TestApplyDiscoveryProfiles(t *testing.T) {
 			name: "v2_valid_ans_svcb_only",
 			req: RegisterRequest{
 				SchemaVersion:     "V2",
-				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			},
-			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 		},
 		{
 			name: "v2_valid_ans_txt_only",
@@ -267,12 +267,12 @@ func TestApplyDiscoveryProfiles(t *testing.T) {
 			req: RegisterRequest{
 				SchemaVersion: "V2",
 				DiscoveryProfiles: []domain.DiscoveryProfile{
-					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfileANSDNSAID,
 					domain.DiscoveryProfileANSTXT,
 				},
 			},
 			wantProfiles: []domain.DiscoveryProfile{
-				domain.DiscoveryProfileANSSVCB,
+				domain.DiscoveryProfileANSDNSAID,
 				domain.DiscoveryProfileANSTXT,
 			},
 		},
@@ -286,13 +286,13 @@ func TestApplyDiscoveryProfiles(t *testing.T) {
 			req: RegisterRequest{
 				SchemaVersion: "V2",
 				DiscoveryProfiles: []domain.DiscoveryProfile{
-					domain.DiscoveryProfileANSSVCB,
-					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfileANSDNSAID,
+					domain.DiscoveryProfileANSDNSAID,
 					domain.DiscoveryProfileANSTXT,
 				},
 			},
 			wantProfiles: []domain.DiscoveryProfile{
-				domain.DiscoveryProfileANSSVCB,
+				domain.DiscoveryProfileANSDNSAID,
 				domain.DiscoveryProfileANSTXT,
 			},
 		},
@@ -321,7 +321,7 @@ func TestApplyDiscoveryProfiles(t *testing.T) {
 			req: RegisterRequest{
 				SchemaVersion: "V2",
 				DiscoveryProfiles: []domain.DiscoveryProfile{
-					domain.DiscoveryProfileANSSVCB,
+					domain.DiscoveryProfileANSDNSAID,
 					domain.DiscoveryProfile("garbage"),
 				},
 			},

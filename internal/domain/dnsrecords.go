@@ -5,7 +5,7 @@ import "fmt"
 // DiscoveryProfile names one DNS record family the RA can emit for an
 // agent registration. A registration carries a *set* of profiles
 // (AgentRegistration.DiscoveryProfiles); operators publishing the union
-// during a Consolidated Approach transition include both ANS_SVCB and
+// during a Consolidated Approach transition include both ANS_DNSAID and
 // ANS_TXT in the same set.
 //
 // Wire values are CONSTANT_CASE, matching every other enum on the V2
@@ -16,15 +16,18 @@ import "fmt"
 type DiscoveryProfile string
 
 const (
-	// DiscoveryProfileANSSVCB emits Consolidated Approach SVCB records per
+	// DiscoveryProfileANSDNSAID emits DNS-AID-aligned SVCB records per
 	// RFC 9460 — one row per protocol at the bare FQDN, carrying alpn,
-	// port, key65280 (well-known suffix), and (when the endpoint has a
-	// MetadataHash) key65281 (capability digest) SvcParams. key65280/
-	// key65281 are the RFC 9460 §14.3.1 Private Use presentation of the
-	// DNS-AID draft's wk/cap-sha256 params, which have no IANA code point;
-	// the adapter (internal/adapter/discovery/ans/svcb.go) documents why
-	// the named forms are unpublishable.
-	DiscoveryProfileANSSVCB DiscoveryProfile = "ANS_SVCB"
+	// port, key65402 (bap, the agent protocol), and — when the endpoint
+	// supplies them — key65400 (cap, the capability locator from
+	// metadataUrl), key65401 (cap-sha256, the capability digest), and
+	// key65409 (well-known suffix derived from metadataUrl). These
+	// keyNNNNN forms are the RFC 9460 §14.3.1 Private Use presentation of
+	// the DNS-AID draft-02 cap/cap-sha256/bap/well-known params, which
+	// have no IANA code point; the adapter
+	// (internal/adapter/discovery/ans/dnsaid.go) documents why the named
+	// forms are unpublishable.
+	DiscoveryProfileANSDNSAID DiscoveryProfile = "ANS_DNSAID"
 
 	// DiscoveryProfileANSTXT emits the original `_ans` TXT shape — one row
 	// per protocol at `_ans.{fqdn}`. Supported indefinitely for
@@ -35,12 +38,13 @@ const (
 )
 
 // DefaultDiscoveryProfiles is the set applied when the registration
-// request omits discoveryProfiles entirely. Pinned to {ANS_SVCB} so new
-// integrations follow §4.4.2's "publish one SVCB record... rather than
-// parallel per-ecosystem record trees" SHOULD by default. Returned as a
+// request omits discoveryProfiles entirely. Pinned to {ANS_TXT} — the
+// stable, widely-deployed family — while the DNS-AID profile is brought
+// to conformance; operators opt into ANS_DNSAID explicitly. This also
+// matches the V1 lane, which is always pinned to ANS_TXT. Returned as a
 // fresh slice so callers can mutate without affecting the canonical set.
 func DefaultDiscoveryProfiles() []DiscoveryProfile {
-	return []DiscoveryProfile{DiscoveryProfileANSSVCB}
+	return []DiscoveryProfile{DiscoveryProfileANSTXT}
 }
 
 // IsValid reports whether s is one of the defined profiles. Empty
@@ -54,7 +58,7 @@ func DefaultDiscoveryProfiles() []DiscoveryProfile {
 // call.
 func (s DiscoveryProfile) IsValid() bool {
 	switch s {
-	case DiscoveryProfileANSSVCB, DiscoveryProfileANSTXT:
+	case DiscoveryProfileANSDNSAID, DiscoveryProfileANSTXT:
 		return true
 	}
 	return false
@@ -66,7 +70,7 @@ func (s DiscoveryProfile) IsValid() bool {
 // one-place change rather than a shotgun edit.
 func ValidDiscoveryProfiles() []string {
 	return []string{
-		string(DiscoveryProfileANSSVCB),
+		string(DiscoveryProfileANSDNSAID),
 		string(DiscoveryProfileANSTXT),
 	}
 }

@@ -6,7 +6,7 @@ import (
 
 // ProfileEmitter is one named DNS discovery family the RA can emit for an
 // agent registration. Implementations live under internal/adapter/discovery/
-// <vendor>/. Today the bundled set is the ANS family (ANS_SVCB, ANS_TXT);
+// <vendor>/. Today the bundled set is the ANS family (ANS_DNSAID, ANS_TXT);
 // additional families plug in as new vendor packages without touching the
 // service or domain layers.
 //
@@ -16,7 +16,7 @@ import (
 // per-family trust records (e.g. _ans-badge, TLSA) emitted by multiple
 // profiles in the same family land once.
 type ProfileEmitter interface {
-	// ID returns the wire-format identifier (e.g. "ANS_SVCB", "ANS_TXT").
+	// ID returns the wire-format identifier (e.g. "ANS_DNSAID", "ANS_TXT").
 	// Persisted on agent rows; surfaced on the V2 register schema; used
 	// as the registry key.
 	ID() domain.DiscoveryProfile
@@ -30,7 +30,7 @@ type ProfileEmitter interface {
 	//
 	// A profile that emits a transparency-log-relative trust record (the
 	// ANS family's _ans-badge) is configured with the deployment TL URL
-	// at construction — see ans.NewTXTProfile / ans.NewSVCBProfile — so this
+	// at construction — see ans.NewTXTProfile / ans.NewDNSAIDProfile — so this
 	// stays a pure function of reg with no per-call deployment input.
 	Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord
 }

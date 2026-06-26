@@ -12,7 +12,7 @@ import (
 // profile emits for the agent's server cert — one record per distinct
 // TLS endpoint port. Returns an empty slice when reg.ServerCert is nil.
 //
-// Both ANS_SVCB and ANS_TXT profiles call TLSARecord. When both are in
+// Both ANS_DNSAID and ANS_TXT profiles call TLSARecord. When both are in
 // the resolved set the service walker dedupes on (Name, Type, Value)
 // so each TLSA lands once.
 //
@@ -109,5 +109,5 @@ func isPlaintextHTTP(agentURL string) bool {
 	if err != nil {
 		return false
 	}
-	return u.Scheme == "http"
+	return u.Scheme == schemeHTTP
 }

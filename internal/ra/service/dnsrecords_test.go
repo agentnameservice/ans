@@ -71,7 +71,7 @@ func TestComputeRequiredDNSRecords_BadgeURLFromRegistryConstruction(t *testing.T
 
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolMCP, AgentURL: "https://agent.example.com/mcp"}},
-		nil, []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB})
+		nil, []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID})
 	reg.AgentID = "test-agent-id"
 
 	records := svc.ComputeRequiredDNSRecords(reg)
@@ -103,14 +103,18 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 		styles           []domain.DiscoveryProfile
 		protocol         domain.Protocol
 		agentURL         string
-		metadataHash     string // optional per-endpoint MetadataHash
+		metadataURL      string // optional per-endpoint MetadataURL (feeds cap + well-known)
+		metadataHash     string // optional per-endpoint MetadataHash (feeds cap-sha256)
 		wantHTTPS        bool
 		wantSVCB         bool
 		wantSVCBRequired bool // applies only when wantSVCB is true
 		wantLegacyTXT    bool
-		wantSVCBPort     string // substring expected in SVCB value (e.g. "port=443")
-		wantSVCBWk       string // "" means SVCB MUST NOT contain "key65280=" (well-known suffix)
-		wantSVCBCap      string // "" means SVCB MUST NOT contain "key65281=" (capability digest)
+		wantSVCBAlpn     string // substring expected (e.g. "alpn=a2a")
+		wantSVCBBap      string // substring expected (e.g. "key65402=a2a")
+		wantSVCBPort     string // substring expected (e.g. "port=443")
+		wantSVCBCapLoc   string // "" means SVCB MUST NOT contain "key65400=" (cap locator)
+		wantSVCBCapSHA   string // "" means SVCB MUST NOT contain "key65401=" (capability digest)
+		wantSVCBWk       string // "" means SVCB MUST NOT contain "key65409=" (well-known suffix)
 	}{
 		{
 			name:          "ans_txt_only_emits_https_rr_no_svcb",
@@ -121,18 +125,19 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			wantLegacyTXT: true,
 		},
 		{
-			name:             "ans_svcb_only_omits_https_rr",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			name:             "ans_dnsaid_only_omits_https_rr",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com",
 			wantSVCB:         true,
 			wantSVCBRequired: true, // SVCB-sole: only PurposeDiscovery record, must be required
+			wantSVCBAlpn:     "alpn=a2a",
+			wantSVCBBap:      "key65402=a2a",
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
 			name:          "union_emits_both_families",
-			styles:        []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT},
+			styles:        []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfileANSTXT},
 			protocol:      domain.ProtocolA2A,
 			agentURL:      "https://agent.example.com",
 			wantHTTPS:     true,
@@ -141,79 +146,88 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			// wantSVCBRequired: false — legacy `_ans` TXT carries the
 			// Required signal during the §4.4.2 transition; SVCB rides
 			// along as optional.
+			wantSVCBAlpn: "alpn=a2a",
+			wantSVCBBap:  "key65402=a2a",
 			wantSVCBPort: "port=443",
-			wantSVCBWk:   "key65280=agent-card.json",
 		},
 		{
-			name:             "svcb_mcp_wk_mcp_json",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			name:             "dnsaid_mcp_cap_and_wk_from_metadata_url",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			protocol:         domain.ProtocolMCP,
 			agentURL:         "https://agent.example.com/mcp",
+			metadataURL:      "https://agent.example.com/.well-known/mcp.json",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
+			wantSVCBAlpn:     "alpn=mcp",
+			wantSVCBBap:      "key65402=mcp",
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "key65280=mcp.json",
+			wantSVCBCapLoc:   "key65400=https://agent.example.com/.well-known/mcp.json",
+			wantSVCBWk:       "key65409=mcp.json",
 		},
 		{
-			name:             "svcb_http_api_omits_wk",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			name:             "dnsaid_http_api_maps_alpn_and_bap_to_x_http",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			protocol:         domain.ProtocolHTTPAPI,
 			agentURL:         "https://agent.example.com",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
+			wantSVCBAlpn:     "alpn=x-http",
+			wantSVCBBap:      "key65402=x-http",
 			wantSVCBPort:     "port=443",
 		},
 		{
-			name:             "svcb_cap_sha256_from_endpoint_metadata_hash",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			name:             "dnsaid_cap_sha256_from_endpoint_metadata_hash",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com",
+			metadataURL:      "https://agent.example.com/.well-known/agent-card.json",
 			metadataHash:     sampleMetadataHash,
 			wantSVCB:         true,
 			wantSVCBRequired: true,
+			wantSVCBAlpn:     "alpn=a2a",
+			wantSVCBBap:      "key65402=a2a",
 			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "key65280=agent-card.json",
-			wantSVCBCap:      "key65281=" + wantSampleCapBase64,
+			wantSVCBCapLoc:   "key65400=https://agent.example.com/.well-known/agent-card.json",
+			wantSVCBCapSHA:   "key65401=" + wantSampleCapBase64,
+			wantSVCBWk:       "key65409=agent-card.json",
 		},
 		{
-			name:             "svcb_non_443_port_from_url",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			name:             "dnsaid_non_443_port_from_url",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "https://agent.example.com:8443",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
+			wantSVCBAlpn:     "alpn=a2a",
+			wantSVCBBap:      "key65402=a2a",
 			wantSVCBPort:     "port=8443",
-			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
-			name:             "svcb_http_scheme_defaults_port_80",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB},
+			name:             "dnsaid_http_scheme_defaults_port_80",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
 			protocol:         domain.ProtocolA2A,
 			agentURL:         "http://agent.example.com",
 			wantSVCB:         true,
 			wantSVCBRequired: true,
+			wantSVCBAlpn:     "alpn=a2a",
+			wantSVCBBap:      "key65402=a2a",
 			wantSVCBPort:     "port=80",
-			wantSVCBWk:       "key65280=agent-card.json",
 		},
 		{
-			name:             "empty_styles_coerces_to_default",
-			styles:           nil,
-			protocol:         domain.ProtocolA2A,
-			agentURL:         "https://agent.example.com",
-			wantSVCB:         true,
-			wantSVCBRequired: true, // default ({ANS_SVCB}) is SVCB-sole
-			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "key65280=agent-card.json",
+			name:          "empty_styles_coerces_to_default_ans_txt",
+			styles:        nil,
+			protocol:      domain.ProtocolA2A,
+			agentURL:      "https://agent.example.com",
+			wantHTTPS:     true, // default is now {ANS_TXT}: HTTPS RR + _ans TXT, no SVCB
+			wantLegacyTXT: true,
 		},
 		{
-			name:             "all_invalid_styles_falls_back_to_default",
-			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage"), domain.DiscoveryProfile("nonsense")},
-			protocol:         domain.ProtocolA2A,
-			agentURL:         "https://agent.example.com",
-			wantSVCB:         true,
-			wantSVCBRequired: true, // fallback default ({ANS_SVCB}) is SVCB-sole
-			wantSVCBPort:     "port=443",
-			wantSVCBWk:       "key65280=agent-card.json",
+			name:          "all_invalid_styles_falls_back_to_default_ans_txt",
+			styles:        []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage"), domain.DiscoveryProfile("nonsense")},
+			protocol:      domain.ProtocolA2A,
+			agentURL:      "https://agent.example.com",
+			wantHTTPS:     true, // fallback default is now {ANS_TXT}
+			wantLegacyTXT: true,
 		},
 	}
 
@@ -225,6 +239,7 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 				[]domain.AgentEndpoint{{
 					Protocol:     tc.protocol,
 					AgentURL:     tc.agentURL,
+					MetadataURL:  tc.metadataURL,
 					MetadataHash: tc.metadataHash,
 				}},
 				nil, tc.styles)
@@ -255,35 +270,44 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 
 			if tc.wantSVCB {
 				assert.Equal(t, tc.wantSVCBRequired, svcbRequired,
-					"SVCB Required flag mismatch (true iff ANS_SVCB is the sole resolved style)")
-				assert.Contains(t, svcbValue, tc.wantSVCBPort,
-					"SVCB port SvcParam mismatch")
-				if tc.wantSVCBWk != "" {
-					assert.Contains(t, svcbValue, tc.wantSVCBWk, "SVCB well-known (key65280) SvcParam mismatch")
+					"SVCB Required flag mismatch (true iff ANS_DNSAID is the sole resolved style)")
+				assert.Contains(t, svcbValue, tc.wantSVCBAlpn, "SVCB alpn SvcParam mismatch")
+				assert.Contains(t, svcbValue, tc.wantSVCBBap, "SVCB bap (key65402) SvcParam mismatch")
+				assert.Contains(t, svcbValue, tc.wantSVCBPort, "SVCB port SvcParam mismatch")
+				if tc.wantSVCBCapLoc != "" {
+					assert.Contains(t, svcbValue, tc.wantSVCBCapLoc, "SVCB cap (key65400) locator mismatch")
 				} else {
-					assert.NotContains(t, svcbValue, "key65280=",
-						"SVCB MUST NOT carry key65280 (well-known) when protocol has no metadata convention")
+					assert.NotContains(t, svcbValue, "key65400=",
+						"SVCB MUST NOT carry key65400 (cap) without a metadataUrl")
 				}
-				if tc.wantSVCBCap != "" {
-					assert.Contains(t, svcbValue, tc.wantSVCBCap, "SVCB capability digest (key65281) SvcParam mismatch")
+				if tc.wantSVCBCapSHA != "" {
+					assert.Contains(t, svcbValue, tc.wantSVCBCapSHA, "SVCB cap-sha256 (key65401) digest mismatch")
 				} else {
-					assert.NotContains(t, svcbValue, "key65281=",
-						"SVCB MUST NOT carry key65281 (capability digest) when endpoint MetadataHash is empty")
+					assert.NotContains(t, svcbValue, "key65401=",
+						"SVCB MUST NOT carry key65401 (cap-sha256) when endpoint MetadataHash is empty")
+				}
+				if tc.wantSVCBWk != "" {
+					assert.Contains(t, svcbValue, tc.wantSVCBWk, "SVCB well-known (key65409) SvcParam mismatch")
+				} else {
+					assert.NotContains(t, svcbValue, "key65409=",
+						"SVCB MUST NOT carry key65409 (well-known) unless metadataUrl is at /.well-known/")
 				}
 				// Named-form regression guards across the integration path.
-				assert.NotContains(t, svcbValue, "wk=",
-					"named `wk=` SvcParam MUST NOT appear; key65280 is the publishable form")
+				assert.NotContains(t, svcbValue, "cap=",
+					"named `cap=` SvcParam MUST NOT appear; key65400 is the publishable form")
+				assert.NotContains(t, svcbValue, "bap=",
+					"named `bap=` SvcParam MUST NOT appear; key65402 is the publishable form")
 				assert.NotContains(t, svcbValue, "cap-sha256",
-					"named `cap-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
-				assert.NotContains(t, svcbValue, "card-sha256",
-					"legacy `card-sha256=` SvcParam MUST NOT appear; key65281 is the publishable form")
+					"named `cap-sha256=` SvcParam MUST NOT appear; key65401 is the publishable form")
+				assert.NotContains(t, svcbValue, "well-known=",
+					"named `well-known=` SvcParam MUST NOT appear; key65409 is the publishable form")
 			}
 		})
 	}
 }
 
 // TestComputeRequiredDNSRecords_UnionDedupesFamilyTrustRecords pins
-// that when the union {ANS_SVCB, ANS_TXT} emits, family trust records
+// that when the union {ANS_DNSAID, ANS_TXT} emits, family trust records
 // (`_ans-badge`, TLSA) appear ONCE in the output even though both
 // adapters emit them. Catches a regression where the dedup pass is
 // removed or the dedup key drifts.
@@ -292,7 +316,7 @@ func TestComputeRequiredDNSRecords_UnionDedupesFamilyTrustRecords(t *testing.T) 
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		&domain.ByocServerCertificate{Fingerprint: "abcdef"},
-		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfileANSTXT})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -350,7 +374,7 @@ func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		nil,
-		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfile("UNKNOWN_FUTURE")})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfile("UNKNOWN_FUTURE")})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -366,24 +390,24 @@ func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 
 // TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression pins
 // the V2 TL `dnsRecordsProvisioned[]` canonical wire for the §4.4.2
-// transition union (ANS_SVCB + ANS_TXT). Any change to slice ORDER
+// transition union (ANS_DNSAID + ANS_TXT). Any change to slice ORDER
 // (JCS preserves array order per RFC 8785 §3.2.2) would shift the
 // SHA-256, signal a wire-shape regression, and break offline-verifier
 // hashes for in-flight agents at deploy time.
 //
-// The hex constant was REGENERATED for the keyNNNNN/selector-0 change:
-// the SVCB rows now carry `key65280=`/`key65281=` (Fix A — RFC 9460
-// §14.3.1 Private Use presentation of the draft wk/cap-sha256 params,
-// replacing the unpublishable named forms) and the TLSA row now carries
-// `3 0 1` over the full cert (Fix B2 — selector 0 matching what
-// CertificateFingerprint actually hashes). This is the intentional
-// canonical-bytes change of the PR. The slice ORDER and the 7-record
-// SHAPE are unchanged (both endpoints are https/443) — only the SVCB
-// SvcParam values and the TLSA value move the hash. A future drift that
-// is NOT one of those two value changes is a regression: investigate
-// before touching this constant.
+// The hex constant was REGENERATED for the DNS-AID conformance change:
+// each SVCB row now carries the draft-02 keyNNNNN params — key65400
+// (cap, from metadataUrl), key65401 (cap-sha256, from metadataHash),
+// key65402 (bap), and key65409 (well-known, derived from the metadataUrl
+// path) — replacing the old key65280/key65281 set. The fixture endpoints
+// carry a /.well-known/ metadataUrl so cap and well-known are exercised
+// here at the service-composition layer, not only in the adapter unit
+// tests. The slice ORDER and the 7-record SHAPE are unchanged; only the
+// SVCB SvcParam values move the hash. A future drift that is NOT a
+// deliberate SvcParam change is a regression: investigate before
+// touching this constant.
 func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
-	const wantSHA256Hex = "0bc5f912c2a450dffd631b66d467ee6d5974e0cbea47e84fd676c6111387bda0"
+	const wantSHA256Hex = "87b2902c6f1114029f888ed7ffe798ef1937f44e30add8fd2d5b8874d4c427c1"
 
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.2.3",
@@ -391,16 +415,18 @@ func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
 			{
 				Protocol:     domain.ProtocolA2A,
 				AgentURL:     "https://agent.example.com/a2a",
+				MetadataURL:  "https://agent.example.com/.well-known/agent-card.json",
 				MetadataHash: "SHA256:098d650cc6d280dee4c0f47489a75cf17b9bfbbae53051806d4e084108b2ff27",
 			},
 			{
 				Protocol:     domain.ProtocolMCP,
 				AgentURL:     "https://agent.example.com/mcp",
+				MetadataURL:  "https://agent.example.com/.well-known/mcp.json",
 				MetadataHash: "SHA256:1111111111111111111111111111111111111111111111111111111111111111",
 			},
 		},
 		&domain.ByocServerCertificate{Fingerprint: "deadbeefcafe1234"},
-		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfileANSTXT})
 
 	records := svc.ComputeRequiredDNSRecords(reg)
 
@@ -427,6 +453,17 @@ func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
 	assert.Equal(t, "_443._tcp.agent.example.com", records[6].Name)
 	assert.Equal(t, domain.DNSRecordTLSA, records[6].Type)
 
+	// The two SVCB rows carry the draft-02 keyNNNNN params at the
+	// service-composition layer: cap (key65400) + bap (key65402) + the
+	// /.well-known/-derived well-known suffix (key65409). Pins that cap
+	// and well-known reach the union record set, not only the adapter.
+	assert.Contains(t, records[3].Value, "key65400=https://agent.example.com/.well-known/agent-card.json")
+	assert.Contains(t, records[3].Value, "key65402=a2a")
+	assert.Contains(t, records[3].Value, "key65409=agent-card.json")
+	assert.Contains(t, records[4].Value, "key65400=https://agent.example.com/.well-known/mcp.json")
+	assert.Contains(t, records[4].Value, "key65402=mcp")
+	assert.Contains(t, records[4].Value, "key65409=mcp.json")
+
 	// SHA-256 over JCS-canonical bytes — pins the exact wire bytes
 	// the V2 TL leaf will canonicalize.
 	jsonBytes, err := json.Marshal(records)
@@ -447,7 +484,7 @@ func TestNewDefaultProfileRegistry(t *testing.T) {
 	require.NoError(t, err)
 
 	got := r.IDs()
-	want := []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT, domain.DiscoveryProfileANSSVCB}
+	want := []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT, domain.DiscoveryProfileANSDNSAID}
 	assert.Equal(t, want, got, "default registry must wire TXT before SVCB to preserve V2 union canonical bytes")
 }
 
@@ -461,7 +498,7 @@ func TestComputeRequiredDNSRecords_RegistryIterationOrderDeterminesEmission(t *t
 	// and a custom one with SVCB before TXT.
 	defaultSvc := newComputeOnlyService(t)
 
-	customReg, err := registry.New(svcStub{id: domain.DiscoveryProfileANSSVCB, marker: "S"}, svcStub{id: domain.DiscoveryProfileANSTXT, marker: "T"})
+	customReg, err := registry.New(svcStub{id: domain.DiscoveryProfileANSDNSAID, marker: "S"}, svcStub{id: domain.DiscoveryProfileANSTXT, marker: "T"})
 	require.NoError(t, err)
 	customSvc := service.NewRegistrationService(
 		nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, customReg)
@@ -469,7 +506,7 @@ func TestComputeRequiredDNSRecords_RegistryIterationOrderDeterminesEmission(t *t
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		nil,
-		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB, domain.DiscoveryProfileANSTXT})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID, domain.DiscoveryProfileANSTXT})
 
 	defaultOut := defaultSvc.ComputeRequiredDNSRecords(reg)
 	customOut := customSvc.ComputeRequiredDNSRecords(reg)
@@ -508,7 +545,7 @@ func (svcStub) Records(*domain.AgentRegistration) []domain.ExpectedDNSRecord {
 type inconsistentRegistry struct{}
 
 func (inconsistentRegistry) IDs() []domain.DiscoveryProfile {
-	return []domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB}
+	return []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID}
 }
 
 func (inconsistentRegistry) Get(domain.DiscoveryProfile) (port.ProfileEmitter, bool) {
@@ -529,7 +566,7 @@ func TestComputeRequiredDNSRecords_RegistryGetMissDoesNotPanic(t *testing.T) {
 	reg := mustReg(t, "agent.example.com", "1.0.0",
 		[]domain.AgentEndpoint{{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com"}},
 		nil,
-		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSSVCB})
+		[]domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID})
 
 	// IDs() returns SVCB; Get returns (nil, false). Walker must
 	// continue without dereferencing style. Result: empty record set

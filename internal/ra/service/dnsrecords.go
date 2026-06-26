@@ -19,13 +19,13 @@ import (
 //     (operator omitted discoveryProfiles, or every entry was unknown
 //     to the registry) normalizes to domain.DefaultDiscoveryProfiles().
 //  2. Iteration order is the registry's insertion order (cmd/main
-//     wires [TXTProfile, SVCBProfile], so emission proceeds TXT-first
+//     wires [TXTProfile, DNSAIDProfile], so emission proceeds TXT-first
 //     then SVCB). User-supplied order on reg.DiscoveryProfiles has no
 //     effect — `discoveryProfiles` is set semantics on the wire.
 //  3. Each profile's full record list (discovery + family trust records)
 //     is collected and deduped by (Name, Type, Value). Family trust
 //     records that overlap across sibling profiles in the same family
-//     (e.g. `_ans-badge` from both ANS_SVCB and ANS_TXT) emit once.
+//     (e.g. `_ans-badge` from both ANS_DNSAID and ANS_TXT) emit once.
 //  4. Records are reordered into discovery-then-trust groupings,
 //     preserving within-group iteration order. This pins the V2 TL
 //     `dnsRecordsProvisioned[]` canonical bytes for the union case
@@ -137,6 +137,20 @@ func (s *RegistrationService) resolveRequestedProfiles(reg *domain.AgentRegistra
 			Msg("registration carries discovery profile unknown to the running registry; skipping")
 	}
 	if len(requested) == 0 {
+		if len(reg.DiscoveryProfiles) > 0 {
+			// Non-empty requested set collapsed to the default: every
+			// requested profile was unknown to the running registry (e.g.
+			// a stale value from before a rename, or a profile this
+			// deployment doesn't wire). The agent will be verified against
+			// the default record set, not what it published — surface this
+			// distinctly so it isn't mistaken for an operator zone error at
+			// verify-dns.
+			log.Warn().
+				Str("agentId", reg.AgentID).
+				Strs("requestedProfiles", profileStrings(reg.DiscoveryProfiles)).
+				Strs("defaultProfiles", profileStrings(domain.DefaultDiscoveryProfiles())).
+				Msg("all requested discovery profiles were unknown to the running registry; falling back to the default set")
+		}
 		for _, id := range domain.DefaultDiscoveryProfiles() {
 			requested[id] = true
 		}
