@@ -1,9 +1,79 @@
 package domain
 
-import (
-	"fmt"
-	"net/url"
+import "fmt"
+
+// DiscoveryProfile names one DNS record family the RA can emit for an
+// agent registration. A registration carries a *set* of profiles
+// (AgentRegistration.DiscoveryProfiles); operators publishing the union
+// during a Consolidated Approach transition include both ANS_DNSAID and
+// ANS_TXT in the same set.
+//
+// Wire values are CONSTANT_CASE, matching every other enum on the V2
+// register schema (Protocol, RevocationReason, AgentLifecycleStatus,
+// NextStep.action, ChallengeInfo.type, DnsRecord.type, etc.). The
+// `ANS_` prefix anchors the namespace so a future second agentic spec
+// adding its own SVCB family doesn't collide.
+type DiscoveryProfile string
+
+const (
+	// DiscoveryProfileANSDNSAID emits DNS-AID-aligned SVCB records per
+	// RFC 9460 — one row per protocol at the bare FQDN, carrying alpn,
+	// port, key65402 (bap, the agent protocol), and — when the endpoint
+	// supplies them — key65400 (cap, the capability locator from
+	// metadataUrl), key65401 (cap-sha256, the capability digest), and
+	// key65409 (well-known suffix derived from metadataUrl). These
+	// keyNNNNN forms are the RFC 9460 §14.3.1 Private Use presentation of
+	// the DNS-AID draft-02 cap/cap-sha256/bap/well-known params, which
+	// have no IANA code point; the adapter
+	// (internal/adapter/discovery/ans/dnsaid.go) documents why the named
+	// forms are unpublishable.
+	DiscoveryProfileANSDNSAID DiscoveryProfile = "ANS_DNSAID"
+
+	// DiscoveryProfileANSTXT emits the original `_ans` TXT shape — one row
+	// per protocol at `_ans.{fqdn}`. Supported indefinitely for
+	// operators with existing zone-edit tooling that targets `_ans.`.
+	// Includes an HTTPS RR at the bare FQDN since `_ans` TXT carries
+	// no connection hints.
+	DiscoveryProfileANSTXT DiscoveryProfile = "ANS_TXT"
 )
+
+// DefaultDiscoveryProfiles is the set applied when the registration
+// request omits discoveryProfiles entirely. Pinned to {ANS_TXT} — the
+// stable, widely-deployed family — while the DNS-AID profile is brought
+// to conformance; operators opt into ANS_DNSAID explicitly. This also
+// matches the V1 lane, which is always pinned to ANS_TXT. Returned as a
+// fresh slice so callers can mutate without affecting the canonical set.
+func DefaultDiscoveryProfiles() []DiscoveryProfile {
+	return []DiscoveryProfile{DiscoveryProfileANSTXT}
+}
+
+// IsValid reports whether s is one of the defined profiles. Empty
+// string is treated as invalid; callers normalize empty/missing
+// discoveryProfiles to DefaultDiscoveryProfiles() before validation.
+//
+// Coherence with the discovery registry is enforced at server start:
+// cmd/ans-ra/main.go asserts that every profile in
+// ValidDiscoveryProfiles() has a registered port.ProfileEmitter adapter
+// and vice versa. Drift fails server start, not the first verify-dns
+// call.
+func (s DiscoveryProfile) IsValid() bool {
+	switch s {
+	case DiscoveryProfileANSDNSAID, DiscoveryProfileANSTXT:
+		return true
+	}
+	return false
+}
+
+// ValidDiscoveryProfiles returns the canonical valid set as strings —
+// the single source of truth for enum membership. Used by error
+// messages and spec generation tooling so adding a third profile is a
+// one-place change rather than a shotgun edit.
+func ValidDiscoveryProfiles() []string {
+	return []string{
+		string(DiscoveryProfileANSDNSAID),
+		string(DiscoveryProfileANSTXT),
+	}
+}
 
 // DNSRecordType represents a DNS record type.
 type DNSRecordType string
@@ -12,6 +82,13 @@ const (
 	DNSRecordTXT   DNSRecordType = "TXT"
 	DNSRecordTLSA  DNSRecordType = "TLSA"
 	DNSRecordHTTPS DNSRecordType = "HTTPS"
+	// DNSRecordSVCB is the "Consolidated Approach" service binding
+	// record (RFC 9460) emitted at the agent's bare FQDN. One SVCB
+	// record per protocol carries that protocol's connection hints and
+	// capability locators in a single DNS lookup. SvcParams from
+	// sibling families coexist in the same record per RFC 9460 §8
+	// unknown-key ignore semantics.
+	DNSRecordSVCB DNSRecordType = "SVCB"
 )
 
 // DNSRecordPurpose describes why a DNS record is needed.
@@ -34,110 +111,34 @@ type ExpectedDNSRecord struct {
 	TTL      int              `json:"ttl"`
 }
 
-// ComputeRequiredDNSRecords generates the DNS records an operator must create
-// for a given agent registration. The RA does not create these records — the
-// operator manages their own DNS. The RA only verifies they exist.
+// TLSARecordForCert builds the single DANE-EE TLSA record binding a
+// server certificate fingerprint to the FQDN at the default TLS port
+// (`_443._tcp.{fqdn}`). It is the server-cert renewal path's analog of
+// the registration record set: the renewal status responses surface the
+// new leaf's record so the operator can update DNS after a rollover.
 //
-// tlPublicBaseURL is the externally-reachable Transparency Log URL used in
-// the _ans-badge record (e.g. "https://tl.example.org"). When non-empty the
-// badge url= field points to the TL badge endpoint for this agent; when
-// empty it falls back to the agent's own endpoint URL.
-func ComputeRequiredDNSRecords(reg *AgentRegistration, tlPublicBaseURL string) []ExpectedDNSRecord {
-	fqdn := reg.FQDN()
-	// Version is emitted as a bare semver string ("1.2.0"). The
-	// `v`-prefixed form only appears inside the ANS name's hostname
-	// label — TXT record payloads carry the machine-readable semver
-	// directly, matching the shape a client would parse with any
-	// semver library.
-	version := reg.AnsName.Version().String()
-	var records []ExpectedDNSRecord
-
-	// _ans TXT record for each protocol endpoint — agent discovery.
-	for _, ep := range reg.Endpoints {
-		value := fmt.Sprintf("v=ans1; version=%s; p=%s; mode=direct; url=%s",
-			version, protocolToANSValue(ep.Protocol), ep.AgentURL)
-		records = append(records, ExpectedDNSRecord{
-			Name:     fmt.Sprintf("_ans.%s", fqdn),
-			Type:     DNSRecordTXT,
-			Value:    value,
-			Purpose:  PurposeDiscovery,
-			Required: true,
-			TTL:      3600,
-		})
-	}
-
-	// _ans-badge TXT record — trust badge. Required alongside _ans:
-	// resolvers and badge-verifying clients expect to find both, and
-	// publishing _ans without _ans-badge would advertise an agent
-	// that fails the public discovery handshake.
-	if len(reg.Endpoints) > 0 {
-		badgeURL := reg.Endpoints[0].AgentURL
-		if tlPublicBaseURL != "" && reg.AgentID != "" {
-			// tlPublicBaseURL is validated at config load (https, no
-			// query/fragment/userinfo), so JoinPath cannot fail here.
-			badgeURL, _ = url.JoinPath(tlPublicBaseURL, "v1", "agents", reg.AgentID)
-		}
-		badgeValue := fmt.Sprintf("v=ans-badge1; version=%s; url=%s",
-			version, badgeURL)
-		records = append(records, ExpectedDNSRecord{
-			Name:     fmt.Sprintf("_ans-badge.%s", fqdn),
-			Type:     DNSRecordTXT,
-			Value:    badgeValue,
-			Purpose:  PurposeBadge,
-			Required: true,
-			TTL:      3600,
-		})
-	}
-
-	// TLSA record for certificate binding. Every registration has a
-	// server cert — either BYOC (operator-submitted) or CSR-signed
-	// (issued via the configured `ServerCertificateIssuer`). Both
-	// paths land through the same ByocServerCertificate struct, so
-	// `reg.ServerCert` is set for any registration that's reached
-	// verify-dns.
-	if reg.ServerCert == nil {
-		return records
-	}
-	records = append(records, TLSARecordForCert(fqdn, reg.ServerCert.Fingerprint))
-
-	return records
-}
-
-// TLSARecordForCert builds the DANE-EE TLSA record binding a server
-// certificate fingerprint to the FQDN. Shared between the
-// registration record set and the renewal status responses (the
-// operator updates this record after every renewal — it fingerprints
-// the new leaf).
+// The registration record set emits one TLSA per distinct TLS endpoint
+// port via the discovery profiles
+// (internal/adapter/discovery/ans.TLSARecord); this helper covers the
+// single-record renewal-status DTO, which carries the freshly-issued
+// leaf's fingerprint rather than reading reg.ServerCert.
 //
-// `3 1 1 <hex>` = DANE-EE + SubjectPublicKeyInfo + SHA-256
-// (RFC 6698). Required=false: operators whose zones aren't
-// DNSSEC-signed can't produce a trustworthy TLSA record, so the
-// RA doesn't block verify-dns on its presence. The verify layer
-// enforces a stricter rule at query time: when a TLSA response
-// IS DNSSEC-validated, its value must match the expected
-// fingerprint (otherwise an attacker rewrote the record in a
-// signed zone — the worst failure mode). That post-verify
-// check lives alongside the verifier, not in the record set.
+// `3 0 1 <hex>` = DANE-EE + full-certificate + SHA-256 (RFC 6698).
+// Selector 0 (full cert), not 1 (SPKI): the hex is the certificate
+// fingerprint — a SHA-256 over the full DER cert (internal/crypto/x509.go
+// CertificateFingerprint) — so selector 0 is what matches those bytes.
+//
+// Required=false: a TLSA record is only trustworthy in a DNSSEC-signed
+// zone, which the domain layer cannot know. The verify layer enforces
+// the stricter rule at query time: a DNSSEC-validated TLSA response MUST
+// match the expected fingerprint.
 func TLSARecordForCert(fqdn, fingerprint string) ExpectedDNSRecord {
 	return ExpectedDNSRecord{
 		Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
 		Type:     DNSRecordTLSA,
-		Value:    fmt.Sprintf("3 1 1 %s", fingerprint),
+		Value:    fmt.Sprintf("3 0 1 %s", fingerprint),
 		Purpose:  PurposeCertificateBinding,
 		Required: false,
 		TTL:      3600,
-	}
-}
-
-func protocolToANSValue(p Protocol) string {
-	switch p {
-	case ProtocolA2A:
-		return "a2a"
-	case ProtocolMCP:
-		return "mcp"
-	case ProtocolHTTPAPI:
-		return "http-api"
-	default:
-		return string(p)
 	}
 }

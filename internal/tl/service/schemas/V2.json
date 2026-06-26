@@ -119,6 +119,7 @@
           "description": "DNS record type",
           "enum": [
             "HTTPS",
+            "SVCB",
             "TLSA",
             "TXT"
           ],

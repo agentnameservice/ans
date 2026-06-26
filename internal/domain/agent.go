@@ -87,6 +87,14 @@ type AgentRegistration struct {
 	// registrations predating order persistence.
 	CertOrder CertificateOrder `json:"certOrder,omitzero"`
 
+	// DiscoveryProfiles is the set of DNS record families the RA emits
+	// for this registration. Each value names one family — typically
+	// {ANS_DNSAID} (Consolidated Approach), {ANS_TXT} (original `_ans`
+	// TXT shape), or the {ANS_DNSAID, ANS_TXT} transition union. Empty
+	// at the domain layer is treated as DefaultDiscoveryProfiles() by
+	// the service-layer record walker (internal/ra/service/dnsrecords.go).
+	DiscoveryProfiles []DiscoveryProfile `json:"discoveryProfiles,omitempty"`
+
 	// PendingEvents holds domain events raised during this aggregate operation.
 	// They are cleared after being published.
 	PendingEvents []Event `json:"-"`
