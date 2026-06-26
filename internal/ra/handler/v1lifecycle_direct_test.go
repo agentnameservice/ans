@@ -418,24 +418,42 @@ func TestV1SubmitServerCSR_BadJSON(t *testing.T) {
 	}
 }
 
-// fakeDNSVerifier always returns a single MISSING + a single
-// MISMATCH record. Used to drive the DNS-mismatch arm of
-// VerifyDNS in both V1 and V2 lanes.
+// Fixed record identities the fakeDNSVerifier reports, so the 422-bucket
+// assertions below can match by name without depending on what
+// ComputeRequiredDNSRecords produced for the test agent.
+const (
+	fakeMissingName  = "_missing.example.com"
+	fakeMismatchName = "_mismatch.example.com"
+	fakeMismatchLive = "wrong-value"
+)
+
+// fakeDNSVerifier deterministically reports exactly one MISSING and one
+// MISMATCH record regardless of the expected record set it is handed,
+// exercising both 422 buckets under the Fix C classification:
+//   - MISSING:  Found=false, Actual=""           (nothing answered)
+//   - MISMATCH: Found=false, Actual="wrong-value" (present but wrong;
+//     the live value rides through to incorrectRecords[].found)
+//
+// Ignoring the input records keeps the two buckets stable across agents
+// whose computed record counts differ between the V1 and V2 lanes.
 type fakeDNSVerifier struct{}
 
-func (fakeDNSVerifier) VerifyRecords(_ context.Context, _ string, recs []domain.ExpectedDNSRecord) (*port.VerificationResult, error) {
-	out := &port.VerificationResult{Results: make([]port.RecordVerification, 0, len(recs))}
-	for i, rec := range recs {
-		v := port.RecordVerification{Record: rec}
-		if i == 0 {
-			// first record reported as found mismatch
-			v.Found = false
-			v.Actual = "wrong-value"
-		}
-		out.Results = append(out.Results, v)
-	}
-	out.AllRequired = false
-	return out, nil
+func (fakeDNSVerifier) VerifyRecords(_ context.Context, _ string, _ []domain.ExpectedDNSRecord) (*port.VerificationResult, error) {
+	return &port.VerificationResult{
+		AllRequired: false,
+		Results: []port.RecordVerification{
+			{
+				Record: domain.ExpectedDNSRecord{Name: fakeMissingName, Type: domain.DNSRecordTXT, Value: "expected-missing", Required: true},
+				Found:  false,
+				Actual: "",
+			},
+			{
+				Record: domain.ExpectedDNSRecord{Name: fakeMismatchName, Type: domain.DNSRecordTXT, Value: "expected-mismatch", Required: true},
+				Found:  false,
+				Actual: fakeMismatchLive,
+			},
+		},
+	}, nil
 }
 
 // TestVerifyDNS_MismatchReturns422 covers the V2 VerifyDNS
@@ -459,6 +477,46 @@ func TestVerifyDNS_MismatchReturns422(t *testing.T) {
 		nil, fx.asOwner("alice"))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status: got %d want 422; body=%s", rec.Code, rec.Body)
+	}
+
+	// Fix C bucket membership: the MISSING record lands in missingRecords
+	// (by name only — no live value), the MISMATCH record lands in
+	// incorrectRecords carrying its live found value. V2 nests the
+	// incorrect record under .record.
+	var body struct {
+		MissingRecords []struct {
+			Name string `json:"name"`
+		} `json:"missingRecords"`
+		IncorrectRecords []struct {
+			Record struct {
+				Name string `json:"name"`
+			} `json:"record"`
+			Found string `json:"found"`
+		} `json:"incorrectRecords"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 422 body: %v; body=%s", err, rec.Body)
+	}
+	missingSeen := false
+	for _, m := range body.MissingRecords {
+		if m.Name == fakeMissingName {
+			missingSeen = true
+		}
+	}
+	if !missingSeen {
+		t.Errorf("missingRecords missing %q; body=%s", fakeMissingName, rec.Body)
+	}
+	mismatchSeen := false
+	for _, ir := range body.IncorrectRecords {
+		if ir.Record.Name == fakeMismatchName {
+			mismatchSeen = true
+			if ir.Found != fakeMismatchLive {
+				t.Errorf("incorrectRecords[%q].found: got %q want %q", fakeMismatchName, ir.Found, fakeMismatchLive)
+			}
+		}
+	}
+	if !mismatchSeen {
+		t.Errorf("incorrectRecords missing %q; body=%s", fakeMismatchName, rec.Body)
 	}
 }
 
@@ -710,6 +768,42 @@ func TestV1VerifyDNS_MismatchReturns422(t *testing.T) {
 		nil, fx.asOwner("alice"))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("status: got %d want 422; body=%s", rec.Code, rec.Body)
+	}
+
+	// Fix C bucket membership, V1 shape: missingRecords by name, and the
+	// flat incorrectRecords entry carrying name + found live value.
+	var body struct {
+		MissingRecords []struct {
+			Name string `json:"name"`
+		} `json:"missingRecords"`
+		IncorrectRecords []struct {
+			Name  string `json:"name"`
+			Found string `json:"found"`
+		} `json:"incorrectRecords"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("unmarshal 422 body: %v; body=%s", err, rec.Body)
+	}
+	missingSeen := false
+	for _, m := range body.MissingRecords {
+		if m.Name == fakeMissingName {
+			missingSeen = true
+		}
+	}
+	if !missingSeen {
+		t.Errorf("missingRecords missing %q; body=%s", fakeMissingName, rec.Body)
+	}
+	mismatchSeen := false
+	for _, ir := range body.IncorrectRecords {
+		if ir.Name == fakeMismatchName {
+			mismatchSeen = true
+			if ir.Found != fakeMismatchLive {
+				t.Errorf("incorrectRecords[%q].found: got %q want %q", fakeMismatchName, ir.Found, fakeMismatchLive)
+			}
+		}
+	}
+	if !mismatchSeen {
+		t.Errorf("incorrectRecords missing %q; body=%s", fakeMismatchName, rec.Body)
 	}
 }
 

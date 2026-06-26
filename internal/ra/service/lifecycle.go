@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
@@ -735,16 +736,47 @@ type VerifyDNSResult struct {
 	DNSMismatches []DNSMismatch // non-empty → handler emits 422
 }
 
+// DNS mismatch codes carried by DNSMismatch.Code. MISSING and MISMATCH
+// are exact codes; DNSSEC-authenticated tampering is reported per record
+// type as "<RECORD_TYPE>_DNSSEC_MISMATCH" (TLSA_DNSSEC_MISMATCH,
+// SVCB_DNSSEC_MISMATCH, HTTPS_DNSSEC_MISMATCH). Consumers classify with
+// the IsMissing / IsIncorrect predicates rather than matching raw strings,
+// so a new DNSSEC-bearing record type surfaces without editing every
+// consumer — the drift that previously dropped SVCB/HTTPS tampering from
+// the 422 body.
+const (
+	dnsCodeMissing       = "MISSING"
+	dnsCodeMismatch      = "MISMATCH"
+	dnssecMismatchSuffix = "_DNSSEC_MISMATCH"
+)
+
 // DNSMismatch names a missing or incorrect record encountered during
 // verification. Surface-level shape matches the V2 DnsVerificationError.
 type DNSMismatch struct {
 	Expected domain.ExpectedDNSRecord
 	Found    string // empty if the record was missing entirely
-	Code     string // "MISSING" | "MISMATCH"
+	// Code is "MISSING", "MISMATCH", or "<RECORD_TYPE>_DNSSEC_MISMATCH".
+	// Classify with IsMissing / IsIncorrect rather than comparing raw
+	// strings — the DNSSEC codes are generated per record type.
+	Code string
+}
+
+// IsMissing reports whether the expected record was absent from the zone.
+// These records belong in the 422 body's missingRecords array.
+func (m DNSMismatch) IsMissing() bool { return m.Code == dnsCodeMissing }
+
+// IsIncorrect reports whether the record was present but wrong: a plain
+// value mismatch (MISMATCH) or DNSSEC-authenticated tampering on a TLSA,
+// SVCB, or HTTPS record ("<RECORD_TYPE>_DNSSEC_MISMATCH"). Matching the
+// suffix rather than each type means a future DNSSEC-bearing record type
+// lands in incorrectRecords automatically. These records belong in the
+// 422 body's incorrectRecords array.
+func (m DNSMismatch) IsIncorrect() bool {
+	return m.Code == dnsCodeMismatch || strings.HasSuffix(m.Code, dnssecMismatchSuffix)
 }
 
 // VerifyDNS checks the operator's authoritative nameserver for the
-// required records (computed by domain.ComputeRequiredDNSRecords) and
+// required records (computed by s.ComputeRequiredDNSRecords) and
 // advances the registration to ACTIVE on success.
 //
 // On success, emits an AGENT_ACTIVE event whose attestations carry
@@ -799,13 +831,44 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		reg.ServerCert = byoc
 	}
 
-	expected := domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL)
+	expected := s.ComputeRequiredDNSRecords(reg)
 
 	mismatches, perRecord, err := s.verifyDNSRecords(ctx, reg.FQDN(), expected)
 	if err != nil {
+		// Systemic verifier failure (DNS unreachable, resolver error) —
+		// the caller sees a 500 with nothing in the body. WARN here so
+		// on-call can grep the agent and FQDN that wedged. agentID is in
+		// scope here but not inside verifyDNSRecords, so this is the one
+		// WARN site for the verifier error.
+		log.Warn().
+			Str("agentId", agentID).
+			Str("fqdn", reg.FQDN()).
+			Err(err).
+			Msg("dns verification failed with a systemic error")
 		return nil, fmt.Errorf("dns verify: %w", err)
 	}
 	if len(mismatches) > 0 {
+		// A 422 is an expected operator-side condition (their zone isn't
+		// published yet / is wrong), so INFO, not ERROR. Log names, types,
+		// and classification codes only — never the expected or live
+		// values — so on-call can distinguish "one bad operator zone" from
+		// "our emission regressed" without operators pasting 422 bodies.
+		recs := make([]struct {
+			Name string `json:"name"`
+			Type string `json:"type"`
+			Code string `json:"code"`
+		}, len(mismatches))
+		for i, m := range mismatches {
+			recs[i].Name = m.Expected.Name
+			recs[i].Type = string(m.Expected.Type)
+			recs[i].Code = m.Code
+		}
+		log.Info().
+			Str("agentId", agentID).
+			Str("fqdn", reg.FQDN()).
+			Int("mismatchCount", len(mismatches)).
+			Interface("mismatchRecords", recs).
+			Msg("verify-dns returning mismatches")
 		return &VerifyDNSResult{Registration: reg, Now: now, DNSMismatches: mismatches}, nil
 	}
 
@@ -898,27 +961,75 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 	}
 	var out []DNSMismatch
 	for _, r := range res.Results {
-		// DNSSEC-authenticated TLSA that doesn't match is a hard
-		// fail regardless of the Required flag. `r.Found` from the
-		// TLSA verifier is true only when the actual matched the
-		// expected value after case-insensitive hex normalization,
-		// so `DNSSECVerified && !Found` captures "response was
-		// signed, but its content disagreed with the cert we
-		// issued" — the exact attack we block.
-		if r.Record.Type == domain.DNSRecordTLSA && r.DNSSECVerified && !r.Found {
-			out = append(out, DNSMismatch{
-				Expected: r.Record, Found: r.Actual, Code: "TLSA_DNSSEC_MISMATCH",
-			})
-			continue
+		// DNSSEC-authenticated record whose live value disagrees with
+		// the expected one is a hard fail regardless of the Required
+		// flag. `r.Found` is true only when the actual matched after
+		// type-specific normalization, and `r.Actual != ""` means the
+		// signed zone returned a live record rather than NODATA. The
+		// three conditions together capture "the zone is signed AND a
+		// record is present AND its content disagreed with what we
+		// issued" — the exact attack we block (an attacker rewrote a
+		// record in a signed zone). Applies to TLSA (cert binding), SVCB
+		// (per-protocol service binding), and HTTPS (service binding).
+		//
+		// The `r.Actual != ""` gate matters: a record the operator
+		// never published returns authenticated NODATA on a signed zone
+		// (AD=true, Found=false, Actual=""). That is authentic ABSENCE,
+		// not tampering — there is no live value to have been rewritten
+		// — so it falls through to the Required check below and is
+		// treated as MISSING (required) or skipped (optional), matching
+		// the TXT branch and the unsigned-zone absence path. Without
+		// the gate, a DNSSEC operator who omits an optional record
+		// (e.g. the CNAME-at-apex HTTPS RR) would be stranded on a
+		// record the spec says they need not publish.
+		if r.DNSSECVerified && !r.Found && r.Actual != "" {
+			switch r.Record.Type {
+			case domain.DNSRecordTLSA, domain.DNSRecordSVCB, domain.DNSRecordHTTPS:
+				out = append(out, DNSMismatch{
+					Expected: r.Record, Found: r.Actual,
+					Code: string(r.Record.Type) + dnssecMismatchSuffix,
+				})
+				continue
+			case domain.DNSRecordTXT:
+				// TXT records (discovery, badge) carry no
+				// cryptographic commitment, so a DNSSEC-validated
+				// mismatch isn't a hard fail — fall through to the
+				// Required check below.
+			}
 		}
+		// Optional records that aren't a DNSSEC-validated tamper (handled
+		// above) are skipped: TLSA without DNSSEC, the HTTPS RR that
+		// CNAME-at-apex operators cannot publish (RFC 1034 §3.6.2), and
+		// union-mode SVCB rows the walker flipped Required=false during the
+		// §4.4.2 transition are all optional by design — blocking on them
+		// would 422 operators forever on records the design says they need
+		// not publish. The DNSSEC hard-fail above is the only path that
+		// bypasses Required; this keeps the documented two-condition
+		// blocking contract (Required miss/mismatch, or DNSSEC tamper).
 		if !r.Record.Required {
 			continue
 		}
+		// For Required records, partition by what DNS actually answered,
+		// using r.Found as the verdict (the verifier already applied
+		// type-specific matching: SVCB subset-match, TLSA case-insensitive
+		// hex, etc.). The two not-found cases split on r.Actual per the
+		// port.RecordVerification contract — empty Actual means nothing
+		// answered (truly absent), a non-empty Actual means the zone has a
+		// live record that didn't match:
+		//
+		//   !Found && Actual == ""  → MISSING (operator hasn't published it)
+		//   !Found && Actual != ""  → MISMATCH carrying the live value, so
+		//                             the 422 shows the operator what's
+		//                             actually in their zone vs expected
+		//   Found                   → OK; the verifier's match is the verdict.
+		//                             A benign Actual≠Value delta (coexistence
+		//                             extras on an SVCB subset match) is not a
+		//                             mismatch.
 		switch {
+		case !r.Found && r.Actual == "":
+			out = append(out, DNSMismatch{Expected: r.Record, Code: dnsCodeMissing})
 		case !r.Found:
-			out = append(out, DNSMismatch{Expected: r.Record, Code: "MISSING"})
-		case r.Found && r.Actual != r.Record.Value:
-			out = append(out, DNSMismatch{Expected: r.Record, Found: r.Actual, Code: "MISMATCH"})
+			out = append(out, DNSMismatch{Expected: r.Record, Found: r.Actual, Code: dnsCodeMismatch})
 		}
 	}
 	return out, res.Results, nil
@@ -948,8 +1059,8 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 	//
 	// DNSSECVerified carries forward from the per-record verification
 	// result (set true by the lookup verifier when a validating
-	// resolver marked the response with the AD bit). Only ever true
-	// for TLSA today — TXT and HTTPS records don't carry the flag.
+	// resolver marked the response with the AD bit). True on TLSA,
+	// SVCB, and HTTPS records; TXT records don't carry the flag.
 	dnssecByKey := make(map[string]bool, len(perRecord))
 	for _, r := range perRecord {
 		if r.DNSSECVerified {
@@ -1113,7 +1224,7 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return &RevokeResult{
 			Registration:       reg,
 			RevokedAt:          now,
-			DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
+			DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
 		}, nil
 	}
 
@@ -1200,7 +1311,7 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 	return &RevokeResult{
 		Registration:       reg,
 		RevokedAt:          now,
-		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
+		DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
 	}, nil
 }
 
@@ -1301,7 +1412,7 @@ func (s *RegistrationService) cancelPending(
 	return &RevokeResult{
 		Registration:       reg,
 		RevokedAt:          now,
-		DNSRecordsToRemove: domain.ComputeRequiredDNSRecords(reg, s.tlPublicBaseURL),
+		DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
 	}, nil
 }
 

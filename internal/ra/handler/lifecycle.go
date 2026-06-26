@@ -105,7 +105,7 @@ func (h *LifecycleHandler) Detail(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, err)
 		return
 	}
-	details := mapAgentDetails(res, r, h.svc.TLPublicBaseURL())
+	details := mapAgentDetails(res, r, h.svc)
 	if h.identities != nil {
 		linked, lerr := h.identities.LinkedIdentitiesForAgent(r.Context(), agentID)
 		if lerr != nil {
