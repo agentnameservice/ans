@@ -76,6 +76,15 @@ type RegisterRequest struct {
 	ServerCertificatePEM      string
 	ServerCertificateChainPEM string
 	SchemaVersion             string
+
+	// DiscoveryProfiles is the set of DNS record families the RA emits
+	// in dnsRecordsProvisioned and tells the operator to publish.
+	// Each element is one of domain.ValidDiscoveryProfiles(); typical
+	// values are {ANS_TXT} (default), {ANS_DNSAID}, or the
+	// {ANS_DNSAID, ANS_TXT} transition union. Empty/nil normalizes to
+	// domain.DefaultDiscoveryProfiles(); any invalid element surfaces
+	// as INVALID_DISCOVERY_PROFILE before the aggregate is created.
+	DiscoveryProfiles []domain.DiscoveryProfile
 }
 
 // RegisterResponse is returned to the HTTP handler after a successful
@@ -129,25 +138,23 @@ const registrationChallengeWindow = 24 * time.Hour
 // sqlx.Tx, cloud adapters can use TransactWriteItems-style atomic
 // batches.
 type RegistrationService struct {
-	agents      port.AgentStore
-	endpoints   port.EndpointStore
-	certs       port.CertificateStore
-	byoc        port.ByocCertificateStore
-	renewals    port.RenewalStore
-	validator   port.CertificateValidator
-	identityCA  port.IdentityCertificateAuthority
-	serverCA    port.ServerCertificateIssuer // optional; nil = CSR path rejected
-	bus         port.EventBus
-	outbox      OutboxEnqueuer
-	uow         port.UnitOfWork
-	dnsVerifier port.DNSVerifier
+	agents            port.AgentStore
+	endpoints         port.EndpointStore
+	certs             port.CertificateStore
+	byoc              port.ByocCertificateStore
+	renewals          port.RenewalStore
+	validator         port.CertificateValidator
+	identityCA        port.IdentityCertificateAuthority
+	serverCA          port.ServerCertificateIssuer // optional; nil = CSR path rejected
+	bus               port.EventBus
+	outbox            OutboxEnqueuer
+	uow               port.UnitOfWork
+	dnsVerifier       port.DNSVerifier
+	discoveryRegistry port.ProfileRegistry
 	// httpChallenge verifies HTTP-01 challenge artifacts. Optional —
 	// when nil, HTTP-01 challenges simply never verify and the gate
 	// relies on DNS-01. Production configs wire the default adapter.
 	httpChallenge port.HTTPChallengeVerifier
-	// tlPublicBaseURL is the externally-reachable Transparency Log URL
-	// used in _ans-badge DNS records (e.g. "https://tl.example.org").
-	tlPublicBaseURL string
 	// signer is the KeyManager + keyID + raID tuple used to sign
 	// outbox events. When nil, events are still persisted but without
 	// a signature — this is only valid for tests; production configs
@@ -166,6 +173,18 @@ type EventSigner struct {
 
 // NewRegistrationService constructs a RegistrationService. Dependencies
 // are injected per SOLID; tests substitute fakes.
+//
+// discoveryRegistry is required at construction and the constructor
+// panics on nil — a missing registry would silently emit zero
+// `dnsRecordsProvisioned[]` and accept any DNS state at verify-dns
+// (trust-root corruption masquerading as graceful degradation), so
+// fail-loud at construction is the only correct policy. Construction
+// runs at process start, never on a request path, so the no-panics-in-
+// request-paths rule (CLAUDE.md) is upheld. Production builds wire the
+// bundled ANS-family registry in cmd/ans-ra/main.go via
+// registry.New(ans.TXTProfile{}, ans.DNSAIDProfile{}); tests build the same
+// registry through service.NewDefaultProfileRegistry. There is no
+// optional builder.
 func NewRegistrationService(
 	agents port.AgentStore,
 	endpoints port.EndpointStore,
@@ -177,19 +196,24 @@ func NewRegistrationService(
 	bus port.EventBus,
 	outbox OutboxEnqueuer,
 	uow port.UnitOfWork,
+	discoveryRegistry port.ProfileRegistry,
 ) *RegistrationService {
+	if discoveryRegistry == nil {
+		panic("service.NewRegistrationService: discoveryRegistry is required (nil interface — wire registry.New(...) at construction)")
+	}
 	return &RegistrationService{
-		agents:     agents,
-		endpoints:  endpoints,
-		certs:      certs,
-		byoc:       byoc,
-		renewals:   renewals,
-		validator:  validator,
-		identityCA: identityCA,
-		bus:        bus,
-		outbox:     outbox,
-		uow:        uow,
-		clock:      time.Now,
+		agents:            agents,
+		endpoints:         endpoints,
+		certs:             certs,
+		byoc:              byoc,
+		renewals:          renewals,
+		validator:         validator,
+		identityCA:        identityCA,
+		bus:               bus,
+		outbox:            outbox,
+		uow:               uow,
+		discoveryRegistry: discoveryRegistry,
+		clock:             time.Now,
 	}
 }
 
@@ -228,19 +252,6 @@ func (s *RegistrationService) WithHTTPChallengeVerifier(v port.HTTPChallengeVeri
 func (s *RegistrationService) WithDNSVerifier(v port.DNSVerifier) *RegistrationService {
 	s.dnsVerifier = v
 	return s
-}
-
-// WithTLPublicBaseURL sets the externally-reachable Transparency Log
-// URL used in _ans-badge DNS TXT records. Without this, badge records
-// fall back to the agent's own endpoint URL.
-func (s *RegistrationService) WithTLPublicBaseURL(publicBaseURL string) *RegistrationService {
-	s.tlPublicBaseURL = publicBaseURL
-	return s
-}
-
-// TLPublicBaseURL returns the configured public TL base URL.
-func (s *RegistrationService) TLPublicBaseURL() string {
-	return s.tlPublicBaseURL
 }
 
 // RegisterAgent implements the V2 registration flow:
@@ -309,6 +320,10 @@ func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterReq
 	}
 	reg.ServerCSR = pendingServerCSR
 	reg.CertOrder = order
+
+	if err := applyDiscoveryProfiles(reg, req); err != nil {
+		return nil, err
+	}
 
 	// Persist the aggregate + CSR rows + BYOC cert (if any) atomically.
 	// Each Save participates in the same transaction via the scoped

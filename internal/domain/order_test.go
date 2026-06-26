@@ -178,7 +178,7 @@ func TestTLSARecordForCert(t *testing.T) {
 	rec := TLSARecordForCert("agent.example.com", "abc123")
 	assert.Equal(t, "_443._tcp.agent.example.com", rec.Name)
 	assert.Equal(t, DNSRecordTLSA, rec.Type)
-	assert.Equal(t, "3 1 1 abc123", rec.Value)
+	assert.Equal(t, "3 0 1 abc123", rec.Value)
 	assert.Equal(t, PurposeCertificateBinding, rec.Purpose)
 	assert.False(t, rec.Required)
 }
