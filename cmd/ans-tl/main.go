@@ -210,6 +210,10 @@ func run(cfgPath string) error {
 	r := chi.NewRouter()
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.RequestID)
+	// middleware.RealIP is deliberately NOT wired: chi 5.3 deprecates it
+	// as IP-spoofable (it trusts X-Forwarded-For / X-Real-IP regardless
+	// of whether a proxy set them), and nothing in this service reads
+	// RemoteAddr — no request logger, no rate limiter, no IP audit.
 	r.Use(middleware.Timeout(30 * time.Second))
 	r.Use(authProvider.Middleware())
 
@@ -279,9 +283,10 @@ func run(cfgPath string) error {
 	logger.Info().Str("addr", addr).Msg("listening")
 	// Hardened timeouts — see the matching block in cmd/ans-ra/main.go
 	// for the full rationale. WriteTimeout sits above the 30s chi
-	// handler timeout (line 213) so chi can write a clean 503 first;
-	// IdleTimeout caps keep-alive idle time; MaxHeaderBytes is the
-	// Go default written explicitly for audit visibility.
+	// middleware.Timeout wired on the router above so chi can write a
+	// clean 503 first; IdleTimeout caps keep-alive idle time;
+	// MaxHeaderBytes is the Go default written explicitly for audit
+	// visibility.
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           r,

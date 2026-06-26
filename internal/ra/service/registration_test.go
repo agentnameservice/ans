@@ -69,6 +69,7 @@ func TestRegistration_NoSigner(t *testing.T) {
 	svcNoSig := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
+		fx.discoveryReg,
 	).WithServerCertificateIssuer(fx.serverCA)
 
 	// Use a fresh ANS name + matching CSR + matching endpoints so
@@ -125,6 +126,7 @@ func TestRegistration_RollsBackOnPartialFailure(t *testing.T) {
 	svc := service.NewRegistrationService(
 		fx.agents, failingEndpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
+		fx.discoveryReg,
 	).WithServerCertificateIssuer(fx.serverCA)
 
 	if _, err := svc.RegisterAgent(context.Background(), fx.req); err == nil {
@@ -199,6 +201,7 @@ func TestRevoke_RollsBackOnOutboxFailure(t *testing.T) {
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, &failingOutbox{}, fx.uow,
+		fx.discoveryReg,
 	).WithServerCertificateIssuer(fx.serverCA)
 
 	if _, err := svc.Revoke(context.Background(), agentID, service.RevokeInput{
@@ -267,6 +270,7 @@ type regFixture struct {
 	identityCA   port.IdentityCertificateAuthority
 	serverCA     port.ServerCertificateIssuer
 	bus          port.EventBus
+	discoveryReg port.ProfileRegistry
 	signerPubPEM string
 }
 
@@ -322,8 +326,13 @@ func newRegFixture(t *testing.T) *regFixture {
 		t.Fatal(err)
 	}
 
+	discoveryReg, err := service.NewDefaultProfileRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	svc := service.NewRegistrationService(
-		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db,
+		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      "ra-signer",
@@ -353,6 +362,7 @@ func newRegFixture(t *testing.T) *regFixture {
 		identityCA:   identityCA,
 		serverCA:     serverCA,
 		bus:          bus,
+		discoveryReg: discoveryReg,
 		signerPubPEM: pubPEM,
 		req: service.RegisterRequest{
 			OwnerID:     "owner-1",

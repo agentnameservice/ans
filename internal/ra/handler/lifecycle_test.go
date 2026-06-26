@@ -852,8 +852,12 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		t.Fatal(err)
 	}
 
+	discoveryReg, err := service.NewDefaultProfileRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	svc := service.NewRegistrationService(
-		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db,
+		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      "ra-signer",

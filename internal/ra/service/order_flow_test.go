@@ -55,6 +55,7 @@ func TestVerifyDNS_TransientServerCertError_Aborts(t *testing.T) {
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
+		fx.discoveryReg,
 	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier())
 
 	// Register + verify-acme with the store healthy so the CSR-issued
@@ -161,6 +162,7 @@ func rebuildWithIssuer(fx *regFixture, issuer port.ServerCertificateIssuer, dnsV
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
+		fx.discoveryReg,
 	).WithServerCertificateIssuer(issuer)
 	if dnsV != nil {
 		svc = svc.WithDNSVerifier(dnsV)
@@ -647,18 +649,6 @@ func TestVerifyRenewalACME_VerifiedBYOC_Rejected(t *testing.T) {
 	mustErrCode(t, err, "RENEWAL_NOT_PENDING")
 }
 
-// TestWithTLPublicBaseURL is a builder smoke test — the badge URL
-// plumbing is asserted end-to-end elsewhere; this pins the accessor
-// pair.
-func TestWithTLPublicBaseURL(t *testing.T) {
-	t.Parallel()
-	fx := newRegFixture(t)
-	svc := rebuildWithIssuer(fx, fx.serverCA, nil, nil).WithTLPublicBaseURL("https://tl.example.org")
-	if svc.TLPublicBaseURL() != "https://tl.example.org" {
-		t.Fatalf("TLPublicBaseURL: %q", svc.TLPublicBaseURL())
-	}
-}
-
 // registerAndActivate drives a fresh registration through
 // register → verify-acme → verify-dns so renewal tests start from an
 // ACTIVE agent.
@@ -998,6 +988,7 @@ func TestGetServerCertRenewal_TransientServerCertError_Propagates(t *testing.T) 
 	svc := service.NewRegistrationService(
 		fx.agents, fx.endpoints, fx.certs, byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
+		fx.discoveryReg,
 	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier())
 
 	agentID := registerAndActivate(t, fx, svc)

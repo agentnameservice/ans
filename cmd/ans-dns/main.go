@@ -30,7 +30,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -373,7 +372,3 @@ func runClear(args []string) error {
 	fmt.Printf("cleared %d records for %s from %s\n", n, agentID, *zonePath)
 	return nil
 }
-
-// Ensure net package stays referenced so future edits that thread a
-// net.Listener / net.PacketConn through don't require chasing imports.
-var _ = net.InterfaceAddrs
