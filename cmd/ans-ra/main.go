@@ -502,15 +502,19 @@ func assertRegistryDomainCoherence(reg port.ProfileRegistry) error {
 	for _, s := range domain.ValidDiscoveryProfiles() {
 		domainIDs[s] = true
 	}
+	// Build the drift lists by iterating the source slices (not the
+	// maps) so the error output is deterministic — reproducible failures
+	// matter when this trips at server start. The maps above stay for the
+	// O(1) cross-membership tests.
 	var registryOnly, domainOnly []string
-	for id := range registryIDs {
-		if !domainIDs[id] {
-			registryOnly = append(registryOnly, id)
+	for _, id := range reg.IDs() {
+		if !domainIDs[string(id)] {
+			registryOnly = append(registryOnly, string(id))
 		}
 	}
-	for id := range domainIDs {
-		if !registryIDs[id] {
-			domainOnly = append(domainOnly, id)
+	for _, s := range domain.ValidDiscoveryProfiles() {
+		if !registryIDs[s] {
+			domainOnly = append(domainOnly, s)
 		}
 	}
 	if len(registryOnly) > 0 || len(domainOnly) > 0 {
