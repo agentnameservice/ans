@@ -961,17 +961,28 @@ func (s *RegistrationService) verifyDNSRecords(ctx context.Context, fqdn string,
 	}
 	var out []DNSMismatch
 	for _, r := range res.Results {
-		// DNSSEC-authenticated record whose committed value disagrees
-		// with the expected one is a hard fail regardless of the
-		// Required flag. `r.Found` is true only when the actual
-		// matched after type-specific normalization, so
-		// `DNSSECVerified && !Found` captures "response was signed,
-		// but its content disagreed with what we issued" — the exact
-		// attack we block (an attacker rewrote a record in a signed
-		// zone). Applies to TLSA (cert binding), SVCB (per-protocol
-		// service binding, including card-sha256 commitments), and
-		// HTTPS (service binding).
-		if r.DNSSECVerified && !r.Found {
+		// DNSSEC-authenticated record whose live value disagrees with
+		// the expected one is a hard fail regardless of the Required
+		// flag. `r.Found` is true only when the actual matched after
+		// type-specific normalization, and `r.Actual != ""` means the
+		// signed zone returned a live record rather than NODATA. The
+		// three conditions together capture "the zone is signed AND a
+		// record is present AND its content disagreed with what we
+		// issued" — the exact attack we block (an attacker rewrote a
+		// record in a signed zone). Applies to TLSA (cert binding), SVCB
+		// (per-protocol service binding), and HTTPS (service binding).
+		//
+		// The `r.Actual != ""` gate matters: a record the operator
+		// never published returns authenticated NODATA on a signed zone
+		// (AD=true, Found=false, Actual=""). That is authentic ABSENCE,
+		// not tampering — there is no live value to have been rewritten
+		// — so it falls through to the Required check below and is
+		// treated as MISSING (required) or skipped (optional), matching
+		// the TXT branch and the unsigned-zone absence path. Without
+		// the gate, a DNSSEC operator who omits an optional record
+		// (e.g. the CNAME-at-apex HTTPS RR) would be stranded on a
+		// record the spec says they need not publish.
+		if r.DNSSECVerified && !r.Found && r.Actual != "" {
 			switch r.Record.Type {
 			case domain.DNSRecordTLSA, domain.DNSRecordSVCB, domain.DNSRecordHTTPS:
 				out = append(out, DNSMismatch{

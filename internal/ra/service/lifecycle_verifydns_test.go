@@ -154,6 +154,43 @@ func TestVerifyDNSRecords_Classification(t *testing.T) {
 			},
 		},
 		{
+			// Authenticated ABSENCE is not tampering. A record the
+			// operator never published returns NODATA, which a validating
+			// resolver authenticates (AD=true) → (Found=false, Actual="",
+			// DNSSECVerified=true). The hard-fail arm must NOT fire when
+			// Actual is empty — there is no live value to have been
+			// rewritten. Optional SVCB/HTTPS rows absent from a signed
+			// zone (the CNAME-at-apex HTTPS RR, union-mode SVCB) fall
+			// through to the Required check and are skipped, exactly like
+			// the unsigned case. Pre-fix this coded <TYPE>_DNSSEC_MISMATCH
+			// and bypassed Required.
+			name: "dnssec_optional_absent_is_skipped_not_hardfail",
+			results: []port.RecordVerification{
+				{Record: rec(svcbName, domain.DNSRecordHTTPS, "1 . alpn=h2", false), Found: false, Actual: "", DNSSECVerified: true},
+				{Record: rec(svcbName, domain.DNSRecordSVCB, svcbVal, false), Found: false, Actual: "", DNSSECVerified: true},
+			},
+			want: nil,
+		},
+		{
+			// Authenticated absence of a REQUIRED record classifies as
+			// MISSING (the operator hasn't published it), not a DNSSEC
+			// tamper. Same verdict the TXT absence case and the
+			// unsigned-zone absence case get — the signed-zone NODATA just
+			// proves the absence is authentic.
+			name: "dnssec_required_absent_is_missing_not_dnssec_mismatch",
+			results: []port.RecordVerification{
+				{Record: rec("_443._tcp.agent.example.com", domain.DNSRecordTLSA, "3 0 1 ab", true), Found: false, Actual: "", DNSSECVerified: true},
+				{Record: rec(svcbName, domain.DNSRecordSVCB, svcbVal, true), Found: false, Actual: "", DNSSECVerified: true},
+			},
+			want: []struct {
+				code  string
+				found string
+			}{
+				{dnsCodeMissing, ""},
+				{dnsCodeMissing, ""},
+			},
+		},
+		{
 			// TXT carries no cryptographic commitment, so a
 			// DNSSEC-authenticated TXT mismatch is NOT a hard fail — it
 			// falls through to the standard classification. Here the TXT

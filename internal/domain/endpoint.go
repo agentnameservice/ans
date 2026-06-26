@@ -260,13 +260,29 @@ func validateMetadataURL(rawURL string) error {
 			fmt.Sprintf("metadataUrl exceeds maximum length of %d characters", maxMetadataURLLength),
 		)
 	}
-	if strings.ContainsAny(rawURL, " \t\r\n\f\v\"\\;") || hasNonPrintableASCII(rawURL) {
+	// The raw-string check guards the `cap` SvcParam (key65400), emitted
+	// verbatim from rawURL. The DNSAID well-known SvcParam (key65409) is
+	// instead derived from u.Path, which url.Parse has percent-DECODED —
+	// so `%20`→space and `%3B`→`;` clear a raw-only check, then split the
+	// SvcParam on the verifier's strings.Fields and strand the agent in
+	// PENDING_DNS. Both surfaces must be presentation-safe, so check the
+	// decoded path as well.
+	if containsSVCBUnsafe(rawURL) || containsSVCBUnsafe(u.Path) {
 		return NewValidationError(
 			"INVALID_ENDPOINT",
 			"metadataUrl must not contain whitespace, quotes, or other characters that require SVCB presentation escaping",
 		)
 	}
 	return nil
+}
+
+// containsSVCBUnsafe reports whether s carries any byte miekg/dns escapes
+// when rendering an SVCB SvcParam — whitespace, double quote, backslash,
+// semicolon, or a non-printable ASCII rune. Both the raw metadataUrl and
+// its percent-decoded path must clear it: the raw form feeds the `cap`
+// SvcParam, the decoded path feeds the well-known SvcParam.
+func containsSVCBUnsafe(s string) bool {
+	return strings.ContainsAny(s, " \t\r\n\f\v\"\\;") || hasNonPrintableASCII(s)
 }
 
 // hasNonPrintableASCII reports whether s contains any rune outside the

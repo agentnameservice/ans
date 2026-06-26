@@ -97,6 +97,26 @@ func TestAgentEndpoint_Validate(t *testing.T) {
 		assert.ErrorIs(t, e.Validate(), ErrValidation)
 	})
 
+	// Percent-encoded unsafe bytes clear the raw-string blocklist (the
+	// rawURL holds only `%` and hex digits — all printable, no literal
+	// space or semicolon) but url.Parse percent-DECODES them into u.Path,
+	// from which the DNSAID well-known SvcParam (key65409) suffix is
+	// derived. A decoded space (or `;`) splits the SvcParam on the
+	// verifier's strings.Fields and is unpublishable in any real zone,
+	// stranding the agent in PENDING_DNS. The decoded-path check rejects
+	// them at the registration boundary.
+	t.Run("reject metadata url with percent-encoded space", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/a%20b.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
+	t.Run("reject metadata url with percent-encoded semicolon", func(t *testing.T) {
+		e := valid
+		e.MetadataURL = "https://agent.example.com/.well-known/a%3Bb.json"
+		assert.ErrorIs(t, e.Validate(), ErrValidation)
+	})
+
 	t.Run("reject overlong metadata url", func(t *testing.T) {
 		e := valid
 		e.MetadataURL = "https://agent.example.com/.well-known/" + strings.Repeat("a", 2100) + ".json"
