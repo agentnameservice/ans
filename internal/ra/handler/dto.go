@@ -119,10 +119,10 @@ func mapLinkedIdentities(in []service.LinkedIdentitySummary) []linkedIdentityDTO
 	return out
 }
 
-func mapAgentDetails(res *service.DetailResult, r *http.Request, tlPublicBaseURL string) agentDetails {
+func mapAgentDetails(res *service.DetailResult, r *http.Request, svc *service.RegistrationService) agentDetails {
 	reg := res.Registration
 	// Stamp endpoints onto the aggregate so the pending-block builder's
-	// call to domain.ComputeRequiredDNSRecords produces the full record
+	// call to svc.ComputeRequiredDNSRecords produces the full record
 	// set (endpoints live in their own table and are returned as a
 	// sibling slice by the service layer).
 	reg.Endpoints = res.Endpoints
@@ -136,7 +136,7 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request, tlPublicBaseURL
 		AgentStatus:           string(reg.Status),
 		Endpoints:             mapEndpointsToDTO(res.Endpoints),
 		RegistrationTimestamp: reg.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
-		RegistrationPending:   buildRegistrationPendingBlock(reg, r, tlPublicBaseURL),
+		RegistrationPending:   buildRegistrationPendingBlock(reg, r, svc),
 		Links: []linkDTO{
 			{Rel: "self", Href: agentURL(r, reg.AgentID)},
 		},
@@ -157,7 +157,7 @@ func mapAgentDetails(res *service.DetailResult, r *http.Request, tlPublicBaseURL
 // certificate order the lifecycle stays PENDING_VALIDATION but the
 // flow reports PENDING_CERTS (per the spec's RegistrationPending
 // enum), with WAIT guidance pointing back at verify-acme.
-func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Request, tlPublicBaseURL string) *registrationPendingResponse {
+func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Request, svc *service.RegistrationService) *registrationPendingResponse {
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		base := schemeOf(r) + "://" + r.Host + "/v2/ans/agents/" + reg.AgentID
@@ -230,7 +230,7 @@ func buildRegistrationPendingBlock(reg *domain.AgentRegistration, r *http.Reques
 		}
 	case domain.StatusPendingDNS:
 		base := schemeOf(r) + "://" + r.Host + "/v2/ans/agents/" + reg.AgentID
-		expected := domain.ComputeRequiredDNSRecords(reg, tlPublicBaseURL)
+		expected := svc.ComputeRequiredDNSRecords(reg)
 		dnsRecords := make([]dnsRecordDTO, 0, len(expected))
 		for _, rec := range expected {
 			dnsRecords = append(dnsRecords, dnsRecordDTO{
@@ -554,7 +554,7 @@ type incorrectRecordDTO struct {
 func dnsMissingFrom(mismatches []service.DNSMismatch) []dnsRecordDTO {
 	var out []dnsRecordDTO
 	for _, m := range mismatches {
-		if m.Code != "MISSING" {
+		if !m.IsMissing() {
 			continue
 		}
 		out = append(out, dnsRecordDTO{
@@ -572,12 +572,12 @@ func dnsMissingFrom(mismatches []service.DNSMismatch) []dnsRecordDTO {
 func dnsIncorrectFrom(mismatches []service.DNSMismatch) []incorrectRecordDTO {
 	var out []incorrectRecordDTO
 	for _, m := range mismatches {
-		// MISMATCH = required record with wrong value.
-		// TLSA_DNSSEC_MISMATCH = TLSA response came back
-		// DNSSEC-authenticated but didn't match the expected cert
-		// fingerprint (signed-zone tampering). Both surface as
-		// incorrect records — same DTO shape.
-		if m.Code != "MISMATCH" && m.Code != "TLSA_DNSSEC_MISMATCH" {
+		// Incorrect = present but wrong: a plain value MISMATCH, or
+		// DNSSEC-authenticated tampering on a TLSA/SVCB/HTTPS record
+		// (<RECORD_TYPE>_DNSSEC_MISMATCH, signed-zone tampering). All
+		// surface here as incorrect records — same DTO shape; missing
+		// records go to dnsMissingFrom.
+		if !m.IsIncorrect() {
 			continue
 		}
 		out = append(out, incorrectRecordDTO{

@@ -47,6 +47,7 @@ type agentRow struct {
 	SupersedesRegistrationID sql.NullInt64  `db:"supersedes_registration_id"`
 	ACMEDNS01Token           sql.NullString `db:"acme_dns01_token"`
 	ACMEChallengeExpiresAtMs sql.NullInt64  `db:"acme_challenge_expires_at_ms"`
+	DiscoveryProfiles        sql.NullString `db:"discovery_profiles"`
 	CertOrderRef             sql.NullString `db:"cert_order_ref"`
 	CertOrderState           sql.NullString `db:"cert_order_state"`
 	CertOrderChallenges      sql.NullString `db:"cert_order_challenges"`
@@ -86,7 +87,56 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 		return nil, err
 	}
 	reg.CertOrder = order
+	if r.DiscoveryProfiles.Valid && r.DiscoveryProfiles.String != "" {
+		profiles, err := decodeDiscoveryProfiles(r.DiscoveryProfiles.String)
+		if err != nil {
+			return nil, fmt.Errorf("sqlite: decode discovery_profiles: %w", err)
+		}
+		reg.DiscoveryProfiles = profiles
+	}
 	return reg, nil
+}
+
+// decodeDiscoveryProfiles parses the JSON-array string stored in
+// agent_registrations.discovery_profiles into the typed domain slice.
+// Empty array unmarshals to a nil slice (the domain layer treats
+// empty as "use default") so post-load behavior matches a freshly
+// registered agent that didn't set the field.
+func decodeDiscoveryProfiles(raw string) ([]domain.DiscoveryProfile, error) {
+	var strs []string
+	if err := json.Unmarshal([]byte(raw), &strs); err != nil {
+		return nil, err
+	}
+	if len(strs) == 0 {
+		return nil, nil
+	}
+	out := make([]domain.DiscoveryProfile, len(strs))
+	for i, s := range strs {
+		out[i] = domain.DiscoveryProfile(s)
+	}
+	return out, nil
+}
+
+// encodeDiscoveryProfiles renders a typed profile slice as the canonical
+// JSON-array string the agent_registrations.discovery_profiles column
+// stores. nil/empty input renders empty string so nullableString()
+// stamps SQL NULL — domain treats NULL the same as the default set
+// per ComputeRequiredDNSRecords.
+func encodeDiscoveryProfiles(profiles []domain.DiscoveryProfile) string {
+	if len(profiles) == 0 {
+		return ""
+	}
+	strs := make([]string, len(profiles))
+	for i, s := range profiles {
+		strs[i] = string(s)
+	}
+	b, err := json.Marshal(strs)
+	if err != nil {
+		// Marshalling a []string never errors in practice; surface as
+		// empty so the column is NULL rather than corrupted JSON.
+		return ""
+	}
+	return string(b)
 }
 
 // certOrderFromRow decodes the certificate order from its columns,
@@ -174,8 +224,9 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 supersedes_registration_id,
                 cert_order_ref, cert_order_state, cert_order_challenges,
                 acme_challenge_expires_at_ms,
+                discovery_profiles,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
 			agent.AgentID,
 			agent.OwnerID,
@@ -190,6 +241,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 			nullableInt64(agent.SupersedesRegistrationID),
 			order.ref, order.state, order.challenges,
 			order.expiresMs,
+			nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 			now, now,
 		)
 		if err != nil {
@@ -214,6 +266,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
             cert_order_state = ?,
             cert_order_challenges = ?,
             acme_challenge_expires_at_ms = ?,
+            discovery_profiles = ?,
             updated_at_ms = ?
         WHERE id = ?`
 	_, err = s.db.extx(ctx).ExecContext(ctx, q,
@@ -224,6 +277,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 		nullableInt64(agent.SupersedesRegistrationID),
 		order.ref, order.state, order.challenges,
 		order.expiresMs,
+		nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 		now,
 		agent.ID,
 	)
