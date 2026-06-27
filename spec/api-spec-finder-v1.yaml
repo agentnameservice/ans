@@ -42,7 +42,7 @@ info:
     in `trustManifest` and verified out-of-band against the ANS TL.
 
     **Identifiers.** Each entry carries an ARD URN identifier
-    (`urn:ai:<publisher>:<namespace>:<agent-name>`, ARDS §4.2.1) whose
+    (`urn:air:<publisher>:<namespace>:<agent-name>`, ARDS §4.2.1) whose
     `<publisher>` segment is the agent's verified ANS host. The URN is a
     lineage handle: successive versions of the same logical agent share
     it. Per-registration uniqueness is carried in `metadata` (`ansName`,
@@ -575,14 +575,14 @@ components:
           type: string
           description: |
             Globally unique logical identifier in domain-anchored URN
-            format `urn:ai:<publisher>:<namespace>:<agent-name>`
+            format `urn:air:<publisher>:<namespace>:<agent-name>`
             (ARDS §4.2, §4.2.1). `<publisher>` is the agent's verified
             ANS host (FQDN), establishing the trust-authority anchor that
             MUST align with `trustManifest.identity`. The URN is a
             **lineage handle**: successive versions of one logical agent
             share it; per-registration uniqueness is carried in
             `metadata` (`ansName`, `logId`).
-          example: urn:ai:myagent.example.com:agents:sentiment-analyzer
+          example: urn:air:myagent.example.com:agents:sentiment-analyzer
         displayName:
           type: string
           description: |

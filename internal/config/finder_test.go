@@ -55,7 +55,7 @@ search:
   max-page-size: 50
   default-page-size: 5
 referrals:
-  - identifier: "urn:ai:other.example.org:agents:registry"
+  - identifier: "urn:air:other.example.org:agents:registry"
     display-name: "Other"
     type: "application/ai-registry+json"
     url: "https://other.example.org/v1/"

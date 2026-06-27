@@ -8,7 +8,7 @@
       "createdAt": "2025-01-08T12:30:00-08:00",
       "expiresAt": "2026-01-08T12:30:00-08:00",
       "entry": {
-        "identifier": "urn:ai:pacific.example.com:agents:Pacific-Time-Agent",
+        "identifier": "urn:air:pacific.example.com:agents:Pacific-Time-Agent",
         "displayName": "Pacific Time Agent",
         "type": "application/mcp-server-card+json",
         "url": "https://pacific.example.com/.well-known/mcp.json",

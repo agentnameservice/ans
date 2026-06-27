@@ -25,7 +25,7 @@ func newStore(t *testing.T) *sqlitefinder.Store {
 // activeEntry builds an Active ProjectedEntry for one (host, label,
 // type, url) with the given functions projected into capabilities/tags.
 func activeEntry(host, label, typ, url string, opts ...func(*project.ProjectedEntry)) project.ProjectedEntry {
-	urn := "urn:ai:" + host + ":agents:" + label
+	urn := "urn:air:" + host + ":agents:" + label
 	pe := project.ProjectedEntry{
 		Entry: project.Entry{
 			Identifier:  urn,
@@ -132,7 +132,7 @@ func TestApply_Search_RoundTrip(t *testing.T) {
 		t.Fatalf("got %d results, want 1", len(res.Results))
 	}
 	got := res.Results[0]
-	if got.Entry.Identifier != "urn:ai:a.example.com:agents:flight-booker" {
+	if got.Entry.Identifier != "urn:air:a.example.com:agents:flight-booker" {
 		t.Errorf("identifier: %q", got.Entry.Identifier)
 	}
 	if got.Entry.DisplayName != "Flight Booker" {

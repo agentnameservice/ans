@@ -208,7 +208,7 @@ refused, responses capped at 16 MiB with an explicit over-cap error.
   `project.FromEvent` before the lifecycle switch — binds `agentHost`
   to `ansName` via `domain.ParseAnsName` before anything else runs;
   the full contract `Validate` runs on the Active path. The ARD
-  identifier is a lineage handle: `urn:ai:{agentHost}:agents:{label}`
+  identifier is a lineage handle: `urn:air:{agentHost}:agents:{label}`
   — version successions share it by design; per-registration
   uniqueness rides the wrapper keys.
 - **Fan-out.** One entry per includable endpoint: `A2A →

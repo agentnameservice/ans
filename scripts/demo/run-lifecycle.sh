@@ -346,7 +346,7 @@ if curl -sSf "$FINDER_URL/v1/admin/ready" >/dev/null 2>&1; then
     # Pull the result whose identifier is rooted at this run's host.
     MATCH=$(printf '%s' "$resp" | \
       jq -c --arg host "$AGENT_HOST" \
-      'first(.results[]? | select(.identifier | startswith("urn:ai:" + $host + ":agents:")))' \
+      'first(.results[]? | select(.identifier | startswith("urn:air:" + $host + ":agents:")))' \
       2>/dev/null || true)
     if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
       printf '%s' "$resp" | pretty_json >&2

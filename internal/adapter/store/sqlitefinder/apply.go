@@ -436,11 +436,11 @@ func attestationTypes(e project.Entry) []string {
 }
 
 // publisherFromURN extracts the <publisher> segment from a Finder URN
-// (urn:ai:<publisher>:agents:<label>). It returns "" for any string that
+// (urn:air:<publisher>:agents:<label>). It returns "" for any string that
 // is not a Finder URN, which keeps a tombstone with no identifier (or a
 // malformed one) from acquiring a spurious publisher.
 func publisherFromURN(urn string) string {
-	const prefix = "urn:ai:"
+	const prefix = "urn:air:"
 	if !strings.HasPrefix(urn, prefix) {
 		return ""
 	}

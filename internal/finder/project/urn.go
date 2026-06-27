@@ -10,7 +10,7 @@ const urnNamespace = "agents"
 // mintURN builds the ARD discovery identifier for an Active entry
 // (ARDS §4.2.1):
 //
-//	urn:ai:<agentHost>:agents:<label>
+//	urn:air:<agentHost>:agents:<label>
 //
 // The URN is a LINEAGE HANDLE, not a per-registration key: successive
 // versions of the same logical agent (same host + same display name)
@@ -33,7 +33,7 @@ func mintURN(agentHost, sanitizedDisplayName string) (string, bool) {
 	if label == "" {
 		return "", false
 	}
-	return "urn:ai:" + strings.ToLower(agentHost) + ":" + urnNamespace + ":" + label, true
+	return "urn:air:" + strings.ToLower(agentHost) + ":" + urnNamespace + ":" + label, true
 }
 
 // labelize turns a sanitized display name into a URN terminal segment:
