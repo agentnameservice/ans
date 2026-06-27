@@ -54,7 +54,7 @@ func seed(t *testing.T, idx index.Catalog, entries ...project.ProjectedEntry) {
 func activeEntry(host, label, typ, url string, mut ...func(*project.ProjectedEntry)) project.ProjectedEntry {
 	pe := project.ProjectedEntry{
 		Entry: project.Entry{
-			Identifier:  "urn:ai:" + host + ":agents:" + label,
+			Identifier:  "urn:air:" + host + ":agents:" + label,
 			DisplayName: label,
 			Type:        typ,
 			URL:         url,
@@ -119,7 +119,7 @@ func TestSearch_OK(t *testing.T) {
 		t.Fatalf("results: %v", body["results"])
 	}
 	r0 := results[0].(map[string]any)
-	if r0["identifier"] != "urn:ai:a.example.com:agents:flight" {
+	if r0["identifier"] != "urn:air:a.example.com:agents:flight" {
 		t.Errorf("identifier: %v", r0["identifier"])
 	}
 	if r0["displayName"] != "Flight Booker" {
@@ -517,7 +517,7 @@ func TestExplore_RateLimited(t *testing.T) {
 func TestSearch_ReferralsMode(t *testing.T) {
 	t.Parallel()
 	referral := project.Entry{
-		Identifier:  "urn:ai:other.example.org:agents:registry",
+		Identifier:  "urn:air:other.example.org:agents:registry",
 		DisplayName: "Other Registry",
 		Type:        "application/ai-registry+json",
 		URL:         "https://other.example.org/v1/",

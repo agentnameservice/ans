@@ -706,7 +706,7 @@ func TestFromEvent_URNLineage(t *testing.T) {
 	if id1 == ido {
 		t.Errorf("distinct agents must have distinct URNs: %q == %q", id1, ido)
 	}
-	if want := "urn:ai:host.example.com:agents:Flight-Booker"; id1 != want {
+	if want := "urn:air:host.example.com:agents:Flight-Booker"; id1 != want {
 		t.Errorf("URN: got %q, want %q", id1, want)
 	}
 }

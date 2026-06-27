@@ -21,11 +21,11 @@ import (
 func TestSortEntries_IdentifierTieBreak(t *testing.T) {
 	t.Parallel()
 	entries := []ProjectedEntry{
-		{Entry: Entry{Identifier: "urn:ai:b.example.com:agents:z", Type: "t", URL: "u"}},
-		{Entry: Entry{Identifier: "urn:ai:a.example.com:agents:a", Type: "t", URL: "u"}},
+		{Entry: Entry{Identifier: "urn:air:b.example.com:agents:z", Type: "t", URL: "u"}},
+		{Entry: Entry{Identifier: "urn:air:a.example.com:agents:a", Type: "t", URL: "u"}},
 	}
 	sortEntries(entries)
-	if entries[0].Identifier != "urn:ai:a.example.com:agents:a" {
+	if entries[0].Identifier != "urn:air:a.example.com:agents:a" {
 		t.Fatalf("identifier sort: got %q first", entries[0].Identifier)
 	}
 }
