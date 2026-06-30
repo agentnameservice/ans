@@ -252,6 +252,206 @@ func TestLookupVerifier_HTTPSMatch(t *testing.T) {
 	}
 }
 
+// TestLookupVerifier_SVCB exercises the Consolidated Approach SVCB
+// verifier across match, missing, and shape-mismatch paths. The match
+// case tests the same presentation form the RA's profile emitters
+// produce (DNSAIDProfile in internal/adapter/discovery/ans/dnsaid.go,
+// composed by the service walker in internal/ra/service/dnsrecords.go).
+//
+// This is the DNS-AID keyNNNNN acceptance gate: the RA emits the draft
+// cap / cap-sha256 / bap / well-known params in RFC 9460 §14.3.1 Private
+// Use keyNNNNN form (key65400 / key65401 / key65402 / key65409) precisely
+// because the named forms are unparseable. These cases drive live keyNNNNN
+// records — including a cap value that is a full https URL — through the
+// in-process miekg/dns server (the same parser ans-dns and real resolvers
+// use) and prove formatHTTPSValue renders them byte-identically to what
+// parseSVCBValue expects, so the adapter's emitted value round-trips
+// through a real DNS answer without any verifier-side normalization.
+func TestLookupVerifier_SVCB(t *testing.T) {
+	tests := []struct {
+		name      string
+		zoneName  string // RR owner-name in zone fixture
+		zoneRR    string // full RR as miekg/dns zone-file syntax
+		queryName string // ExpectedDNSRecord.Name
+		want      string // ExpectedDNSRecord.Value
+		found     bool
+		why       string
+	}{
+		{
+			name:      "match",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     true,
+		},
+		{
+			name:      "missing-different-name-in-zone",
+			zoneName:  "other.example.com.",
+			zoneRR:    `other.example.com. 3600 IN SVCB 1 . alpn=a2a`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a`,
+			found:     false,
+			why:       "SVCB must not be Found when the zone has no matching record",
+		},
+		{
+			name:      "alias-mode-vs-service-mode-mismatch",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 0 host.provider.example.`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a`,
+			found:     false,
+			why:       "ServiceMode expectation should not match an AliasMode record",
+		},
+		{
+			// RFC 9460 §8 unknown-key ignore: a live record with extra
+			// SvcParams (e.g. another agentic spec adding its own keys to
+			// the same SVCB row) must still match when our committed
+			// SvcParams are present with equal values. A strict-equality
+			// matcher would fail this and — under DNSSEC AD=true — trip
+			// the SVCB_DNSSEC_MISMATCH hard fail.
+			name:      "extra-svcparams-tolerated-rfc9460-section-8",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 mandatory=alpn`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     true,
+			why:       "subset match: live record carries extra `mandatory` param, expected params still satisfied",
+		},
+		{
+			// Mirror of the tolerance case to pin the missing-required-
+			// param failure: if the live record drops one of our
+			// committed SvcParams, the match must fail even though it
+			// shares priority+target with the expected value.
+			name:      "missing-expected-param-fails-subset-match",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     false,
+			why:       "subset match requires every expected SvcParam present in the live record",
+		},
+		{
+			// DNS-AID keyNNNNN acceptance gate, exact match. A live record
+			// carrying the params the RA emits — cap (key65400, a full
+			// https URL), cap-sha256 (key65401), bap (key65402), and the
+			// well-known suffix (key65409) — parses through the miekg/dns
+			// zone fixture and matches the expected value verbatim. The
+			// named forms (`cap=`/`bap=`) would fail dns.NewRR here; that
+			// the keyNNNNN forms parse proves their publishability, and the
+			// cap URL surviving intact is the load-bearing assertion for the
+			// metadataUrl-as-cap change.
+			name:      "keyNNNNN-cap-url-digest-bap-wk-exact-match",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json key65401=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc key65402=a2a key65409=agent-card.json`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json key65401=CY1lDMbSgN7kwPR0iadc8Xub-7rlMFGAbU4IQQiy_yc key65402=a2a key65409=agent-card.json`,
+			found:     true,
+			why:       "live keyNNNNN record (incl. a cap URL) must round-trip byte-symmetrically and match the RA's emitted value",
+		},
+		{
+			// Coexistence (RFC 9460 §8): a live record carrying our cap
+			// (key65400) plus an extra SvcParam from a coexisting spec must
+			// still match — the subset matcher tolerates the extra param.
+			name:      "key65400-coexists-with-extra-svcparam",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json key65282=somethingelse`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json`,
+			found:     true,
+			why:       "subset match: live record carries an extra keyNNNNN param, expected params still satisfied",
+		},
+		{
+			// Collision: another experiment squats key65400 with a
+			// different value. The subset matcher requires equal values, so
+			// this is a clean not-found (false negative — denial of
+			// verification), never a false accept. This bounds the Private
+			// Use collision risk the dnsaid.go doc describes.
+			name:      "key65400-value-collision-is-clean-not-found",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443 key65400=https://someone-else.example/x.json`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json`,
+			found:     false,
+			why:       "a colliding key65400 with a different value must fail the value-equality check, not falsely match",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestServer(t)
+			s.add(tc.zoneName, "SVCB", tc.zoneRR)
+
+			recs := []domain.ExpectedDNSRecord{{
+				Name:     tc.queryName,
+				Type:     domain.DNSRecordSVCB,
+				Value:    tc.want,
+				Required: false,
+			}}
+			got := s.verifyAgainst(t, recs)
+			if got[0].found != tc.found {
+				if tc.why != "" {
+					t.Error(tc.why)
+				}
+				t.Errorf("found=%v want %v; got=%+v", got[0].found, tc.found, got[0])
+			}
+		})
+	}
+}
+
+// TestLookupVerifier_HTTPS_DNSSECFlagPropagates locks in that
+// verifyHTTPS surfaces the AD bit so a DNSSEC-validated mismatch in a
+// signed zone trips the lifecycle hard-fail rule (HTTPS_DNSSEC_MISMATCH)
+// the same way TLSA_DNSSEC_MISMATCH does. Without this propagation the
+// service layer would silently accept a rewritten HTTPS record.
+func TestLookupVerifier_HTTPS_DNSSECFlagPropagates(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t)
+	s.setAD(true)
+	s.add("agent.example.com.", "HTTPS",
+		`agent.example.com. 3600 IN HTTPS 1 . alpn="h2"`)
+
+	recs := []domain.ExpectedDNSRecord{{
+		Name: "agent.example.com", Type: domain.DNSRecordHTTPS,
+		Value:    `1 . alpn=h2`,
+		Required: false,
+	}}
+	got := s.verifyAgainst(t, recs)
+	if !got[0].found {
+		t.Errorf("HTTPS should match; got=%+v", got[0])
+	}
+	if !got[0].dnssec {
+		t.Error("DNSSECVerified must surface true for HTTPS when the response carried AD=1")
+	}
+}
+
+// TestLookupVerifier_SVCB_DNSSECFlagPropagates is the SVCB-side
+// counterpart to the HTTPS test above. SVCB rows carry per-protocol
+// service-binding parameters and the security-bearing capability
+// digest (the draft cap-sha256 param, key65401 on the wire) when the
+// endpoint has a MetadataHash, so the AD bit is load-bearing for the
+// lifecycle SVCB_DNSSEC_MISMATCH rule.
+func TestLookupVerifier_SVCB_DNSSECFlagPropagates(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t)
+	s.setAD(true)
+	s.add("agent.example.com.", "SVCB",
+		`agent.example.com. 3600 IN SVCB 1 . alpn=a2a port=443`)
+
+	recs := []domain.ExpectedDNSRecord{{
+		Name: "agent.example.com", Type: domain.DNSRecordSVCB,
+		Value:    `1 . alpn=a2a port=443`,
+		Required: false,
+	}}
+	got := s.verifyAgainst(t, recs)
+	if !got[0].found {
+		t.Errorf("SVCB should match; got=%+v", got[0])
+	}
+	if !got[0].dnssec {
+		t.Error("DNSSECVerified must surface true for SVCB when the response carried AD=1")
+	}
+}
+
 func TestLookupVerifier_NXDOMAINSurfacedAsError(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t)

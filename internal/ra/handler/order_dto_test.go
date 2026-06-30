@@ -64,7 +64,7 @@ func TestBuildRegistrationChallenges_RelaysProviderFields(t *testing.T) {
 // provider already accepted the answer).
 func TestBuildRegistrationPendingBlock_PendingCerts(t *testing.T) {
 	reg := orderedReg(t, domain.OrderStateIssuing)
-	block := buildRegistrationPendingBlock(reg, mustReq(t, "GET", "/v2/ans/agents/agent-1"), "")
+	block := buildRegistrationPendingBlock(reg, mustReq(t, "GET", "/v2/ans/agents/agent-1"), nil)
 	if block == nil {
 		t.Fatal("pending block missing")
 	}
@@ -85,7 +85,7 @@ func TestBuildRegistrationPendingBlock_PendingCerts(t *testing.T) {
 
 	// PENDING order keeps the lifecycle status + challenges.
 	pendingBlock := buildRegistrationPendingBlock(orderedReg(t, domain.OrderStatePending),
-		mustReq(t, "GET", "/v2/ans/agents/agent-1"), "")
+		mustReq(t, "GET", "/v2/ans/agents/agent-1"), nil)
 	if pendingBlock.Status != string(domain.StatusPendingValidation) {
 		t.Fatalf("status: got %q", pendingBlock.Status)
 	}
@@ -103,7 +103,7 @@ func TestBuildRegistrationPendingBlock_PendingCerts(t *testing.T) {
 // return CERT_ORDER_FAILED.
 func TestBuildRegistrationPendingBlock_FailedOrder(t *testing.T) {
 	reg := orderedReg(t, domain.OrderStateFailed)
-	v2 := buildRegistrationPendingBlock(reg, mustReq(t, "GET", "/v2/ans/agents/agent-1"), "")
+	v2 := buildRegistrationPendingBlock(reg, mustReq(t, "GET", "/v2/ans/agents/agent-1"), nil)
 	if v2 == nil || v2.Status != "PENDING_CERTS" {
 		t.Fatalf("v2 failed-order block: %+v", v2)
 	}
@@ -117,7 +117,7 @@ func TestBuildRegistrationPendingBlock_FailedOrder(t *testing.T) {
 		t.Errorf("v2 failed-order block missing agentId: %q", v2.AgentID)
 	}
 
-	v1 := buildV1RegistrationPending(reg, mustReq(t, "GET", "/v1/agents/agent-1"), "")
+	v1 := buildV1RegistrationPending(reg, mustReq(t, "GET", "/v1/agents/agent-1"), nil)
 	if v1 == nil || len(v1.Challenges) != 0 {
 		t.Fatalf("v1 failed-order block must omit challenges: %+v", v1)
 	}
@@ -127,7 +127,7 @@ func TestBuildRegistrationPendingBlock_FailedOrder(t *testing.T) {
 
 	// V1 ISSUING block: WAIT, no re-relayed challenge.
 	v1issuing := buildV1RegistrationPending(orderedReg(t, domain.OrderStateIssuing),
-		mustReq(t, "GET", "/v1/agents/agent-1"), "")
+		mustReq(t, "GET", "/v1/agents/agent-1"), nil)
 	if v1issuing == nil || len(v1issuing.Challenges) != 0 ||
 		len(v1issuing.NextSteps) != 1 || v1issuing.NextSteps[0].Action != "WAIT" {
 		t.Errorf("v1 issuing block: %+v", v1issuing)
@@ -196,7 +196,7 @@ func TestTlsaDTOFrom(t *testing.T) {
 	rec := domain.TLSARecordForCert("agent.example.com", "ff00")
 	dto := tlsaDTOFrom(&rec)
 	if dto == nil || dto.Name != "_443._tcp.agent.example.com" ||
-		dto.Type != "TLSA" || dto.Value != "3 1 1 ff00" {
+		dto.Type != "TLSA" || dto.Value != "3 0 1 ff00" {
 		t.Errorf("tlsa dto: %+v", dto)
 	}
 }

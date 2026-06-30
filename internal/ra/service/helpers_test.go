@@ -14,6 +14,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"strings"
 	"testing"
@@ -200,4 +201,191 @@ func selfSignedCertPEM(t *testing.T) string {
 		t.Fatal(err)
 	}
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}))
+}
+
+// ----- applyDiscoveryProfiles -----
+
+// TestApplyDiscoveryProfiles covers the V1-pin / V2-default /
+// V2-normalize branches. The server normalizes defensively: an explicit
+// empty array and field omission both fall back to the default set, and
+// duplicates are silently deduped (first occurrence wins). Only an
+// unrecognized value still surfaces as INVALID_DISCOVERY_PROFILE — it
+// names a family the RA can't emit, so it cannot be normalized away. The
+// integration tests follow happy paths through RegisterAgent and don't
+// reach the normalization/rejection branches directly.
+func TestApplyDiscoveryProfiles(t *testing.T) {
+	tests := []struct {
+		name         string
+		req          RegisterRequest
+		wantProfiles []domain.DiscoveryProfile
+		wantErrCode  string
+	}{
+		{
+			name: "v1_pins_to_ans_txt_ignoring_request_field",
+			req: RegisterRequest{
+				SchemaVersion:     "V1",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
+			},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
+		},
+		{
+			name:         "v2_nil_normalizes_to_default",
+			req:          RegisterRequest{SchemaVersion: "V2"},
+			wantProfiles: domain.DefaultDiscoveryProfiles(),
+		},
+		{
+			// minItems: 1 is the canonical client contract, but the
+			// server normalizes an explicit empty array to the default
+			// set rather than rejecting it — same outcome as omission.
+			name:         "v2_explicit_empty_slice_normalizes_to_default",
+			req:          RegisterRequest{SchemaVersion: "V2", DiscoveryProfiles: []domain.DiscoveryProfile{}},
+			wantProfiles: domain.DefaultDiscoveryProfiles(),
+		},
+		{
+			name:         "unset_schema_treated_as_v2_default",
+			req:          RegisterRequest{},
+			wantProfiles: domain.DefaultDiscoveryProfiles(),
+		},
+		{
+			name: "v2_valid_ans_svcb_only",
+			req: RegisterRequest{
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
+			},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSDNSAID},
+		},
+		{
+			name: "v2_valid_ans_txt_only",
+			req: RegisterRequest{
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
+			},
+			wantProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT},
+		},
+		{
+			name: "v2_valid_union_preserves_order",
+			req: RegisterRequest{
+				SchemaVersion: "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{
+					domain.DiscoveryProfileANSDNSAID,
+					domain.DiscoveryProfileANSTXT,
+				},
+			},
+			wantProfiles: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSDNSAID,
+				domain.DiscoveryProfileANSTXT,
+			},
+		},
+		{
+			// uniqueItems: true is the canonical client contract, but the
+			// server normalizes duplicates by deduping (first occurrence
+			// wins) rather than rejecting. A duplicate carries no extra
+			// meaning, so the persisted set drops the repeat and keeps
+			// the original order of first appearances.
+			name: "v2_duplicate_elements_deduped_first_wins",
+			req: RegisterRequest{
+				SchemaVersion: "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{
+					domain.DiscoveryProfileANSDNSAID,
+					domain.DiscoveryProfileANSDNSAID,
+					domain.DiscoveryProfileANSTXT,
+				},
+			},
+			wantProfiles: []domain.DiscoveryProfile{
+				domain.DiscoveryProfileANSDNSAID,
+				domain.DiscoveryProfileANSTXT,
+			},
+		},
+		{
+			name: "v2_invalid_element_rejected",
+			req: RegisterRequest{
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage")},
+			},
+			wantErrCode: "INVALID_DISCOVERY_PROFILE",
+		},
+		{
+			// CONSTANT_CASE is the wire form. lowercase is rejected so the
+			// V2 enum stays consistent with every other enum on the spec.
+			name: "v2_lowercase_element_rejected_as_invalid",
+			req: RegisterRequest{
+				SchemaVersion:     "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfile("ans_svcb")},
+			},
+			wantErrCode: "INVALID_DISCOVERY_PROFILE",
+		},
+		{
+			// First valid, second invalid — error surfaces at the
+			// invalid element, no partial state stamped on the aggregate.
+			name: "v2_mixed_valid_then_invalid_rejected",
+			req: RegisterRequest{
+				SchemaVersion: "V2",
+				DiscoveryProfiles: []domain.DiscoveryProfile{
+					domain.DiscoveryProfileANSDNSAID,
+					domain.DiscoveryProfile("garbage"),
+				},
+			},
+			wantErrCode: "INVALID_DISCOVERY_PROFILE",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			reg := &domain.AgentRegistration{}
+			err := applyDiscoveryProfiles(reg, tc.req)
+			if tc.wantErrCode != "" {
+				if err == nil {
+					t.Fatalf("want error code %q, got nil", tc.wantErrCode)
+				}
+				var verr *domain.Error
+				if !errors.As(err, &verr) {
+					t.Fatalf("want *domain.Error, got %T: %v", err, err)
+				}
+				if verr.Code != tc.wantErrCode {
+					t.Errorf("code: got %q want %q", verr.Code, tc.wantErrCode)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if !sameProfiles(reg.DiscoveryProfiles, tc.wantProfiles) {
+				t.Errorf("DiscoveryProfiles: got %v want %v", reg.DiscoveryProfiles, tc.wantProfiles)
+			}
+		})
+	}
+}
+
+// TestApplyDiscoveryProfiles_ErrorMessageListsValidValues confirms the
+// error detail enumerates the canonical valid set so SDK authors get
+// an actionable message. Sourced from domain.ValidDiscoveryProfiles().
+func TestApplyDiscoveryProfiles_ErrorMessageListsValidValues(t *testing.T) {
+	reg := &domain.AgentRegistration{}
+	err := applyDiscoveryProfiles(reg, RegisterRequest{
+		SchemaVersion:     "V2",
+		DiscoveryProfiles: []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage")},
+	})
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	for _, want := range domain.ValidDiscoveryProfiles() {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error message must list %q; got %q", want, err.Error())
+		}
+	}
+}
+
+// sameProfiles compares two profile slices for set-equal-with-order.
+// Used by TestApplyDiscoveryProfiles to assert ordering on the happy
+// paths without pulling in reflect.DeepEqual semantics that
+// distinguish nil from empty.
+func sameProfiles(a, b []domain.DiscoveryProfile) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

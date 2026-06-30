@@ -8,10 +8,76 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/godaddy/ans/internal/domain"
 )
+
+// applyDiscoveryProfiles resolves the set of DNS record families the
+// registration emits and stores it on the aggregate, normalizing the
+// V2 request's discoveryProfiles field defensively at the API boundary.
+//
+// V1 lane is pinned to {ANS_TXT} regardless of the request: V1
+// callers predate the Consolidated Approach and their tooling expects
+// the original `_ans` TXT shape. V1 has no discoveryProfiles field on
+// the wire, so this branch is the only path V1 registrations take.
+//
+// V2 normalization:
+//   - Field absent (nil slice) → defaults to DefaultDiscoveryProfiles()
+//     ({ANS_TXT}). The spec doesn't list discoveryProfiles in
+//     `required`, so omission is legal and the server picks the stable
+//     ANS_TXT default; operators opt into ANS_DNSAID explicitly.
+//   - Field present but empty (`"discoveryProfiles": []`) → also
+//     normalizes to DefaultDiscoveryProfiles(), same as omission. The
+//     spec's `minItems: 1` is the canonical client contract; the server
+//     does not reject a client that sends an empty array anyway.
+//   - Duplicate elements → silently deduped, first occurrence wins. The
+//     spec's `uniqueItems: true` is the canonical client contract; a
+//     duplicate carries no extra meaning, so we normalize rather than
+//     reject.
+//   - Invalid element (not in ValidDiscoveryProfiles()) → 422
+//     INVALID_DISCOVERY_PROFILE. An unrecognized value can't be
+//     normalized away — it names a family the RA can't emit, so the
+//     caller must fix it.
+//
+// The handler-side conversion (toDomainDiscoveryProfiles) preserves
+// the nil-vs-empty distinction, but both nil and empty normalize to the
+// default here so the distinction no longer changes the outcome.
+//
+// V1 detection routes through isV1Lane (lifecycle.go) so a future
+// schema-version evolution updates one site, not several. The error
+// message references ValidDiscoveryProfiles() so adding a third profile
+// is a one-place change.
+func applyDiscoveryProfiles(reg *domain.AgentRegistration, req RegisterRequest) error {
+	if isV1Lane(req.SchemaVersion) {
+		reg.DiscoveryProfiles = []domain.DiscoveryProfile{domain.DiscoveryProfileANSTXT}
+		return nil
+	}
+	if len(req.DiscoveryProfiles) == 0 {
+		reg.DiscoveryProfiles = domain.DefaultDiscoveryProfiles()
+		return nil
+	}
+	seen := make(map[domain.DiscoveryProfile]struct{}, len(req.DiscoveryProfiles))
+	out := make([]domain.DiscoveryProfile, 0, len(req.DiscoveryProfiles))
+	for _, s := range req.DiscoveryProfiles {
+		if !s.IsValid() {
+			return domain.NewValidationError(
+				"INVALID_DISCOVERY_PROFILE",
+				fmt.Sprintf("discoveryProfiles element %q is not one of %s",
+					string(s),
+					strings.Join(domain.ValidDiscoveryProfiles(), ", ")),
+			)
+		}
+		if _, dup := seen[s]; dup {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	reg.DiscoveryProfiles = out
+	return nil
+}
 
 // loadServerCert returns the agent's latest valid server certificate,
 // or (nil, nil) when none is on file. A genuinely-absent cert

@@ -77,10 +77,15 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	discoveryReg, err := service.NewDefaultProfileRegistry("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	regSvc := service.NewRegistrationService(
 		agents, endpoints, certsStore, byoc, renewals,
 		cert.NewX509Validator(cert.WithSkipChainVerify()),
 		identityCA, eventbus.NewInMemoryBus(zerolog.Nop()), outbox, db,
+		discoveryReg,
 	).WithServerCertificateIssuer(serverCA)
 
 	idSvc := service.NewIdentityService(
