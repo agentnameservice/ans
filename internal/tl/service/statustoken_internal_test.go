@@ -8,10 +8,33 @@ package service
 // drillAttestations defensive guards.
 
 import (
+	"encoding/json"
 	"testing"
 
 	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
+	v1event "github.com/godaddy/ans/internal/tl/event/v1"
 )
+
+// envelopeJSON wraps an `attestations` payload in the minimum
+// envelope shell `buildStatusClaims` drills through
+// (`payload.producer.event.attestations`). Tests pass a typed
+// attestations struct or a `map[string]any` for shape-mixing cases.
+func envelopeJSON(t *testing.T, attestations any) string {
+	t.Helper()
+	raw, err := json.Marshal(map[string]any{
+		"payload": map[string]any{
+			"producer": map[string]any{
+				"event": map[string]any{
+					"attestations": attestations,
+				},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal envelope: %v", err)
+	}
+	return string(raw)
+}
 
 // ----- deriveAgentStatus -----
 //
@@ -244,5 +267,73 @@ func TestBuildStatusClaims_MissingAttestationsStillSucceeds(t *testing.T) {
 	}
 	if got.ValidIdentityCerts != nil {
 		t.Errorf("ValidIdentityCerts should be nil; got %v", got.ValidIdentityCerts)
+	}
+}
+
+// TestBuildStatusClaims_V1SchemaCertArrays pins the V1-envelope path:
+// the rotation arrays `validIdentityCerts[]` / `validServerCerts[]`
+// must populate claims when the V2 unified keys are absent. Regression
+// guard for the bug where V1 events (e.g., agents on the V1 RA lane)
+// produced status tokens with empty cert lists despite the envelope
+// carrying attested certs.
+//
+// Attestations is built from the typed `v1event.Attestations` struct
+// so a future rename of the `validIdentityCerts` JSON tag would break
+// this test at compile-or-marshal time rather than silently passing.
+func TestBuildStatusClaims_V1SchemaCertArrays(t *testing.T) {
+	attest := &v1event.Attestations{
+		ValidIdentityCerts: []v1event.CertificateInfoExtended{
+			{Fingerprint: "SHA256:id1", CertType: "X509-OV-CLIENT"},
+		},
+		ValidServerCerts: []v1event.CertificateInfoExtended{
+			{Fingerprint: "SHA256:srv1", CertType: "X509-DV-SERVER"},
+		},
+	}
+	rec := &sqlitetl.EventRecord{
+		AgentID:  "a-v1",
+		AnsName:  "ans://v1.0.0.v1.example.com",
+		RawEvent: envelopeJSON(t, attest),
+	}
+	got, err := buildStatusClaims(rec, "ACTIVE")
+	if err != nil {
+		t.Fatalf("buildStatusClaims: %v", err)
+	}
+	if len(got.ValidIdentityCerts) != 1 || got.ValidIdentityCerts[0].Fingerprint != "SHA256:id1" {
+		t.Errorf("V1 validIdentityCerts not extracted: %+v", got.ValidIdentityCerts)
+	}
+	if len(got.ValidServerCerts) != 1 || got.ValidServerCerts[0].Fingerprint != "SHA256:srv1" {
+		t.Errorf("V1 validServerCerts not extracted: %+v", got.ValidServerCerts)
+	}
+}
+
+// TestBuildStatusClaims_V2KeysWinOverV1 covers the precedence rule:
+// if both V2 (`identityCerts`) and V1 (`validIdentityCerts`) keys are
+// present on the same envelope (shouldn't happen in practice, but the
+// extractor must be deterministic), the V2 key wins.
+//
+// No typed Attestations struct can carry both schemas at once, so the
+// shape-mixing happens in a `map[string]any`. The cert entries
+// themselves use the typed `v1event.CertificateInfoExtended` struct so
+// the on-wire JSON tags ride through unchanged.
+func TestBuildStatusClaims_V2KeysWinOverV1(t *testing.T) {
+	attest := map[string]any{
+		"identityCerts": []v1event.CertificateInfoExtended{
+			{Fingerprint: "SHA256:v2", CertType: "X509-OV-CLIENT"},
+		},
+		"validIdentityCerts": []v1event.CertificateInfoExtended{
+			{Fingerprint: "SHA256:v1", CertType: "X509-OV-CLIENT"},
+		},
+	}
+	rec := &sqlitetl.EventRecord{
+		AgentID:  "a-mix",
+		AnsName:  "ans://v1.0.0.mix.example.com",
+		RawEvent: envelopeJSON(t, attest),
+	}
+	got, err := buildStatusClaims(rec, "ACTIVE")
+	if err != nil {
+		t.Fatalf("buildStatusClaims: %v", err)
+	}
+	if len(got.ValidIdentityCerts) != 1 || got.ValidIdentityCerts[0].Fingerprint != "SHA256:v2" {
+		t.Errorf("V2 key should win; got %+v", got.ValidIdentityCerts)
 	}
 }
