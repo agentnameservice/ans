@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.1.7](https://github.com/agentnameservice/ans/compare/v0.1.6...v0.1.7) (2026-07-01)
+
+
+### Bug Fixes
+
+* **tl:** read V1 cert-attestation arrays in status-token builder ([#54](https://github.com/agentnameservice/ans/issues/54)) ([974ca94](https://github.com/agentnameservice/ans/commit/974ca9470dcf6e239250ea6c43cd44970c03c53d))
+
 ## [0.1.6](https://github.com/agentnameservice/ans/compare/v0.1.5...v0.1.6) (2026-06-26)
 
 
