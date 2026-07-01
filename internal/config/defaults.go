@@ -27,6 +27,7 @@ func defaultRAConfig() *RAConfig {
 			LinkRateLimit:     60,
 			SealTimeout:       5 * time.Second,
 		},
+		VLEI: VLEI{Type: "noop"},
 		Keys: Keys{
 			Type: "file",
 			File: &KeysFile{Path: "./data/ra/keys"},

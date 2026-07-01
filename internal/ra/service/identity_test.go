@@ -26,6 +26,7 @@ import (
 
 	"github.com/godaddy/ans/internal/adapter/didresolver"
 	"github.com/godaddy/ans/internal/adapter/keymanager"
+	"github.com/godaddy/ans/internal/adapter/leiverifier"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -105,8 +106,15 @@ type fakeClock struct{ now time.Time }
 func (c *fakeClock) Now() time.Time { return c.now }
 
 // newIdentityFixture wires the service against real SQLite + the
-// given resolver (nil → noop).
+// given resolver (nil → noop), with the noop lei verifier.
 func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixture {
+	return newIdentityFixtureWithLEI(t, resolver, leiverifier.NewNoop())
+}
+
+// newIdentityFixtureWithLEI is newIdentityFixture with an injectable lei
+// control verifier — the lei lane tests drive a programmable fake to
+// reach every failure code deterministically.
+func newIdentityFixtureWithLEI(t *testing.T, resolver port.DIDResolver, lei port.LEIControlVerifier) *identityFixture {
 	t.Helper()
 	db, err := sqlite.Open(context.Background(), ":memory:")
 	if err != nil {
@@ -137,6 +145,7 @@ func newIdentityFixture(t *testing.T, resolver port.DIDResolver) *identityFixtur
 		sqlite.NewAgentStore(db),
 		resolver,
 		sealer,
+		lei,
 		db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
@@ -325,10 +334,11 @@ func TestIdentityRegister_Rejections(t *testing.T) {
 		!strings.Contains(err.Error(), "IDENTIFIER_KIND_UNSUPPORTED") {
 		t.Errorf("bogus value: %v", err)
 	}
-	// lei is recognized but postponed.
+	// lei is now enabled: a register with no presentation fails on the
+	// missing CESR, not on the kind being unsupported.
 	if _, err := fx.svc.Register(ctx, fx.providerID, "5493001KJTIIGC8Y1R17"); err == nil ||
-		!strings.Contains(err.Error(), "IDENTIFIER_KIND_UNSUPPORTED") {
-		t.Errorf("lei: %v", err)
+		!strings.Contains(err.Error(), "IDENTIFIER_PRESENTATION_REQUIRED") {
+		t.Errorf("lei without presentation: %v", err)
 	}
 }
 
@@ -498,6 +508,39 @@ func TestIdentityVerifyControl_FailClosed(t *testing.T) {
 	_, err = fx.svc.VerifyControl(ctx, fx.providerID, id, service.ProofSubmission{SignedProofs: []string{good}})
 	if err == nil || !strings.Contains(err.Error(), "PRICC_TOKEN_ALREADY_USED") {
 		t.Fatalf("replay: %v", err)
+	}
+}
+
+// TestIdentityVerifyControl_BothProofFamilies covers the wire oneOf
+// contract: a body that sets BOTH signedProofs and cesrSignature is
+// rejected, not silently accepted on the JWS member alone. The
+// neither-set case is covered by the "no proofs" row in FailClosed.
+func TestIdentityVerifyControl_BothProofFamilies(t *testing.T) {
+	t.Parallel()
+	fx := newIdentityFixture(t, nil)
+	ctx := context.Background()
+
+	res, err := fx.svc.Register(ctx, fx.providerID, "did:web:a.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := res.Identity.IdentityID
+	did := res.Identity.Value
+	good := signProof(t, genKey(t), did+"#key-1", res.Challenges[0].SigningInput, true)
+
+	_, err = fx.svc.VerifyControl(ctx, fx.providerID, id, service.ProofSubmission{
+		SignedProofs:  []string{good},
+		CESRSignature: "0Bcesr-signature-bytes",
+	})
+	if err == nil || !strings.Contains(err.Error(), "IDENTIFIER_PROOF_INVALID") {
+		t.Fatalf("want IDENTIFIER_PROOF_INVALID, got %v", err)
+	}
+
+	// The rejected attempt must not consume the nonce — the clean
+	// single-family proof still lands afterward.
+	if _, err := fx.svc.VerifyControl(ctx, fx.providerID, id,
+		service.ProofSubmission{SignedProofs: []string{good}}); err != nil {
+		t.Fatalf("clean proof after both-families rejection: %v", err)
 	}
 }
 
@@ -1422,6 +1465,7 @@ func TestNilSealerFailsClosed(t *testing.T) {
 		sqlite.NewAgentStore(db),
 		didresolver.NewNoopResolver(),
 		nil, // no sealer
+		leiverifier.NewNoop(),
 		db,
 	)
 	ctx := context.Background()
@@ -1519,6 +1563,7 @@ func TestReleaseClaim_LeakedClaimIsLoggedNotSwallowed(t *testing.T) {
 		sqlite.NewAgentStore(db),
 		didresolver.NewNoopResolver(),
 		sealer,
+		leiverifier.NewNoop(),
 		db,
 	).WithSigner(service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"}).
 		WithClock(clock.Now).WithLogger(zerolog.New(io.Discard))

@@ -31,6 +31,15 @@ func NewIdentityHandler(svc *service.IdentityService) *IdentityHandler {
 // — never caller-asserted.
 type identityRegisterRequest struct {
 	Value string `json:"value"`
+	// VLEIPresentation carries the lei full-chain CESR export at
+	// register time (the credential + KELs). Set only for lei; the
+	// JWS kinds omit it.
+	VLEIPresentation *vleiPresentationDTO `json:"vleiPresentation,omitempty"`
+}
+
+// vleiPresentationDTO is the lei register-time credential presentation.
+type vleiPresentationDTO struct {
+	CESR string `json:"cesr"`
 }
 
 // identityChallengeDTO is one entry of the 202 challenge list.
@@ -42,13 +51,17 @@ type identityChallengeDTO struct {
 // identityChallengeResponse is the 202 body returned by register and
 // rotate: the identity's id plus the challenge round to sign.
 type identityChallengeResponse struct {
-	IdentityID string                 `json:"identityId"`
-	Kind       string                 `json:"kind"`
-	Value      string                 `json:"value"`
-	Status     string                 `json:"status"`
-	Nonce      string                 `json:"nonce"`
-	ExpiresAt  string                 `json:"expiresAt"`
-	Challenges []identityChallengeDTO `json:"challenges"`
+	IdentityID string `json:"identityId"`
+	Kind       string `json:"kind"`
+	Value      string `json:"value"`
+	Status     string `json:"status"`
+	// PresentationStatus is the lei register-time advisory status
+	// ("AUTHORIZED" | "PENDING"); omitted for kinds with no
+	// register-time presentation (did:web, did:key).
+	PresentationStatus string                 `json:"presentationStatus,omitempty"`
+	Nonce              string                 `json:"nonce"`
+	ExpiresAt          string                 `json:"expiresAt"`
+	Challenges         []identityChallengeDTO `json:"challenges"`
 }
 
 // verifyControlRequest is the POST .../verify-control body. Members
@@ -61,6 +74,10 @@ type verifyControlRequest struct {
 	// SignedProofs — one compact JWS per proven key, every payload
 	// equal to the served signingInput verbatim.
 	SignedProofs []string `json:"signedProofs"`
+	// CESRSignature — the lei proof: one CESR signature over the
+	// served signingInput by the subject AID's current key. Set only
+	// for lei.
+	CESRSignature string `json:"cesrSignature"`
 }
 
 // identityDetailResponse is the identity object echoed by
@@ -98,6 +115,7 @@ func (h *IdentityHandler) Register(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — matches registration.go
 	var req identityRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
@@ -107,12 +125,22 @@ func (h *IdentityHandler) Register(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, domain.NewValidationError("INVALID_IDENTIFIER", "value is required"))
 		return
 	}
-	res, err := h.svc.Register(r.Context(), providerID, req.Value)
+	res, err := h.svc.Register(r.Context(), providerID, req.Value, req.registerOptions())
 	if err != nil {
 		WriteError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, toChallengeResponse(res))
+}
+
+// registerOptions maps the kind-specific request members to the
+// service's additive RegisterOptions. Empty for non-lei kinds.
+func (req identityRegisterRequest) registerOptions() service.RegisterOptions {
+	var opt service.RegisterOptions
+	if req.VLEIPresentation != nil {
+		opt.VLEIPresentation = req.VLEIPresentation.CESR
+	}
+	return opt
 }
 
 // Rotate handles PUT /v2/ans/identities/{identityId} → 202 + fresh
@@ -122,6 +150,7 @@ func (h *IdentityHandler) Rotate(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — matches registration.go
 	var req identityRegisterRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
@@ -131,7 +160,7 @@ func (h *IdentityHandler) Rotate(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, domain.NewValidationError("INVALID_IDENTIFIER", "value is required"))
 		return
 	}
-	res, err := h.svc.Rotate(r.Context(), providerID, chi.URLParam(r, "identityId"), req.Value)
+	res, err := h.svc.Rotate(r.Context(), providerID, chi.URLParam(r, "identityId"), req.Value, req.registerOptions())
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -147,13 +176,14 @@ func (h *IdentityHandler) VerifyControl(w http.ResponseWriter, r *http.Request) 
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — matches registration.go
 	var req verifyControlRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
 		return
 	}
 	identity, err := h.svc.VerifyControl(r.Context(), providerID, chi.URLParam(r, "identityId"),
-		service.ProofSubmission{SignedProofs: req.SignedProofs})
+		service.ProofSubmission{SignedProofs: req.SignedProofs, CESRSignature: req.CESRSignature})
 	if err != nil {
 		WriteError(w, err)
 		return
@@ -306,13 +336,14 @@ func toChallengeResponse(res *service.IdentityChallengeResponse) identityChallen
 		challenges = append(challenges, identityChallengeDTO{Kid: c.Kid, SigningInput: c.SigningInput})
 	}
 	return identityChallengeResponse{
-		IdentityID: res.Identity.IdentityID,
-		Kind:       string(res.Identity.Kind),
-		Value:      res.Identity.EffectiveValue(),
-		Status:     string(res.Identity.Status),
-		Nonce:      res.Nonce,
-		ExpiresAt:  res.ExpiresAt.UTC().Format(time.RFC3339),
-		Challenges: challenges,
+		IdentityID:         res.Identity.IdentityID,
+		Kind:               string(res.Identity.Kind),
+		Value:              res.Identity.EffectiveValue(),
+		Status:             string(res.Identity.Status),
+		PresentationStatus: string(res.PresentationStatus),
+		Nonce:              res.Nonce,
+		ExpiresAt:          res.ExpiresAt.UTC().Format(time.RFC3339),
+		Challenges:         challenges,
 	}
 }
 

@@ -49,3 +49,6 @@ Thumbs.db
 # Dependency directories
 vendor/
 AGENTS.md
+
+# Demo outputs
+scripts/demo/vlei/signify/out/

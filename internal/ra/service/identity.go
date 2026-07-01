@@ -72,6 +72,11 @@ type IdentityChallengeResponse struct {
 	Nonce      string
 	ExpiresAt  time.Time
 	Challenges []ProofChallenge
+	// PresentationStatus is the advisory register-time status a kind
+	// with a register-time presentation reports ("AUTHORIZED" |
+	// "PENDING"); empty for kinds without one (did:web, did:key). The
+	// handler emits it on the 202 only when set.
+	PresentationStatus port.PresentationStatus
 }
 
 // IdentityService owns the Verified Identity lifecycle: register →
@@ -111,13 +116,14 @@ func NewIdentityService(
 	agents port.AgentStore,
 	resolver port.DIDResolver,
 	sealer IdentityEventSealer,
+	leiCtl port.LEIControlVerifier,
 	uow port.UnitOfWork,
 ) *IdentityService {
 	return &IdentityService{
 		identities:   identities,
 		links:        links,
 		agents:       agents,
-		verifiers:    newControlVerifiers(resolver),
+		verifiers:    newControlVerifiers(resolver, leiCtl),
 		sealer:       sealer,
 		uow:          uow,
 		challengeTTL: time.Hour,
@@ -216,9 +222,9 @@ func (s *IdentityService) raID() string {
 }
 
 // verifierFor returns the kind's control verifier, or the precise
-// IDENTIFIER_KIND_UNSUPPORTED error when this deployment has none —
-// lei is recognized lexically but postponed: the route exists, the
-// kind does not until its verifier registers (identitykinds.go).
+// IDENTIFIER_KIND_UNSUPPORTED error when this deployment has none.
+// Kinds are recognized lexically but only enabled once their verifier
+// registers (identitykinds.go).
 func (s *IdentityService) verifierFor(kind domain.IdentifierKind) (controlVerifier, error) {
 	v, ok := s.verifiers[kind]
 	if !ok {
@@ -237,7 +243,8 @@ func (s *IdentityService) verifierFor(kind domain.IdentifierKind) (controlVerifi
 // superseded). IDENTIFIER_DUPLICATE is reserved for genuine
 // conflicts: already VERIFIED by this owner (rotate instead), or
 // proven by another owner.
-func (s *IdentityService) Register(ctx context.Context, providerID, rawValue string) (*IdentityChallengeResponse, error) {
+func (s *IdentityService) Register(ctx context.Context, providerID, rawValue string, opts ...RegisterOptions) (*IdentityChallengeResponse, error) {
+	opt := firstRegisterOption(opts)
 	if providerID == "" {
 		return nil, domain.NewValidationError("INVALID_PROVIDER_ID", "authenticated owner is required")
 	}
@@ -263,7 +270,7 @@ func (s *IdentityService) Register(ctx context.Context, providerID, rawValue str
 			"identifier is already verified by this owner; rotate it with PUT instead")
 	case err == nil:
 		// PENDING_CONTROL → idempotent re-challenge on the same row.
-		return s.challenge(ctx, existing, now, false)
+		return s.challenge(ctx, existing, now, false, opt)
 	case errors.Is(err, domain.ErrNotFound):
 		// fall through to creation
 	default:
@@ -288,14 +295,25 @@ func (s *IdentityService) Register(ctx context.Context, providerID, rawValue str
 	if err != nil {
 		return nil, err
 	}
-	return s.challenge(ctx, identity, now, true)
+	return s.challenge(ctx, identity, now, true, opt)
+}
+
+// firstRegisterOption collapses the variadic options to a single
+// value: the additive register material is at most one struct, so a
+// caller passes zero (non-lei kinds, all current callers) or one.
+func firstRegisterOption(opts []RegisterOptions) RegisterOptions {
+	if len(opts) > 0 {
+		return opts[0]
+	}
+	return RegisterOptions{}
 }
 
 // Rotate stages a same-kind replacement (§4.2 PUT) and returns fresh
 // challenges over it. The previously sealed state stands until the
 // new proof lands; a replacement that never verifies expires with its
 // nonce.
-func (s *IdentityService) Rotate(ctx context.Context, providerID, identityID, rawValue string) (*IdentityChallengeResponse, error) {
+func (s *IdentityService) Rotate(ctx context.Context, providerID, identityID, rawValue string, opts ...RegisterOptions) (*IdentityChallengeResponse, error) {
+	opt := firstRegisterOption(opts)
 	if !s.limiter.Allow(providerID, s.clock()) {
 		return nil, domain.NewValidationError("RATE_LIMITED",
 			"too many identity register/rotate calls; retry later")
@@ -308,7 +326,7 @@ func (s *IdentityService) Rotate(ctx context.Context, providerID, identityID, ra
 	if err := identity.StageRotation(rawValue, now); err != nil {
 		return nil, err
 	}
-	return s.challenge(ctx, identity, now, false)
+	return s.challenge(ctx, identity, now, false, opt)
 }
 
 // challenge mints a fresh nonce on the identity, runs the kind's
@@ -321,7 +339,24 @@ func (s *IdentityService) Rotate(ctx context.Context, providerID, identityID, ra
 // load and persist spans seconds, and a blind upsert here could
 // clobber a verify or revoke that committed in that window (status
 // regression = a different owner could then take the identifier).
-func (s *IdentityService) challenge(ctx context.Context, identity *domain.VerifiedIdentity, now time.Time, isNew bool) (*IdentityChallengeResponse, error) {
+func (s *IdentityService) challenge(ctx context.Context, identity *domain.VerifiedIdentity, now time.Time, isNew bool, opt RegisterOptions) (*IdentityChallengeResponse, error) {
+	verifier, err := s.verifierFor(identity.Kind)
+	if err != nil {
+		return nil, err
+	}
+
+	// Kinds carrying a register-time presentation (lei) submit it to
+	// their verifier here, pinning the verifier-derived subject AID on
+	// the aggregate before the challenge enumerates it. Discovered by
+	// capability — non-presentation kinds skip this entirely.
+	var presentationStatus port.PresentationStatus
+	if pr, ok := verifier.(presentationRegistrar); ok {
+		presentationStatus, err = pr.RegisterPresentation(ctx, identity, opt, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	// Load-time snapshot for the conditional persist.
 	expectedStatus := identity.Status
 	expectedNonce := ""
@@ -350,10 +385,6 @@ func (s *IdentityService) challenge(ctx context.Context, identity *domain.Verifi
 		return nil, domain.NewInternalError("CHALLENGE_GENERATION", "could not build signing input", err)
 	}
 
-	verifier, err := s.verifierFor(identity.Kind)
-	if err != nil {
-		return nil, err
-	}
 	challenges, err := verifier.Challenges(ctx, identity, signingInput)
 	if err != nil {
 		return nil, err
@@ -369,10 +400,11 @@ func (s *IdentityService) challenge(ctx context.Context, identity *domain.Verifi
 		}
 	}
 	return &IdentityChallengeResponse{
-		Identity:   identity,
-		Nonce:      nonce,
-		ExpiresAt:  identity.Challenge.ExpiresAt,
-		Challenges: challenges,
+		Identity:           identity,
+		PresentationStatus: presentationStatus,
+		Nonce:              nonce,
+		ExpiresAt:          identity.Challenge.ExpiresAt,
+		Challenges:         challenges,
 	}, nil
 }
 
@@ -397,6 +429,13 @@ func (s *IdentityService) VerifyControl(ctx context.Context, providerID, identit
 		return nil, domain.NewInvalidStateError("IDENTITY_REVOKED", "identity is revoked")
 	}
 	if err := identity.CheckChallenge(now); err != nil {
+		return nil, err
+	}
+	// Enforce the wire oneOf contract before kind dispatch: exactly one
+	// proof family per request. Each per-kind verifier validates only
+	// its own member, so a body carrying both families would otherwise
+	// slip through silently. Kind-independent, hence here above dispatch.
+	if err := sub.validateExactlyOneFamily(); err != nil {
 		return nil, err
 	}
 	verifier, err := s.verifierFor(identity.Kind)

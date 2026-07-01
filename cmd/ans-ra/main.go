@@ -33,6 +33,7 @@ import (
 	"github.com/godaddy/ans/internal/adapter/docsui"
 	"github.com/godaddy/ans/internal/adapter/eventbus"
 	"github.com/godaddy/ans/internal/adapter/keymanager"
+	"github.com/godaddy/ans/internal/adapter/leiverifier"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	"github.com/godaddy/ans/internal/adapter/tlclient"
 	"github.com/godaddy/ans/internal/config"
@@ -154,10 +155,19 @@ func run(cfgPath string) error {
 	// did:web resolver — noop (quickstart) or hardened web fetch,
 	// the identity surface's analog of the DNS verifier selection.
 	didResolver := selectDIDResolver(cfg, logger)
+	// vLEI control verifier — noop (quickstart) or HTTP client for an internal vlei-verifier,
+	// the lei kind's analog of
+	// the did:web resolver selection.
+	leiVerifier := selectLEIVerifier(cfg, logger)
 	logger.Info().
 		Str("resolver", cfg.Identity.Resolver.Type).
+		Str("vleiVerifier", cfg.VLEI.Type).
 		Dur("challengeTTL", cfg.Identity.ChallengeTTL).
 		Msg("verified-identity surface configured")
+
+	if cfg.VLEI.Type == "noop" {
+		logger.Warn().Msg("vlei.type=noop — signature & authorization checks waived, NOT for production")
+	}
 
 	logger.Info().
 		Str("tlPublicBaseURL", cfg.TLClient.PublicBaseURL).
@@ -214,7 +224,7 @@ func run(cfgPath string) error {
 		logger.Warn().Msg("TL client disabled — identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
 	}
 	identitySvc := service.NewIdentityService(
-		identityStore, identityLinks, agents, didResolver, identitySealer, db,
+		identityStore, identityLinks, agents, didResolver, identitySealer, leiVerifier, db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      signerKeyID,
@@ -582,5 +592,24 @@ func selectDIDResolver(cfg *config.RAConfig, logger zerolog.Logger) port.DIDReso
 		return didresolver.NewWebResolver(didresolver.WithLogger(logger))
 	default:
 		return didresolver.NewNoopResolver()
+	}
+}
+
+// selectLEIVerifier returns the configured vLEI control verifier — the
+// lei kind's analog of selectDIDResolver. "verifier" is the hardened
+// HTTP client for an internal vlei-verifier (config-validated base
+// URL); the default "noop" performs structural-only qb64 checks and
+// waives both the GLEIF authorization binding and the cryptographic
+// signature check
+func selectLEIVerifier(cfg *config.RAConfig, logger zerolog.Logger) port.LEIControlVerifier {
+	switch cfg.VLEI.Type {
+	case "verifier":
+		opts := []leiverifier.VerifierOption{leiverifier.WithLogger(logger)}
+		if cfg.VLEI.PresentTimeout > 0 {
+			opts = append(opts, leiverifier.WithTimeout(cfg.VLEI.PresentTimeout))
+		}
+		return leiverifier.NewVerifier(cfg.VLEI.BaseURL, opts...)
+	default:
+		return leiverifier.NewNoop()
 	}
 }

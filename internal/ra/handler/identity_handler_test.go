@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/godaddy/ans/internal/adapter/cert"
 	"github.com/godaddy/ans/internal/adapter/didresolver"
 	"github.com/godaddy/ans/internal/adapter/eventbus"
+	"github.com/godaddy/ans/internal/adapter/leiverifier"
 	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -92,6 +94,7 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 		agents,
 		didresolver.NewNoopResolver(),
 		okSealer{},
+		leiverifier.NewNoop(),
 		db,
 	).WithChallengeTTL(30 * time.Minute)
 
@@ -307,6 +310,97 @@ func TestIdentityHandler_AuthAndValidation(t *testing.T) {
 	}
 	if rec := f.do(t, "owner-1", http.MethodPut, "/v2/ans/identities/x", map[string]string{}); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("empty value rotate: %d", rec.Code)
+	}
+}
+
+// TestIdentityHandler_BodyCap pins the 1 MiB MaxBytesReader on the
+// three JSON-decoding identity routes: an over-cap body fails the
+// decode → 422, never reaching the parser (DoS guard).
+func TestIdentityHandler_BodyCap(t *testing.T) {
+	t.Parallel()
+	f := newIdentityHTTPFixture(t)
+
+	// Valid JSON envelope padded past 1 MiB inside the cesr field.
+	oversized := `{"value":"did:web:a.com","vleiPresentation":{"cesr":"` +
+		strings.Repeat("A", 1<<20) + `"}}`
+	for _, route := range []struct{ method, path string }{
+		{http.MethodPost, "/v2/ans/identities"},
+		{http.MethodPut, "/v2/ans/identities/x"},
+		{http.MethodPost, "/v2/ans/identities/x/verify-control"},
+	} {
+		if rec := f.doRaw(t, "owner-1", route.method, route.path, oversized); rec.Code != http.StatusUnprocessableEntity {
+			t.Fatalf("oversized body %s %s: %d", route.method, route.path, rec.Code)
+		}
+	}
+}
+
+// TestIdentityHandler_LEIRoundTrip drives the lei lane end-to-end over
+// HTTP against the noop verifier and the real SQLite store: register
+// with vleiPresentation.cesr → 202 carrying the advisory
+// presentationStatus and the subject-AID challenge, then verify-control
+// with cesrSignature → 200, and detail reflects the sealed VERIFIED
+// state. This exercises the request DTO (vleiPresentation,
+// cesrSignature) and response DTO (presentationStatus) wiring plus the
+// subject_aid store round-trip the service-only tests cannot reach.
+func TestIdentityHandler_LEIRoundTrip(t *testing.T) {
+	t.Parallel()
+	f := newIdentityHTTPFixture(t)
+	owner := "owner-lei"
+
+	// The noop verifier reads the leaf credential's subject AID (a.i)
+	// and LEI (a.LEI) straight from the full-chain CESR export.
+	const lei = "5493001KJTIIGC8Y1R17"
+	const cesr = `{"v":"ACDC10JSON00011c_","d":"ECredSAID123","a":{"i":"EHolderAID123","LEI":"5493001KJTIIGC8Y1R17"}}`
+
+	rec := f.do(t, owner, http.MethodPost, "/v2/ans/identities",
+		map[string]any{"value": lei, "vleiPresentation": map[string]string{"cesr": cesr}})
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("register: %d %s", rec.Code, rec.Body)
+	}
+	var ch struct {
+		IdentityID         string `json:"identityId"`
+		Kind               string `json:"kind"`
+		Status             string `json:"status"`
+		PresentationStatus string `json:"presentationStatus"`
+		Challenges         []struct {
+			Kid          string `json:"kid"`
+			SigningInput string `json:"signingInput"`
+		} `json:"challenges"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ch); err != nil {
+		t.Fatal(err)
+	}
+	if ch.Kind != "lei" || ch.Status != "PENDING_CONTROL" || ch.PresentationStatus != "AUTHORIZED" {
+		t.Fatalf("202 lei shape: %+v", ch)
+	}
+	if len(ch.Challenges) != 1 || ch.Challenges[0].Kid != "EHolderAID123" || ch.Challenges[0].SigningInput == "" {
+		t.Fatalf("challenge over the pinned subject AID: %+v", ch.Challenges)
+	}
+
+	// verify-control with a well-formed qb64 CESR signature → 200.
+	rec = f.do(t, owner, http.MethodPost, "/v2/ans/identities/"+ch.IdentityID+"/verify-control",
+		map[string]any{"cesrSignature": "0BwellFormedQb64Signature"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("verify-control: %d %s", rec.Code, rec.Body)
+	}
+
+	// Detail confirms the lei seal landed and the store round-tripped the
+	// VERIFIED state with the lei proof method.
+	rec = f.do(t, owner, http.MethodGet, "/v2/ans/identities/"+ch.IdentityID, nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", rec.Code, rec.Body)
+	}
+	var detail struct {
+		Status      string `json:"status"`
+		Kind        string `json:"kind"`
+		Value       string `json:"value"`
+		ProofMethod string `json:"proofMethod"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if detail.Status != "VERIFIED" || detail.Kind != "lei" || detail.Value != lei || detail.ProofMethod != "lei-vlei-acdc" {
+		t.Fatalf("verified detail: %+v", detail)
 	}
 }
 

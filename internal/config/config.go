@@ -172,6 +172,26 @@ type IdentityResolver struct {
 	Type string `koanf:"type"` // "noop" | "web"
 }
 
+// VLEI selects the vLEI (lei kind) control verifier — the GLEIF /
+// vlei-verifier interaction behind the lei identifier kind. Top-level,
+// matching the DNS verifier's placement (not nested under identity),
+// because it is a distinct outbound dependency with its own service
+// endpoint.
+//
+// "noop" accepts the same full-chain CESR presentation as "verifier"
+// but waives the external bindings — the GLEIF authorization, the
+// AID↔LEI binding, and the signature's cryptographic check (structural
+// only, quickstart — NOT for production); "verifier" is a hardened HTTP
+// client for an internal vlei-verifier service.
+type VLEI struct {
+	Type string `koanf:"type"` // "noop" | "verifier"
+	// BaseURL is the internal vlei-verifier service URL, required when
+	// type is "verifier" (e.g. "http://vlei-verifier:7676").
+	BaseURL string `koanf:"base-url"`
+	// PresentTimeout bounds each verifier HTTP request (default 5s).
+	PresentTimeout time.Duration `koanf:"present-timeout"`
+}
+
 // Keys holds key-manager configuration.
 type Keys struct {
 	Type string    `koanf:"type"` // "file"
@@ -259,6 +279,7 @@ type RAConfig struct {
 	CA       CA        `koanf:"ca"`
 	DNS      DNS       `koanf:"dns"`
 	Identity Identity  `koanf:"identity"`
+	VLEI     VLEI      `koanf:"vlei"`
 	Keys     Keys      `koanf:"keys"`
 	Store    Store     `koanf:"store"`
 	TLClient TLClient  `koanf:"tl-client"`
@@ -418,6 +439,9 @@ func (c *RAConfig) Validate() error {
 	if c.Identity.RegisterRateLimit < 0 {
 		return errors.New("identity.register-rate-limit must not be negative")
 	}
+	if err := validateVLEI(&c.VLEI); err != nil {
+		return err
+	}
 	if err := validateKeys(&c.Keys); err != nil {
 		return err
 	}
@@ -491,6 +515,29 @@ func validateCAServer(s *CAServer) error {
 		}
 	default:
 		return fmt.Errorf("ca.server.type %q not supported (expected 'self' or 'acme')", s.Type)
+	}
+	return nil
+}
+
+// validateVLEI checks the vLEI control-verifier selection: "noop"
+// needs nothing, "verifier" needs a valid http(s) base URL, and the
+// per-request timeout may not be negative.
+func validateVLEI(v *VLEI) error {
+	switch v.Type {
+	case "noop":
+	case "verifier":
+		if v.BaseURL == "" {
+			return errors.New("vlei.base-url is required when vlei.type is 'verifier'")
+		}
+		u, err := url.Parse(v.BaseURL)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("vlei.base-url must be a valid http(s) URL, got %q", v.BaseURL)
+		}
+	default:
+		return fmt.Errorf("vlei.type %q not supported (expected 'noop' or 'verifier')", v.Type)
+	}
+	if v.PresentTimeout < 0 {
+		return errors.New("vlei.present-timeout must not be negative")
 	}
 	return nil
 }

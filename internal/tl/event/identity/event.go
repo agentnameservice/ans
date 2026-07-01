@@ -178,8 +178,8 @@ type Event struct {
 // conveniences (anyone can derive RFC 7638 from the sealed source);
 // they are never part of the sealed contract.
 //
-// The postponed lei kind is the one deliberate exception: it will
-// seal the subject AID + a key thumbprint only — there is no
+// The lei kind is the one deliberate exception: it seals the
+// subject AID + a key thumbprint only — there is no
 // document to quote, the ACDC is PII, and KERI's KEL is already the
 // authoritative key history. Seal verbatim what has no other
 // tamper-evident home; commit minimally where one exists.
