@@ -15,14 +15,15 @@
 #  11. GET    TL /v1/agents/{id}                                (badge)
 #  12. GET    TL /root-keys                                     (verifier PEMs)
 #  13. GET    TL /v1/agents/{id}/receipt                        (SCITT COSE)
-#  14. go test ./internal/tl/receipt -run TestSmokeVerifyDemoReceipt  (offline verify)
-#  15. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
-#  16. POST   /v2/ans/identities                                (register the WHO — a did:web verified identity)
-#  17. POST   /v2/ans/identities/{id}/verify-control            (control proof → VERIFIED, seals IDENTITY_VERIFIED)
-#  18. POST   /v2/ans/identities/{id}/links                     (link the agent — ONE IDENTITY_LINKED on the identity stream)
-#  19. GET    TL /v1/agents/{id}                                (badge now carries the computed identities[] join)
+#  14. bin/ans-verify -url TL -agent {id}                      (offline verify)
+#  15. POST   FINDER /v1/search                                 (discover via ans-finder)
+#  16. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
+#  17. POST   /v2/ans/identities                                (register the WHO — a did:web verified identity)
+#  18. POST   /v2/ans/identities/{id}/verify-control            (control proof → VERIFIED, seals IDENTITY_VERIFIED)
+#  19. POST   /v2/ans/identities/{id}/links                     (link the agent — ONE IDENTITY_LINKED on the identity stream)
+#  20. GET    TL /v1/agents/{id}                                (badge now carries the computed identities[] join)
 #
-# Step 16-19 show the verified-identity surface in the standard
+# Step 17-20 show the verified-identity surface in the standard
 # lifecycle; scripts/demo/identity-lifecycle.sh exercises EVERY
 # identity operation (re-add, did:key, rotation, unlink, revoke,
 # receipts, history views).
@@ -322,7 +323,50 @@ else
   fail "unexpected receipt status $receipt_status; see $RECEIPT_FILE"
 fi
 
-# ----- 15. Admin producer-keys API -----
+# ----- 15. Discover via ans-finder -----
+#
+# The Finder polls the RA's events feed, projects the AGENT_REGISTERED
+# event into its FTS5 catalog, and serves it on POST /v1/search. Because
+# the event only enters the feed once the TL has acked it (which step 9
+# waited for), and the poll interval is ~2s, the entry appears within a
+# few seconds. We scope the query by the structured `publisher` filter to
+# THIS run's host so back-to-back demo runs (which all register an agent
+# named "demo-agent") don't collide — the text matches the display name,
+# the filter pins the exact registration. Then assert the projected
+# identifier + receipt attestation, closing the loop from registration
+# all the way to discovery.
+header "15. Discover via ans-finder (POST /v1/search)"
+if curl -sSf "$FINDER_URL/v1/admin/ready" >/dev/null 2>&1; then
+  SEARCH_BODY=$(jq -n --arg host "$AGENT_HOST" \
+    '{query:{text:"demo-agent", filter:{publisher:[$host]}}}')
+  MATCH=""
+  for i in $(seq 1 15); do
+    resp=$(curl -sS -X POST -H "Content-Type: application/json" \
+      --data "$SEARCH_BODY" "$FINDER_URL/v1/search" 2>/dev/null || true)
+    # Pull the result whose identifier is rooted at this run's host.
+    MATCH=$(printf '%s' "$resp" | \
+      jq -c --arg host "$AGENT_HOST" \
+      'first(.results[]? | select(.identifier | startswith("urn:air:" + $host + ":agents:")))' \
+      2>/dev/null || true)
+    if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
+      printf '%s' "$resp" | pretty_json >&2
+      break
+    fi
+    MATCH=""
+    sleep 1
+  done
+  if [ -z "$MATCH" ]; then
+    fail "ans-finder did not surface ${AGENT_HOST} within 15s (check $DATA/finder.log)"
+  fi
+  IDENT=$(printf '%s' "$MATCH" | jq -r '.identifier')
+  RECEIPT_URI=$(printf '%s' "$MATCH" | jq -r '.trustManifest.attestations[0].uri // "none"')
+  ok "discovered $IDENT"
+  ok "ANS-Registration receipt: $RECEIPT_URI"
+else
+  warn "ans-finder not reachable at $FINDER_URL — skipping discovery step (start it via scripts/demo/start.sh)"
+fi
+
+# ----- 16. Admin producer-keys API -----
 #
 # Stage 4 moved the producer-key trust store from YAML-only to
 # SQLite with admin CRUD. The YAML producerKeys[] section still works
@@ -333,10 +377,10 @@ fi
 #       static API key, which maps to IsAdmin=true);
 #   (b) the bootstrapped RA signer is actually in SQLite;
 #   (c) the list response is the shape admin tooling will consume.
-header "15. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
+header "16. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
 curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
 
-# ----- 16-19. Verified identity (the WHO behind this agent) -----
+# ----- 17-20. Verified identity (the WHO behind this agent) -----
 #
 # The agent registration above is the "what": one FQDN, its
 # endpoints, its certificates. The verified identity is the "who"
@@ -344,7 +388,7 @@ curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
 # its own TL stream, and linked to the agent. Rotating or revoking
 # the identity later is ONE sealed event regardless of how many
 # agents are linked; every linked badge reflects it at read time.
-header "16. POST /v2/ans/identities  (register the WHO — did:web)"
+header "17. POST /v2/ans/identities  (register the WHO — did:web)"
 require_cmd go
 IDENTITY_DID="did:web:who-$(openssl rand -hex 4).example.com"
 IDENTITY_KEY="$DATA/identity-who.pem"
@@ -356,7 +400,7 @@ ID_INPUT=$(printf '%s' "$ID_REG" | jq -r '.challenges[0].signingInput // empty')
 echo "$IDENTITY_ID" >"$DATA/last-identity-id"
 ok "identityId=$IDENTITY_ID (PENDING_CONTROL — challenge issued)"
 
-header "17. POST /v2/ans/identities/$IDENTITY_ID/verify-control  (→ VERIFIED)"
+header "18. POST /v2/ans/identities/$IDENTITY_ID/verify-control  (→ VERIFIED)"
 ID_PROOF=$(cd "$ROOT" && go run ./scripts/demo/signproof sign \
   -key "$IDENTITY_KEY" -kid "${IDENTITY_DID}#key-1" -input "$ID_INPUT")
 curl_json POST "/v2/ans/identities/$IDENTITY_ID/verify-control" \
@@ -364,12 +408,12 @@ curl_json POST "/v2/ans/identities/$IDENTITY_ID/verify-control" \
 assert_2xx "identity verify-control"
 ok "control proven — IDENTITY_VERIFIED seals on the identity's own TL stream"
 
-header "18. POST /v2/ans/identities/$IDENTITY_ID/links  (link this agent — one call, one sealed event)"
+header "19. POST /v2/ans/identities/$IDENTITY_ID/links  (link this agent — one call, one sealed event)"
 curl_json POST "/v2/ans/identities/$IDENTITY_ID/links" \
   "$(jq -n --arg a "$AGENT_ID" '{agentIds: [$a]}')" >/dev/null
 assert_2xx "identity link"
 
-header "19. TL: GET /v1/agents/$AGENT_ID  (badge — computed identities[] join)"
+header "20. TL: GET /v1/agents/$AGENT_ID  (badge — computed identities[] join)"
 # No polling: identity ops are seal-before-success — the seals are
 # already in the log the moment the link call returned.
 assert_tl_identity_audit "$IDENTITY_ID" 2

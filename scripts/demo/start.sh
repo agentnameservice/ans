@@ -107,8 +107,8 @@ if [ "$KEEP_DATA" -eq 0 ]; then
   # Clean everything except the .log files from a prior run — keep
   # those around in case the user was inspecting them.
   rm -rf \
-    "$DATA/ra" "$DATA/tl" \
-    "$DATA/demo-ra.yaml" "$DATA/demo-tl.yaml" \
+    "$DATA/ra" "$DATA/tl" "$DATA/finder" \
+    "$DATA/demo-ra.yaml" "$DATA/demo-tl.yaml" "$DATA/demo-finder.yaml" \
     "$DATA/last-agent-id" "$DATA/csr"
   # pid files (if the daemons were still running, stop.sh handles them;
   # here we just remove the stale files).
@@ -131,7 +131,7 @@ fi
 echo "$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)" >"$DATA/issuer-mode"
 
 # Refuse to start if the ports already have something on them.
-for url in "$RA_URL/v2/admin/health" "$TL_URL/v2/admin/health"; do
+for url in "$RA_URL/v2/admin/health" "$TL_URL/v2/admin/health" "$FINDER_URL/v1/admin/health"; do
   if curl -sSf "$url" >/dev/null 2>&1; then
     fail "something is already running at $url (run scripts/demo/stop.sh first)"
   fi
@@ -327,10 +327,63 @@ note "logs → $DATA/tl.log"
 wait_ready "$TL_URL/v2/admin/ready"
 ok "ans-tl ready (pid $TL_PID) at $TL_URL"
 
+# ----- compose finder config -----
+#
+# The Finder polls the RA's events feed (allow-http for the demo's
+# plaintext RA), projects each event into its own SQLite FTS5 index, and
+# serves POST /v1/search + /v1/explore. Its tl.public-base-url is woven
+# into each entry's ANS-Registration receipt URI.
+header "Compose finder config"
+cat >"$DATA/demo-finder.yaml" <<YAML
+server:
+  host: "127.0.0.1"
+  port: 18082
+
+store:
+  type: sqlite
+  sqlite:
+    path: "$DATA/finder/finder.db"
+
+feed:
+  base-url: "$RA_URL"
+  allow-http: true
+  poll-interval: 2s
+  page-size: 100
+  timeout: 10s
+  stale-bound: 60s
+
+tl:
+  public-base-url: "$TL_URL"
+
+search:
+  rate: 50
+  burst: 100
+  max-page-size: 100
+  default-page-size: 10
+
+referrals: []
+
+log:
+  level: info
+  format: text
+YAML
+ok "wrote $DATA/demo-finder.yaml"
+
+# ----- start finder -----
+header "Start ans-finder"
+mkdir -p "$DATA/finder"
+"$ROOT/bin/ans-finder" --config "$DATA/demo-finder.yaml" >"$DATA/finder.log" 2>&1 &
+FINDER_PID=$!
+echo "$FINDER_PID" >"$DATA/finder.pid"
+note "logs → $DATA/finder.log"
+wait_ready "$FINDER_URL/v1/admin/ready"
+ok "ans-finder ready (pid $FINDER_PID) at $FINDER_URL"
+
 # ----- summary -----
 header "Ready"
-printf "  %s ans-ra   %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$RA_URL" "$RA_PID" "$DATA/ra.log" >&2
-printf "  %s ans-tl   %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$TL_URL" "$TL_PID" "$DATA/tl.log" >&2
+printf "  %s ans-ra      %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$RA_URL" "$RA_PID" "$DATA/ra.log" >&2
+printf "  %s ans-tl      %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$TL_URL" "$TL_PID" "$DATA/tl.log" >&2
+printf "  %s ans-finder  %s   (pid %s, log %s)\n" "${C_GREEN}✔${C_RESET}" "$FINDER_URL" "$FINDER_PID" "$DATA/finder.log" >&2
 printf "\n" >&2
 if [ "$WITH_ACME" -eq 1 ]; then
   printf "  ACME issuer: %s\n" "$ACME_DIRECTORY_URL" >&2

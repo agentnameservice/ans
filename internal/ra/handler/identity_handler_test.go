@@ -96,8 +96,8 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 	).WithChallengeTTL(30 * time.Minute)
 
 	r := chi.NewRouter()
-	regH := handler.NewRegistrationHandler(regSvc)
-	lifeH := handler.NewLifecycleHandler(regSvc).WithIdentityViews(idSvc)
+	regH := handler.NewRegistrationHandler(regSvc, zerolog.Nop())
+	lifeH := handler.NewLifecycleHandler(regSvc, zerolog.Nop()).WithIdentityViews(idSvc)
 	readOwn := ramiddleware.ReadOwnership(agents)
 	r.Post("/v2/ans/agents", regH.Register)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}", lifeH.Detail)

@@ -12,16 +12,16 @@ func defaultRAConfig() *RAConfig {
 			Static: &AuthStatic{APIKey: ""},
 		},
 		CA: CA{
-			Type: "self",
+			Type: caTypeSelf,
 			Self: &CASelf{
 				Org:          "ANS Local Dev CA",
 				ValidityDays: 365,
 				DataDir:      "./data/ra/ca",
 			},
 		},
-		DNS: DNS{Type: "noop"},
+		DNS: DNS{Type: verifierTypeNoop},
 		Identity: Identity{
-			Resolver:          IdentityResolver{Type: "noop"},
+			Resolver:          IdentityResolver{Type: verifierTypeNoop},
 			ChallengeTTL:      time.Hour,
 			RegisterRateLimit: 10,
 			LinkRateLimit:     60,
@@ -48,6 +48,9 @@ func defaultRAConfig() *RAConfig {
 		Signer: SignerCfg{
 			KeyID: "ans-ra-signer",
 			RaID:  "ans-ra-local",
+		},
+		EventsFeed: EventsFeed{
+			Retention: 720 * time.Hour, // 30 days — matches production feed retention.
 		},
 		Log: Log{Level: "info", Format: "text"},
 	}
@@ -82,6 +85,37 @@ func defaultTLConfig() *TLConfig {
 		},
 		Attestation: AttestationKeyCfg{
 			KeyID: "ans-tl-attestation",
+		},
+		Log: Log{Level: "info", Format: "text"},
+	}
+}
+
+// defaultFinderConfig returns a FinderConfig pre-populated with sensible
+// defaults. Values from the YAML file and environment variables override
+// these.
+func defaultFinderConfig() *FinderConfig {
+	return &FinderConfig{
+		Server: Server{Host: "0.0.0.0", Port: 18082},
+		Store: Store{
+			Type:   "sqlite",
+			SQLite: &StoreSQLite{Path: "./data/finder/finder.db"},
+		},
+		Feed: FinderFeed{
+			BaseURL:      "https://localhost:18080",
+			AllowHTTP:    false,
+			PollInterval: 5 * time.Second,
+			PageSize:     100,
+			Timeout:      10 * time.Second,
+			StaleBound:   60 * time.Second,
+		},
+		TL: FinderTL{
+			PublicBaseURL: "https://localhost:18081",
+		},
+		Search: FinderSearch{
+			Rate:            50,
+			Burst:           100,
+			MaxPageSize:     100,
+			DefaultPageSize: 10,
 		},
 		Log: Log{Level: "info", Format: "text"},
 	}

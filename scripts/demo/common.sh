@@ -31,6 +31,7 @@ if [ -f "$DATA/env" ]; then
 fi
 RA_URL="${RA_URL:-http://localhost:18080}"
 TL_URL="${TL_URL:-http://localhost:18081}"
+FINDER_URL="${FINDER_URL:-http://localhost:18082}"
 RA_API_KEY="${RA_API_KEY:-ans-dev-key-change-me}"
 # ANS SDKs send `Authorization: sso-key <apiKey>:<apiSecret>` — the
 # reference RA's format. The demo RA accepts both `Bearer` (the

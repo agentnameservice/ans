@@ -1,0 +1,42 @@
+server:
+  host: "0.0.0.0"
+  port: 18082
+
+store:
+  type: sqlite
+  sqlite:
+    path: "./data/finder/finder.db"
+
+# feed: where the Finder polls ANS lifecycle events. base-url is the RA's
+# reachable base; the poller GETs {base-url}/v1/agents/events. Production
+# uses https; local dev points at the plaintext RA with allow-http: true.
+feed:
+  base-url: "http://localhost:18080"
+  allow-http: true                  # dev only — TLS verification is never skipped on https
+  poll-interval: 5s
+  page-size: 100
+  timeout: 10s
+  stale-bound: 60s                  # responses carry staleSince once a poll round is this far behind
+
+# tl: the Transparency Log's public base URL, woven into each entry's
+# ANS-Registration attestation URI ({public-base-url}/v1/agents/{id}/receipt).
+# Empty omits attestations entirely.
+tl:
+  public-base-url: "http://localhost:18081"
+
+# search: the unauthenticated discovery surface. rate/burst configure the
+# global token bucket; max/default page sizes bound results (spec caps at 100).
+search:
+  rate: 50                          # tokens per second
+  burst: 100
+  max-page-size: 100
+  default-page-size: 10
+  # source-url: omitted → derived from the listen address.
+
+# referrals: config-only federation entries returned in `referrals` mode.
+# The Finder never auto-follows them.
+referrals: []
+
+log:
+  level: info
+  format: text

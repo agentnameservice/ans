@@ -42,6 +42,9 @@ var raYAML []byte
 //go:embed openapi/tl.yaml
 var tlYAML []byte
 
+//go:embed openapi/finder.yaml
+var finderYAML []byte
+
 // SpecRA is the spec for ans-ra — the V2 RA OpenAPI contract.
 //
 //nolint:gochecknoglobals // immutable bundle of embedded YAML + title; effectively a const
@@ -51,6 +54,11 @@ var SpecRA = Spec{YAML: raYAML, Title: "ans-ra — Registration Authority API"}
 //
 //nolint:gochecknoglobals // immutable bundle of embedded YAML + title; effectively a const
 var SpecTL = Spec{YAML: tlYAML, Title: "ans-tl — Transparency Log API"}
+
+// SpecFinder is the spec for ans-finder — the ARD discovery contract.
+//
+//nolint:gochecknoglobals // immutable bundle of embedded YAML + title; effectively a const
+var SpecFinder = Spec{YAML: finderYAML, Title: "ans-finder — Agentic Resource Discovery API"}
 
 // Mount registers the docs routes on r:
 //

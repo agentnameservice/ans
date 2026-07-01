@@ -26,18 +26,32 @@ import (
 //
 // Tokens are not cached; go-oidc caches the JWKS internally.
 type OIDCProvider struct {
-	verifier       *oidc.IDTokenVerifier
-	expectedAud    string
-	anonymousPaths []string
-	adminGroups    []string // groups granting admin privileges (optional)
+	verifier    *oidc.IDTokenVerifier
+	expectedAud string
+	// anonymousPaths are SUBTREE prefixes (see the StaticProvider field
+	// of the same name); anonymousExactPaths are byte-exact leaf
+	// exemptions. Both providers share the same matching semantics so a
+	// route's anonymity does not depend on which auth adapter is wired.
+	anonymousPaths      []string
+	anonymousExactPaths []string
+	adminGroups         []string // groups granting admin privileges (optional)
 }
 
 // OIDCOption configures an OIDCProvider.
 type OIDCOption func(*OIDCProvider)
 
-// WithOIDCAnonymousPath makes a path prefix unauthenticated.
+// WithOIDCAnonymousPath makes a path SUBTREE unauthenticated (the
+// prefix itself or any descendant past a `/`). For a leaf route beside
+// authenticated wildcard siblings, use WithOIDCAnonymousExactPath — see
+// the StaticProvider equivalents for the chi-backtracking rationale.
 func WithOIDCAnonymousPath(prefix string) OIDCOption {
 	return func(p *OIDCProvider) { p.anonymousPaths = append(p.anonymousPaths, prefix) }
+}
+
+// WithOIDCAnonymousExactPath makes a single exact path unauthenticated —
+// never a child or a same-prefix sibling.
+func WithOIDCAnonymousExactPath(path string) OIDCOption {
+	return func(p *OIDCProvider) { p.anonymousExactPaths = append(p.anonymousExactPaths, path) }
 }
 
 // WithAdminGroups lists group values that should be treated as admin.
@@ -129,8 +143,13 @@ func (p *OIDCProvider) Middleware() func(http.Handler) http.Handler {
 }
 
 func (p *OIDCProvider) isAnonymousPath(path string) bool {
+	for _, exact := range p.anonymousExactPaths {
+		if path == exact {
+			return true
+		}
+	}
 	for _, prefix := range p.anonymousPaths {
-		if strings.HasPrefix(path, prefix) {
+		if isSubtreeMatch(path, prefix) {
 			return true
 		}
 	}

@@ -136,6 +136,23 @@ func (d *DB) migrate(ctx context.Context) error {
 			return fmt.Errorf("sqlite: commit %s: %w", f, err)
 		}
 	}
+
+	// Seed the query planner's statistics table (sqlite_stat1). Without
+	// it, SQLite has no cardinality data and falls back to "prefer the
+	// integer primary key" for any query offering both a rowid range
+	// and a secondary-index range — which would make the agent-events
+	// feed's no-cursor read a primary-key scan that walks (and discards)
+	// every retention-aged-out row, a cost that grows unbounded with
+	// deployment age on an unauthenticated route. Running ANALYZE once
+	// here (cheap: the table set is empty or small at migration time)
+	// makes sqlite_stat1 exist, after which the planner uses the partial
+	// `idx_outbox_feed (created_at_ms, id)` index to SEARCH the
+	// retention floor instead. The choice persists as the table grows;
+	// stat1 presence — not its exact row counts — is what flips the
+	// planner off the rowid default.
+	if _, err := d.db.ExecContext(ctx, `ANALYZE`); err != nil {
+		return fmt.Errorf("sqlite: analyze: %w", err)
+	}
 	return nil
 }
 
