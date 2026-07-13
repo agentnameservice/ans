@@ -519,12 +519,13 @@ func validateCAServer(s *CAServer) error {
 	return nil
 }
 
-// validateVLEI checks the vLEI control-verifier selection: "noop"
-// needs nothing, "verifier" needs a valid http(s) base URL, and the
-// per-request timeout may not be negative.
+// validateVLEI checks the vLEI control-verifier selection: "off"
+// (disables the lei kind) and "noop" need nothing, "verifier" needs a
+// valid http(s) base URL, and the per-request timeout may not be
+// negative.
 func validateVLEI(v *VLEI) error {
 	switch v.Type {
-	case "noop":
+	case "off", "noop":
 	case "verifier":
 		if v.BaseURL == "" {
 			return errors.New("vlei.base-url is required when vlei.type is 'verifier'")
@@ -534,7 +535,7 @@ func validateVLEI(v *VLEI) error {
 			return fmt.Errorf("vlei.base-url must be a valid http(s) URL, got %q", v.BaseURL)
 		}
 	default:
-		return fmt.Errorf("vlei.type %q not supported (expected 'noop' or 'verifier')", v.Type)
+		return fmt.Errorf("vlei.type %q not supported (expected 'off', 'noop', or 'verifier')", v.Type)
 	}
 	if v.PresentTimeout < 0 {
 		return errors.New("vlei.present-timeout must not be negative")

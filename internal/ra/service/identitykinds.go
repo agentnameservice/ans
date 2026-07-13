@@ -147,13 +147,16 @@ func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifi
 	// NOTE: deliberately NOT exhaustive over IdentifierKind — a
 	// recognized-but-absent kind (did:plc, did:ion, did:ethr, until
 	// their verifiers ship) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
-	// rather than register a stub. The 404-is-the-signal rule. lei
-	// now registers — its noop adapter is the zero-infra quickstart.
-	return map[domain.IdentifierKind]controlVerifier{
+	// rather than register a stub. The 404-is-the-signal rule. LEI
+	// only registered when configured.
+	m := map[domain.IdentifierKind]controlVerifier{
 		domain.KindDIDWeb: &didWebVerifier{resolver: resolver},
 		domain.KindDIDKey: &didKeyVerifier{},
-		domain.KindLEI:    &leiVerifier{v: leiCtl},
 	}
+	if leiCtl != nil {
+		m[domain.KindLEI] = &leiVerifier{v: leiCtl} // absent → IDENTIFIER_KIND_UNSUPPORTED
+	}
+	return m
 }
 
 // ----- shared JWS proof machinery -----

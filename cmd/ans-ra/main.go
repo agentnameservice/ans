@@ -598,9 +598,10 @@ func selectDIDResolver(cfg *config.RAConfig, logger zerolog.Logger) port.DIDReso
 // selectLEIVerifier returns the configured vLEI control verifier — the
 // lei kind's analog of selectDIDResolver. "verifier" is the hardened
 // HTTP client for an internal vlei-verifier (config-validated base
-// URL); the default "noop" performs structural-only qb64 checks and
-// waives both the GLEIF authorization binding and the cryptographic
-// signature check
+// URL); "noop" performs structural-only qb64 checks and waives both
+// the GLEIF authorization binding and the cryptographic signature
+// check; the default "off" returns nil, leaving the lei kind
+// unregistered (recognized values then fail IDENTIFIER_KIND_UNSUPPORTED).
 func selectLEIVerifier(cfg *config.RAConfig, logger zerolog.Logger) port.LEIControlVerifier {
 	switch cfg.VLEI.Type {
 	case "verifier":
@@ -609,7 +610,9 @@ func selectLEIVerifier(cfg *config.RAConfig, logger zerolog.Logger) port.LEICont
 			opts = append(opts, leiverifier.WithTimeout(cfg.VLEI.PresentTimeout))
 		}
 		return leiverifier.NewVerifier(cfg.VLEI.BaseURL, opts...)
-	default:
+	case "noop":
 		return leiverifier.NewNoop()
+	default: // "off"
+		return nil
 	}
 }
