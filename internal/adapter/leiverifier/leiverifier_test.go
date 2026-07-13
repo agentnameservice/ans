@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -126,6 +128,13 @@ func TestNoopVerifySignature(t *testing.T) {
 	}
 }
 
+type recordedRequest struct {
+	method      string
+	path        string
+	contentType string
+	body        string
+}
+
 // vleiServer is a programmable stand-in for the vlei-verifier service.
 type vleiServer struct {
 	presentStatus int
@@ -133,19 +142,35 @@ type vleiServer struct {
 	authStatus    int
 	authBody      string
 	verifyStatus  int
+
+	mu       sync.Mutex
+	requests []recordedRequest // method, path, contentType, body
+}
+
+func (s *vleiServer) record(r *http.Request) {
+	body, _ := io.ReadAll(r.Body)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.requests = append(s.requests, recordedRequest{
+		method: r.Method, path: r.URL.Path,
+		contentType: r.Header.Get("Content-Type"), body: string(body),
+	})
 }
 
 func (s *vleiServer) handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/presentations/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/presentations/", func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
 		w.WriteHeader(s.presentStatus)
 		_, _ = w.Write([]byte(s.presentBody))
 	})
-	mux.HandleFunc("/authorizations/", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/authorizations/", func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
 		w.WriteHeader(s.authStatus)
 		_, _ = w.Write([]byte(s.authBody))
 	})
-	mux.HandleFunc("/signature/verify", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("/signature/verify", func(w http.ResponseWriter, r *http.Request) {
+		s.record(r)
 		w.WriteHeader(s.verifyStatus)
 	})
 	return mux
@@ -193,6 +218,78 @@ func TestVerifierPresentPendingAuthorization(t *testing.T) {
 	}
 	if res.Status != "PENDING" || res.SubjectAID != "EHolderAID" {
 		t.Fatalf("present result: %+v", res)
+	}
+}
+
+// TestVerifierRequestShapes asserts the OUTBOUND contract — what the
+// adapter sends, pins the path template, the content type, request-body fields
+func TestVerifierRequestShapes(t *testing.T) {
+	s := &vleiServer{
+		presentStatus: http.StatusAccepted,
+		presentBody:   `{"aid":"EHolderAID","said":"ECredSAID123"}`,
+		authStatus:    http.StatusOK,
+		authBody:      `{"lei":"5493001KJTIIGC8Y1R17"}`,
+		verifyStatus:  http.StatusAccepted,
+	}
+	v := newVerifierFor(t, s)
+
+	// Present → PUT /presentations/ECredSAID123 (leaf SAID from validCESR),
+	// then GET /authorizations/EHolderAID (subject AID from the response).
+	if _, err := v.Present(context.Background(), validCESR); err != nil {
+		t.Fatalf("Present: %v", err)
+	}
+	// VerifySignature → POST /signature/verify.
+	if _, err := v.VerifySignature(context.Background(), "EHolderAID", "the-signing-input", "0BtheSignature"); err != nil {
+		t.Fatalf("VerifySignature: %v", err)
+	}
+
+	if len(s.requests) != 3 {
+		t.Fatalf("recorded %d requests, want 3: %+v", len(s.requests), s.requests)
+	}
+	present, auth, verify := s.requests[0], s.requests[1], s.requests[2]
+
+	// PUT /presentations/{said}, application/json+cesr, CESR body verbatim.
+	if present.method != http.MethodPut || present.path != "/presentations/ECredSAID123" {
+		t.Errorf("present line = %s %s, want PUT /presentations/ECredSAID123", present.method, present.path)
+	}
+	if present.contentType != "application/json+cesr" {
+		t.Errorf("present content-type = %q, want application/json+cesr", present.contentType)
+	}
+	if present.body != validCESR {
+		t.Errorf("present body = %q, want the CESR export verbatim", present.body)
+	}
+
+	// GET /authorizations/{aid}, no body.
+	if auth.method != http.MethodGet || auth.path != "/authorizations/EHolderAID" {
+		t.Errorf("authorize line = %s %s, want GET /authorizations/EHolderAID", auth.method, auth.path)
+	}
+
+	// POST /signature/verify, application/json, exactly the three
+	// snake_case tags bound to the right values. Decoding into a map keys
+	// on the wire tags, so a struct-tag typo (signerAid, nonPrefixedDigest,
+	// …) leaves the expected key absent and fails here.
+	if verify.method != http.MethodPost || verify.path != "/signature/verify" {
+		t.Errorf("verify line = %s %s, want POST /signature/verify", verify.method, verify.path)
+	}
+	if verify.contentType != "application/json" {
+		t.Errorf("verify content-type = %q, want application/json", verify.contentType)
+	}
+	var got map[string]any
+	if err := json.Unmarshal([]byte(verify.body), &got); err != nil {
+		t.Fatalf("verify body is not JSON: %v (%q)", err, verify.body)
+	}
+	want := map[string]any{
+		"signer_aid":          "EHolderAID",
+		"signature":           "0BtheSignature",
+		"non_prefixed_digest": "the-signing-input",
+	}
+	for k, wv := range want {
+		if got[k] != wv {
+			t.Errorf("verify body[%q] = %v, want %v", k, got[k], wv)
+		}
+	}
+	if len(got) != len(want) {
+		t.Errorf("verify body has %d fields, want exactly %d: %q", len(got), len(want), verify.body)
 	}
 }
 
