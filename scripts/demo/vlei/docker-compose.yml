@@ -133,7 +133,12 @@ services:
     # the bundled verifier-config-docker-local.json, which already targets
     # our witness-demo + vlei-server hostnames.
     build:
-      context: https://github.com/GLEIF-IT/vlei-verifier.git#0.1.5
+      # SHA-pinned, not tag-pinned: a git tag is mutable, and up.sh's
+      # `--build` re-resolves the ref on every run, so a moved `0.1.5`
+      # tag would silently change what every developer builds. This SHA
+      # IS the 0.1.5 tag (github.com/GLEIF-IT/vlei-verifier, resolved via
+      # `git ls-remote … refs/tags/0.1.5`); re-pin deliberately on a bump.
+      context: https://github.com/GLEIF-IT/vlei-verifier.git#e742b65b085bb41b9fa25e9ef04dc3cf0644b297
       dockerfile: images/verifier.dockerfile
     image: ans-vlei-verifier:0.1.5
     container_name: ans-vlei-verifier

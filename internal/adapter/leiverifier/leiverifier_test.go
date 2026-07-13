@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -142,6 +144,7 @@ type vleiServer struct {
 	authStatus    int
 	authBody      string
 	verifyStatus  int
+	verifyBody    string
 
 	mu       sync.Mutex
 	requests []recordedRequest // method, path, contentType, body
@@ -172,6 +175,7 @@ func (s *vleiServer) handler() http.Handler {
 	mux.HandleFunc("/signature/verify", func(w http.ResponseWriter, r *http.Request) {
 		s.record(r)
 		w.WriteHeader(s.verifyStatus)
+		_, _ = w.Write([]byte(s.verifyBody))
 	})
 	return mux
 }
@@ -179,6 +183,26 @@ func (s *vleiServer) handler() http.Handler {
 // validCESR is a minimal full-chain export: a leading ACDC frame whose
 // self-addressing `d` is the presented credential SAID.
 const validCESR = `{"v":"ACDC10JSON00011c_","d":"ECredSAID123","i":"EHolderAID","s":"ESchema","a":{"LEI":"5493001KJTIIGC8Y1R17"}}-CESR-attachments`
+
+// fixtureDir holds the recorded vlei-verifier 0.1.5 response bodies (see
+// its PROVENANCE.md). These files are the SINGLE SOURCE OF TRUTH for the
+// verifier's response shapes: the happy-path harness below serves them
+// verbatim rather than hand-written JSON, so the whole suite is verified
+// against the real 0.1.5 contract, not against what we assume it returns.
+// A field-name / structural drift on a version bump changes the re-derived
+// fixture and fails the matching test. Only deliberately-malformed or
+// edge-shaped bodies (missing fields, junk JSON) stay inline below — those
+// are synthetic by design and have no real counterpart to record.
+const fixtureDir = "testdata/vlei-verifier-0.1.5"
+
+func fixture(t *testing.T, name string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join(fixtureDir, name))
+	if err != nil {
+		t.Fatalf("read fixture %s: %v", name, err)
+	}
+	return string(b)
+}
 
 func newVerifierFor(t *testing.T, s *vleiServer) *Verifier {
 	t.Helper()
@@ -188,11 +212,14 @@ func newVerifierFor(t *testing.T, s *vleiServer) *Verifier {
 }
 
 func TestVerifierPresentHappy(t *testing.T) {
+	// Served bodies are the recorded 0.1.5 responses: PUT /presentations
+	// 202 → {creds, aid, msg} (note: no `said` — the adapter reads `aid`),
+	// GET /authorizations 200 → {aid, said, lei, role, msg}.
 	s := &vleiServer{
 		presentStatus: http.StatusAccepted,
-		presentBody:   `{"aid":"EHolderAID","said":"ECredSAID123"}`,
+		presentBody:   fixture(t, "present-202.json"),
 		authStatus:    http.StatusOK,
-		authBody:      `{"aid":"EHolderAID","lei":"5493001KJTIIGC8Y1R17","role":"OOR"}`,
+		authBody:      fixture(t, "authorizations-200-credential.json"),
 	}
 	v := newVerifierFor(t, s)
 	res, err := v.Present(context.Background(), validCESR)
@@ -208,7 +235,7 @@ func TestVerifierPresentPendingAuthorization(t *testing.T) {
 	// Presentation accepted but authorization still processing → PENDING.
 	s := &vleiServer{
 		presentStatus: http.StatusOK,
-		presentBody:   `{"aid":"EHolderAID","said":"ECredSAID123"}`,
+		presentBody:   fixture(t, "present-202.json"),
 		authStatus:    http.StatusNotFound,
 	}
 	v := newVerifierFor(t, s)
@@ -226,10 +253,11 @@ func TestVerifierPresentPendingAuthorization(t *testing.T) {
 func TestVerifierRequestShapes(t *testing.T) {
 	s := &vleiServer{
 		presentStatus: http.StatusAccepted,
-		presentBody:   `{"aid":"EHolderAID","said":"ECredSAID123"}`,
+		presentBody:   fixture(t, "present-202.json"),
 		authStatus:    http.StatusOK,
-		authBody:      `{"lei":"5493001KJTIIGC8Y1R17"}`,
+		authBody:      fixture(t, "authorizations-200-credential.json"),
 		verifyStatus:  http.StatusAccepted,
+		verifyBody:    fixture(t, "signature-verify-202.json"),
 	}
 	v := newVerifierFor(t, s)
 
@@ -332,9 +360,20 @@ func TestVerifierPresentFailures(t *testing.T) {
 func TestVerifierAuthorization(t *testing.T) {
 	ctx := context.Background()
 	t.Run("authorized", func(t *testing.T) {
-		v := newVerifierFor(t, &vleiServer{authStatus: http.StatusOK, authBody: `{"lei":"L1"}`})
-		auth, err := v.Authorization(ctx, "EAID")
-		if err != nil || !auth.Authorized || auth.LEI != "L1" {
+		// Recorded 0.1.5 credential-login 200: {aid, said, lei, role, msg}.
+		// The adapter reads `lei`; the extra fields must not perturb it.
+		v := newVerifierFor(t, &vleiServer{authStatus: http.StatusOK, authBody: fixture(t, "authorizations-200-credential.json")})
+		auth, err := v.Authorization(ctx, "EHolderAID")
+		if err != nil || !auth.Authorized || auth.LEI != "5493001KJTIIGC8Y1R17" {
+			t.Fatalf("auth=%+v err=%v", auth, err)
+		}
+	})
+	t.Run("unknown AID unauthorized (recorded 401 body)", func(t *testing.T) {
+		// Recorded 0.1.5 401: {"msg":"unknown AID: …"}. 401/404 → not
+		// authorized, not an error; the non-2xx body is not consumed.
+		v := newVerifierFor(t, &vleiServer{authStatus: http.StatusUnauthorized, authBody: fixture(t, "authorizations-401-unknown.json")})
+		auth, err := v.Authorization(ctx, "EHolderAID")
+		if err != nil || auth.Authorized {
 			t.Fatalf("auth=%+v err=%v", auth, err)
 		}
 	})
@@ -351,11 +390,14 @@ func TestVerifierAuthorization(t *testing.T) {
 			t.Fatalf("want LEI_VERIFIER_UNAVAILABLE, got %v", err)
 		}
 	})
-	// A 200 carrying no LEI (empty body or {}) must fail closed: an empty
-	// LEI reads downstream as the noop waiver of the AID↔LEI binding, so
-	// returning {Authorized:true, LEI:""} would silently degrade the
-	// production verifier to noop semantics. Mirror the empty-AID guard.
-	for _, body := range []string{"", "{}", `{"lei":""}`} {
+	// A 200 carrying no LEI must fail closed: an empty LEI reads downstream
+	// as the noop waiver of the AID↔LEI binding, so returning
+	// {Authorized:true, LEI:""} would silently degrade the production
+	// verifier to noop semantics. Mirror the empty-AID guard. The first
+	// three bodies are synthetic edges; the last is the RECORDED 0.1.5
+	// AID-only-login 200, which carries `lei: null` — the real shape that
+	// triggers this guard (a valid AID account with no bound credential).
+	for _, body := range []string{"", "{}", `{"lei":""}`, fixture(t, "authorizations-200-aid-only.json")} {
 		t.Run("200 without LEI unavailable", func(t *testing.T) {
 			v := newVerifierFor(t, &vleiServer{authStatus: http.StatusOK, authBody: body})
 			if _, err := v.Authorization(ctx, "EAID"); !isCode(err, "LEI_VERIFIER_UNAVAILABLE") {
@@ -374,9 +416,20 @@ func TestVerifierAuthorization(t *testing.T) {
 func TestVerifierVerifySignature(t *testing.T) {
 	ctx := context.Background()
 	t.Run("verifies", func(t *testing.T) {
-		v := newVerifierFor(t, &vleiServer{verifyStatus: http.StatusAccepted})
+		// Recorded 0.1.5 202: {"msg":"Signature Valid","code":3}. The adapter
+		// maps on status; serving the real body proves it ignores the
+		// unmodeled `code` field rather than choking on it.
+		v := newVerifierFor(t, &vleiServer{verifyStatus: http.StatusAccepted, verifyBody: fixture(t, "signature-verify-202.json")})
 		ok, err := v.VerifySignature(ctx, "EAID", "input", "0Bsig")
 		if err != nil || !ok {
+			t.Fatalf("ok=%v err=%v", ok, err)
+		}
+	})
+	t.Run("invalid (recorded 401 body)", func(t *testing.T) {
+		// Recorded 0.1.5 401: {"msg":…,"code":1} → non-verifying false.
+		v := newVerifierFor(t, &vleiServer{verifyStatus: http.StatusUnauthorized, verifyBody: fixture(t, "signature-verify-401.json")})
+		ok, err := v.VerifySignature(ctx, "EAID", "input", "0Bsig")
+		if err != nil || ok {
 			t.Fatalf("ok=%v err=%v", ok, err)
 		}
 	})
