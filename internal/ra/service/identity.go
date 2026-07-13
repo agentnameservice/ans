@@ -346,13 +346,19 @@ func (s *IdentityService) challenge(ctx context.Context, identity *domain.Verifi
 	}
 
 	// Kinds carrying a register-time presentation (lei) submit it to
-	// their verifier here, pinning the verifier-derived subject AID on
-	// the aggregate before the challenge enumerates it. Discovered by
-	// capability — non-presentation kinds skip this entirely.
+	// their verifier here and get back the derived subject AID, which we
+	// stage on the aggregate before the challenge enumerates it.
+	// Discovered by capability — non-presentation kinds skip this
+	// entirely. StageSubjectAID touches only PendingSubjectAID +
+	// UpdatedAt, never a guard column, so it never disturbs the snapshot.
 	var presentationStatus port.PresentationStatus
 	if pr, ok := verifier.(presentationRegistrar); ok {
-		presentationStatus, err = pr.RegisterPresentation(ctx, identity, opt, now)
+		var subjectAID string
+		subjectAID, presentationStatus, err = pr.RegisterPresentation(ctx, identity.EffectiveValue(), opt)
 		if err != nil {
+			return nil, err
+		}
+		if err := identity.StageSubjectAID(subjectAID, now); err != nil {
 			return nil, err
 		}
 	}

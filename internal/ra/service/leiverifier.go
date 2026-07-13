@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
@@ -24,10 +23,10 @@ import (
 //
 //   - The credential presentation arrives at REGISTER time, so lei
 //     also implements presentationRegistrar: the shared challenge path
-//     submits the CESR, pins the verifier-derived subject AID on the
-//     aggregate, and reports the advisory presentation status. A
-//     re-add (or rotation) re-presents and refreshes the verifier's
-//     authorization window for free.
+//     submits the CESR and gets back the verifier-derived subject AID
+//     and advisory presentation status. A re-add (or rotation)
+//     re-presents and refreshes the verifier's authorization window
+//     for free.
 //   - The proof is a single CESR signature over the served
 //     signingInput (not a JWS array), and the seal commits the subject
 //     AID + a thumbprint only — no JWK, no document. The KEL is the
@@ -37,40 +36,36 @@ type leiVerifier struct {
 	v port.LEIControlVerifier
 }
 
-// RegisterPresentation submits the register-time CESR to the verifier,
-// pins the derived subject AID, and reconciles the credential's LEI
-// against the requested value. Returns the advisory presentation
-// status for the 202.
+// RegisterPresentation submits the register-time CESR to the verifier
+// and reconciles the credential's LEI against effectiveValue. Returns
+// the derived subject AID and the advisory presentation status for the
+// 202; the caller stages the AID.
 func (lv *leiVerifier) RegisterPresentation(
 	ctx context.Context,
-	identity *domain.VerifiedIdentity,
+	effectiveValue string,
 	opts RegisterOptions,
-	now time.Time,
-) (port.PresentationStatus, error) {
+) (string, port.PresentationStatus, error) {
 	if opts.VLEIPresentation == "" {
-		return "", domain.NewValidationError("IDENTIFIER_PRESENTATION_REQUIRED",
+		return "", "", domain.NewValidationError("IDENTIFIER_PRESENTATION_REQUIRED",
 			"lei registration requires vleiPresentation.cesr")
 	}
 	res, err := lv.v.Present(ctx, opts.VLEIPresentation)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	if res.SubjectAID == "" {
-		return "", domain.NewValidationError("LEI_PRESENTATION_INVALID",
+		return "", "", domain.NewValidationError("LEI_PRESENTATION_INVALID",
 			"the vlei verifier returned no subject AID for the presentation")
 	}
 	// Reconcile the presented LEI against the registered value. The
 	// noop adapter waives the AID↔LEI binding and returns an empty LEI
 	// (the documented quickstart waiver, mirroring noop-DNS); skip the
 	// equality check in that case.
-	if res.LEI != "" && !strings.EqualFold(res.LEI, identity.EffectiveValue()) {
-		return "", domain.NewValidationError("LEI_MISMATCH",
-			fmt.Sprintf("presented credential authorizes LEI %q, not %q", res.LEI, identity.EffectiveValue()))
+	if res.LEI != "" && !strings.EqualFold(res.LEI, effectiveValue) {
+		return "", "", domain.NewValidationError("LEI_MISMATCH",
+			fmt.Sprintf("presented credential authorizes LEI %q, not %q", res.LEI, effectiveValue))
 	}
-	if err := identity.StageSubjectAID(res.SubjectAID, now); err != nil {
-		return "", err
-	}
-	return res.Status, nil
+	return res.SubjectAID, res.Status, nil
 }
 
 // Challenges returns the single lei challenge entry: the pinned

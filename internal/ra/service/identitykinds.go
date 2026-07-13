@@ -47,7 +47,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
 	"github.com/godaddy/ans/internal/domain"
@@ -105,36 +104,21 @@ type RegisterOptions struct {
 
 // presentationRegistrar is the optional capability a kind implements
 // when it carries credential material at REGISTER time (lei's vLEI
-// presentation). The service discovers it by type-assertion on the
-// kind's controlVerifier — the same discover-by-capability pattern the
-// 202 response uses for presentationStatus — so kinds with no
-// register-time presentation (did:web, did:key) never grow a dead
-// method. RegisterPresentation runs inside the shared challenge path,
-// so an idempotent re-add (and a rotation) re-presents and refreshes
-// the verifier's authorization window for free.
+// presentation), discovered by type-assertion on the controlVerifier so
+// kinds without one (did:web, did:key) grow no dead method.
 //
-// RACE INVARIANT: RegisterPresentation runs BEFORE challenge() captures
-// the conditional-persist snapshot (identity.go:360), and is itself a
-// slow network call. The snapshot reads the in-memory load-time Status
-// and Challenge.Nonce, and the store's StageChallenge refuses the write
-// unless the row still matches them — so the conditional persist only
-// brackets the presentation fetch (a concurrent verify/revoke during it
-// → 0 rows → conflict, never a clobber) AS LONG AS RegisterPresentation
-// does NOT mutate Status or Challenge.Nonce. It may pin kind-specific
-// state (lei: PendingSubjectAID) and bump UpdatedAt; it must touch neither
-// guard column. Mutating Status here would make the snapshot reflect a
-// post-presentation value, opening exactly the status-regression race
-// (VERIFIED → PENDING_CONTROL) the conditional persist exists to close.
-// See docs/identity-challenge-race.md.
+// It returns derived facts and never receives the aggregate, so it
+// cannot touch the conditional-persist guard columns (Status,
+// Challenge.Nonce): challenge() stages the returned identifier itself.
+// The presentation fetch is thus race-safe by construction — see the
+// StageChallenge doc block in internal/adapter/store/sqlite/identity.go
+// for the conditional-persist guard the snapshot rides.
 type presentationRegistrar interface {
-	// RegisterPresentation submits the kind's register-time credential
-	// material to its verifier, pins the derived subject identifier on
-	// the aggregate, reconciles it against the requested value, and
-	// returns the advisory presentation status ("AUTHORIZED" |
-	// "PENDING") for the 202 body. It MUST NOT mutate the aggregate's
-	// Status or Challenge.Nonce (the conditional-persist guard columns —
-	// see the RACE INVARIANT on the interface doc).
-	RegisterPresentation(ctx context.Context, identity *domain.VerifiedIdentity, opts RegisterOptions, now time.Time) (port.PresentationStatus, error)
+	// RegisterPresentation submits the register-time credential to the
+	// verifier, reconciles it against effectiveValue, and returns the
+	// verifier-derived subject identifier and advisory presentation
+	// status ("AUTHORIZED" | "PENDING") for the 202.
+	RegisterPresentation(ctx context.Context, effectiveValue string, opts RegisterOptions) (subjectAID string, status port.PresentationStatus, err error)
 }
 
 // controlVerifier is the per-kind control-proof gate — the design's
