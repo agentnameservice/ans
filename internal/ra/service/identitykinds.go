@@ -149,6 +149,7 @@ func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifi
 	// their verifiers ship) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
 	// rather than register a stub. The 404-is-the-signal rule. LEI
 	// only registered when configured.
+	//exhaustive:ignore // registry is intentionally partial; absent kinds map to IDENTIFIER_KIND_UNSUPPORTED
 	m := map[domain.IdentifierKind]controlVerifier{
 		domain.KindDIDWeb: &didWebVerifier{resolver: resolver},
 		domain.KindDIDKey: &didKeyVerifier{},

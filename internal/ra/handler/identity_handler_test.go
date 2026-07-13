@@ -311,6 +311,11 @@ func TestIdentityHandler_AuthAndValidation(t *testing.T) {
 	if rec := f.do(t, "owner-1", http.MethodPut, "/v2/ans/identities/x", map[string]string{}); rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("empty value rotate: %d", rec.Code)
 	}
+	// Over the Link route's 32 KiB cap → MaxBytesReader trips → 422
+	oversized := `{"agentIds":"` + strings.Repeat("A", 32<<10) + `"}`
+	if rec := f.doRaw(t, "owner-1", http.MethodPost, "/v2/ans/identities/x/links", oversized); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("oversized body: %d", rec.Code)
+	}
 }
 
 // TestIdentityHandler_BodyCap pins the 1 MiB MaxBytesReader on the

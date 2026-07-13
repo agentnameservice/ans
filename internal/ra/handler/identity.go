@@ -290,6 +290,7 @@ func (h *IdentityHandler) Link(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 32<<10) // 32 KiB — maxLinkBatch (256) UUIDs fit well under this
 	var req linkRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		WriteError(w, domain.NewValidationError("INVALID_REQUEST_BODY", "request body is not valid JSON"))
