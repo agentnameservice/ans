@@ -997,7 +997,7 @@ components:
         ansName:    { type: string, example: "ans://v1.0.0.agent.example.com" }
         eventType:
           type: string
-          enum: [AGENT_REGISTRATION, DOMAIN_VALIDATION, AGENT_ACTIVE, AGENT_REVOCATION]
+          enum: [AGENT_REGISTERED, AGENT_RENEWED, AGENT_DEPRECATED, AGENT_REVOKED]
         raId:       { type: string, example: "ans-ra-local" }
         issuedAt:   { type: string, format: date-time }
         timestamp:  { type: string, format: date-time }

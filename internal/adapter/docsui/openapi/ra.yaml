@@ -180,7 +180,6 @@ paths:
 
         The request can optionally include a server CSR (for RA-issued server cert)
         or a BYOC server certificate with its chain.
-        certificate with its chain.
       operationId: registerAgent
       requestBody:
         description: Agent registration request
