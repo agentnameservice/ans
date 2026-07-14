@@ -124,6 +124,10 @@
             "TXT"
           ],
           "type": "string"
+        },
+        "dnssecVerified": {
+          "description": "Indicates that the RA's verifier observed the DNSSEC authenticated-data bit on the response that produced the attestation",
+          "type": "boolean"
         }
       },
       "type": "object"
