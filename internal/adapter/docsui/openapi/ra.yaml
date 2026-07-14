@@ -174,12 +174,12 @@ paths:
       description: |
         Registers a new agent with the Agent Name Service.
 
-        The Registration Authority (RA) validates the agent's identity and
-        submitted information, then interacts with the CA to issue certificates
-        or validates provided (BYOC) server certificates.
+        The request MAY include a Certificate Signing Request (CSR) so that
+        an Identity certificate can be issued. Identity certificates are
+        issued by the RA.
 
-        The request MUST include an identity CSR. The request can optionally
-        include a server CSR (for RA-issued server cert) or a BYOC server
+        The request can optionally include a server CSR (for RA-issued server cert)
+        or a BYOC server certificate with its chain.
         certificate with its chain.
       operationId: registerAgent
       requestBody:
@@ -1472,7 +1472,7 @@ components:
 
     Protocol:
       type: string
-      enum: [A2A, MCP, HTTP-API]
+      enum: [A2A, MCP, HTTP_API]
 
     DiscoveryProfile:
       type: string
@@ -1607,6 +1607,9 @@ components:
         - agentHost
         - endpoints
         - version
+      oneOf:
+        - required: [serverCsrPEM]
+        - required: [serverCertificatePEM]
 
     AgentRevocationRequest:
       type: object
@@ -1887,7 +1890,7 @@ components:
           type: array
           items:
             type: string
-            enum: [STREAMABLE-HTTP, SSE, JSON-RPC, GRPC, REST, HTTP]
+            enum: [STREAMABLE_HTTP, SSE, JSON_RPC, GRPC, REST, HTTP]
       required:
         - protocol
         - agentUrl

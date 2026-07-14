@@ -1471,7 +1471,7 @@ components:
 
     Protocol:
       type: string
-      enum: [A2A, MCP, HTTP-API]
+      enum: [A2A, MCP, HTTP_API]
 
     DiscoveryProfile:
       type: string
@@ -1889,7 +1889,7 @@ components:
           type: array
           items:
             type: string
-            enum: [STREAMABLE-HTTP, SSE, JSON-RPC, GRPC, REST, HTTP]
+            enum: [STREAMABLE_HTTP, SSE, JSON_RPC, GRPC, REST, HTTP]
       required:
         - protocol
         - agentUrl
