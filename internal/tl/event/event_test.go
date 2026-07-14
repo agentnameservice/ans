@@ -121,6 +121,15 @@ func TestEnvelope_Validate_Success(t *testing.T) {
 	}
 }
 
+func TestEnvelope_Validate_RevocationReasonCode_Valid(t *testing.T) {
+	t.Parallel()
+	env := fixedEnvelope()
+	env.Payload.Producer.Event.RevocationReasonCode = "CA_COMPROMISE"
+	if err := env.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
 func TestEnvelope_Validate_MissingFields(t *testing.T) {
 	t.Parallel()
 	cases := map[string]func(e *event.Envelope){
@@ -137,6 +146,9 @@ func TestEnvelope_Validate_MissingFields(t *testing.T) {
 		"no ansName":       func(e *event.Envelope) { e.Payload.Producer.Event.AnsName = "" },
 		"no timestamp":     func(e *event.Envelope) { e.Payload.Producer.Event.Timestamp = "" },
 		"non-RFC3339 time": func(e *event.Envelope) { e.Payload.Producer.Event.Timestamp = "yesterday" },
+		"bad revocationReasonCode": func(e *event.Envelope) {
+			e.Payload.Producer.Event.RevocationReasonCode = "BOGUS"
+		},
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {

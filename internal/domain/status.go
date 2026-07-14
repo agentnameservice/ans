@@ -139,22 +139,26 @@ const (
 type RevocationReason string
 
 const (
+	RevocationUnspecified          RevocationReason = "UNSPECIFIED"
 	RevocationKeyCompromise        RevocationReason = "KEY_COMPROMISE"
+	RevocationCACompromise         RevocationReason = "CA_COMPROMISE"
 	RevocationCessationOfOperation RevocationReason = "CESSATION_OF_OPERATION"
 	RevocationAffiliationChanged   RevocationReason = "AFFILIATION_CHANGED"
 	RevocationSuperseded           RevocationReason = "SUPERSEDED"
 	RevocationCertificateHold      RevocationReason = "CERTIFICATE_HOLD"
+	RevocationRemoveFromCRL        RevocationReason = "REMOVE_FROM_CRL"
 	RevocationPrivilegeWithdrawn   RevocationReason = "PRIVILEGE_WITHDRAWN"
 	RevocationAACompromise         RevocationReason = "AA_COMPROMISE"
+	RevocationExpiredCert          RevocationReason = "EXPIRED_CERT"
 )
 
 // IsValid returns true if the revocation reason is a recognized value.
 func (r RevocationReason) IsValid() bool {
 	switch r {
-	case RevocationKeyCompromise, RevocationCessationOfOperation,
-		RevocationAffiliationChanged, RevocationSuperseded,
-		RevocationCertificateHold, RevocationPrivilegeWithdrawn,
-		RevocationAACompromise:
+	case RevocationUnspecified, RevocationKeyCompromise, RevocationCACompromise,
+		RevocationCessationOfOperation, RevocationAffiliationChanged, RevocationSuperseded,
+		RevocationCertificateHold, RevocationRemoveFromCRL, RevocationPrivilegeWithdrawn,
+		RevocationAACompromise, RevocationExpiredCert:
 		return true
 	default:
 		return false

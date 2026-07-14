@@ -31,6 +31,8 @@ import (
 	"errors"
 	"fmt"
 	"time"
+
+	"github.com/godaddy/ans/internal/domain"
 )
 
 // SchemaVersion pins the envelope label for V1 events. Producer +
@@ -185,6 +187,9 @@ func (e *Event) Validate() error {
 	}
 	if _, err := time.Parse(time.RFC3339, e.Timestamp); err != nil {
 		return fmt.Errorf("event/v1: event.timestamp not RFC3339: %w", err)
+	}
+	if e.RevocationReasonCode != "" && !domain.RevocationReason(e.RevocationReasonCode).IsValid() {
+		return fmt.Errorf("event/v1: invalid revocationReasonCode %q", e.RevocationReasonCode)
 	}
 	return nil
 }
