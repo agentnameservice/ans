@@ -11,7 +11,7 @@ import (
 const (
 	maxFunctionTags       = 5
 	maxTagLength          = 20
-	maxFunctionIdLength   = 64
+	maxFunctionIDLength   = 64
 	maxFunctionNameLength = 64
 	// maxMetadataURLLength bounds the operator-supplied metadataUrl. It
 	// is emitted verbatim as the DNSAID `cap` SvcParam and embedded in the
@@ -31,10 +31,10 @@ type AgentFunction struct {
 
 // Validate checks that the function has valid fields.
 func (f AgentFunction) Validate() error {
-	if len(f.ID) > maxFunctionIdLength {
+	if len(f.ID) > maxFunctionIDLength {
 		return NewValidationError(
 			"INVALID_FUNCTION",
-			fmt.Sprintf("function id length %d exceeds %d characters", len(f.ID), maxFunctionIdLength),
+			fmt.Sprintf("function id length %d exceeds %d characters", len(f.ID), maxFunctionIDLength),
 		)
 	}
 	if strings.TrimSpace(f.ID) == "" {
