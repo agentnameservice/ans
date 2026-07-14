@@ -118,6 +118,9 @@ func NewRegistration(
 	if ownerID == "" {
 		return nil, NewValidationError("MISSING_OWNER_ID", "ownerId is required")
 	}
+	if displayName == "" {
+		return nil, NewValidationError("MISSING_DISPLAY_NAME", "displayName is required")
+	}
 	if ansName.IsZero() {
 		return nil, NewValidationError("MISSING_ANS_NAME", "ansName is required")
 	}

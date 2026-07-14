@@ -2,12 +2,17 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/ra/service"
+)
+
+const (
+	maxCommentsLength = 200
 )
 
 // V1LifecycleHandler groups the V1 post-registration transitions:
@@ -146,6 +151,12 @@ func (h *V1LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Reason == "" {
 		WriteError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		return
+	}
+
+	if len(req.Comments) > 200 {
+		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
+			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
 	}
 
