@@ -120,6 +120,26 @@ func TestList_BadLimitReturns422(t *testing.T) {
 	}
 }
 
+func TestList_BadStatusReturns422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status=BOGUS", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestList_UnfilterableStatusReturns422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// PENDING_VALIDATION/FAILED/EXPIRED are valid AgentLifecycleStatus
+	// values but are not in AgentLifecycleStatusFilter — not filterable.
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status=PENDING_VALIDATION", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
 func TestDetail_OwnedReturns200(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)

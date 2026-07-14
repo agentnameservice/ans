@@ -62,7 +62,14 @@ func (h *LifecycleHandler) List(w http.ResponseWriter, r *http.Request) {
 				filter.Statuses = nil
 				break
 			}
-			filter.Statuses = append(filter.Statuses, domain.RegistrationStatus(s))
+			switch domain.RegistrationStatus(s) {
+			case domain.StatusPendingDNS, domain.StatusActive, domain.StatusDeprecated, domain.StatusRevoked:
+				filter.Statuses = append(filter.Statuses, domain.RegistrationStatus(s))
+			default:
+				WriteError(w, domain.NewValidationError("INVALID_STATUS",
+					"status must be one of PENDING_DNS, ACTIVE, DEPRECATED, REVOKED, ALL"))
+				return
+			}
 		}
 	} else {
 		filter.Statuses = []domain.RegistrationStatus{domain.StatusActive}
