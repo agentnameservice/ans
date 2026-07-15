@@ -15,6 +15,15 @@ func TestChallengeType_IsValid(t *testing.T) {
 	assert.False(t, ChallengeType("").IsValid())
 }
 
+func TestChallengeType_ACMEMethodToken(t *testing.T) {
+	assert.Equal(t, "ACME-DNS-01", ChallengeTypeDNS01.ACMEMethodToken())
+	assert.Equal(t, "ACME-HTTP-01", ChallengeTypeHTTP01.ACMEMethodToken())
+	// Unknown types map to empty so omitempty drops the field — the
+	// sealed attestation must never carry a fabricated method token.
+	assert.Empty(t, ChallengeType("TLS_ALPN_01").ACMEMethodToken())
+	assert.Empty(t, ChallengeType("").ACMEMethodToken())
+}
+
 func TestChallenge_EffectiveDNSRecordName(t *testing.T) {
 	// RFC 8555 default when the provider didn't override.
 	c := Challenge{Type: ChallengeTypeDNS01, Token: "tok"}
@@ -81,9 +90,19 @@ func TestCertificateOrder_IsZero(t *testing.T) {
 		{CertificateOrder{State: OrderStatePending}, false},
 		{CertificateOrder{Challenges: []Challenge{{}}}, false},
 		{CertificateOrder{ExpiresAt: time.Now()}, false},
+		{CertificateOrder{VerifiedChallenge: ChallengeTypeHTTP01}, false},
 	} {
 		assert.Equal(t, tc.want, tc.order.IsZero(), "%+v", tc.order)
 	}
+}
+
+func TestCertificateOrder_RecordVerifiedChallenge(t *testing.T) {
+	o := NewSelfIssuedOrder("dns-tok", "http-tok", time.Now().Add(time.Hour))
+	assert.Empty(t, o.VerifiedChallenge, "gate not passed yet — nothing recorded")
+
+	o.RecordVerifiedChallenge(ChallengeTypeHTTP01)
+	assert.Equal(t, ChallengeTypeHTTP01, o.VerifiedChallenge)
+	assert.Equal(t, "ACME-HTTP-01", o.VerifiedChallenge.ACMEMethodToken())
 }
 
 func TestCertificateOrder_ChallengeOfType_Missing(t *testing.T) {

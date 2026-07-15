@@ -84,11 +84,20 @@ func TestAgentStore_CertOrderRoundTrip(t *testing.T) {
 	if !ok || http01.HTTPPath != "/.well-known/acme-challenge/tok-http" {
 		t.Errorf("http01 challenge lost fields: %+v", http01)
 	}
+	// Before the gate passes nothing is recorded — the NULL column
+	// must decode as "not recorded", not as some default method.
+	if got.CertOrder.VerifiedChallenge != "" {
+		t.Errorf("verifiedChallenge before gate pass: got %q want empty", got.CertOrder.VerifiedChallenge)
+	}
 
-	// State updates persist through the UPDATE path too.
+	// State updates persist through the UPDATE path too — including
+	// the gate-recorded verified challenge type (the write that
+	// happens on verify-acme when the HTTP-01 artifact satisfied the
+	// any-of gate).
 	if err := got.CertOrder.MarkIssuing(); err != nil {
 		t.Fatal(err)
 	}
+	got.CertOrder.RecordVerifiedChallenge(domain.ChallengeTypeHTTP01)
 	if err := NewAgentStore(db).Save(context.Background(), got); err != nil {
 		t.Fatal(err)
 	}
@@ -98,6 +107,9 @@ func TestAgentStore_CertOrderRoundTrip(t *testing.T) {
 	}
 	if again.CertOrder.State != domain.OrderStateIssuing {
 		t.Errorf("updated state: got %q want ISSUING", again.CertOrder.State)
+	}
+	if again.CertOrder.VerifiedChallenge != domain.ChallengeTypeHTTP01 {
+		t.Errorf("verifiedChallenge: got %q want %q", again.CertOrder.VerifiedChallenge, domain.ChallengeTypeHTTP01)
 	}
 }
 
