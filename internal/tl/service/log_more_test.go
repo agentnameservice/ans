@@ -75,7 +75,8 @@ func TestAppend_LogIDIsUUIDv7(t *testing.T) {
 // than minting an envelope with an empty logId.
 func TestAppend_UUIDFnError(t *testing.T) {
 	tb := newReceiptTestbed(t)
-	tb.logSvc.WithUUIDFn(func() (string, error) { return "", errors.New("entropy exhausted") })
+	genErr := errors.New("entropy exhausted")
+	tb.logSvc.WithUUIDFn(func() (string, error) { return "", genErr })
 	body, jws := tb.signedFixtureBody(t)
 
 	_, err := tb.logSvc.AppendV2(context.Background(), service.AppendInput{
@@ -84,6 +85,11 @@ func TestAppend_UUIDFnError(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("Append with failing uuidFn: expected error, got nil")
+	}
+	// The %w chain is the programmatic contract; the message check
+	// pins the human-readable context the wrap adds.
+	if !errors.Is(err, genErr) {
+		t.Errorf("error %q: want errors.Is match for the generator error", err)
 	}
 	if !strings.Contains(err.Error(), "generate logId") {
 		t.Errorf("error %q: want mention of generate logId", err)
