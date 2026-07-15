@@ -47,7 +47,10 @@ func (TXTProfile) ID() domain.DiscoveryProfile { return domain.DiscoveryProfileA
 // records.
 func (s TXTProfile) Records(reg *domain.AgentRegistration) []domain.ExpectedDNSRecord {
 	fqdn := reg.FQDN()
-	version := reg.AnsName.Version().String()
+	// version= carries the v-prefixed ANSName version segment (ANS-3
+	// §6.3, ans-txt profile §2), matching the leading label of the ANS
+	// name — not the bare semver.
+	version := reg.AnsName.VersionSegment()
 	var records []domain.ExpectedDNSRecord
 	for _, ep := range reg.Endpoints {
 		value := fmt.Sprintf("v=ans1; version=%s; p=%s; mode=direct; url=%s",
