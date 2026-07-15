@@ -154,7 +154,7 @@ func (h *V1LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if len(req.Comments) > 200 {
+	if len(req.Comments) > maxCommentsLength {
 		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
 			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
