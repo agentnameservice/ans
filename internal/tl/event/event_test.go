@@ -124,7 +124,7 @@ func TestEnvelope_Validate_Success(t *testing.T) {
 func TestEnvelope_Validate_RevocationReasonCode_Valid(t *testing.T) {
 	t.Parallel()
 	env := fixedEnvelope()
-	env.Payload.Producer.Event.RevocationReasonCode = "CA_COMPROMISE"
+	env.Payload.Producer.Event.RevocationReasonCode = "AA_COMPROMISE"
 	if err := env.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}

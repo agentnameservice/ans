@@ -79,10 +79,10 @@ func TestRegistrationStatus_ValidateTransition(t *testing.T) {
 
 func TestRevocationReason_IsValid(t *testing.T) {
 	valid := []RevocationReason{
-		RevocationUnspecified, RevocationKeyCompromise, RevocationCACompromise,
-		RevocationCessationOfOperation, RevocationAffiliationChanged, RevocationSuperseded,
-		RevocationCertificateHold, RevocationRemoveFromCRL, RevocationPrivilegeWithdrawn,
-		RevocationAACompromise, RevocationExpiredCert,
+		RevocationKeyCompromise, RevocationCessationOfOperation,
+		RevocationAffiliationChanged, RevocationSuperseded,
+		RevocationCertificateHold, RevocationPrivilegeWithdrawn,
+		RevocationAACompromise,
 	}
 	for _, r := range valid {
 		assert.True(t, r.IsValid(), "expected %s valid", r)

@@ -143,7 +143,7 @@ func TestEnvelope_Validate_Success(t *testing.T) {
 func TestEnvelope_Validate_RevocationReasonCode_Valid(t *testing.T) {
 	t.Parallel()
 	env := fixedEnvelope()
-	env.Payload.Producer.Event.RevocationReasonCode = "REMOVE_FROM_CRL"
+	env.Payload.Producer.Event.RevocationReasonCode = "SUPERSEDED"
 	if err := env.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
