@@ -196,9 +196,12 @@ verify-dns flow without touching real DNS infrastructure.
   plus `dnsRecordsProvisioned[]` as typed `{name, data, type}`
   records. This distinguishes ephemeral ACME challenge records
   (never attested) from production-state records (always attested).
-- **TXT-record version format**: bare semver (`1.0.0`) in TXT record
-  values. The `v`-prefixed form only lives inside the ANS name's
-  hostname label (`ans://v1.0.0.agent.example.com`).
+- **TXT-record version format**: the `version=` value in the
+  `_ans`/`_ans-badge` TXT records carries the v-prefixed ANSName
+  version segment (`v1.0.0`) — the same segment that leads the ANS
+  name's hostname label (`ans://v1.0.0.agent.example.com`). Per
+  ANS-3 §6.3 and the `ans-txt` profile §2 (v0.2.0 spec set); the
+  single construction site is `domain.AnsName.VersionSegment()`.
 - **Leaf hash**: RFC 6962 `SHA-256(0x00 || canonicalEvent)` over the
   JCS-canonical inner-event bytes — same bytes the RA signed.
 
