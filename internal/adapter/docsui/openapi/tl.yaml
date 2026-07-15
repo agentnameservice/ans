@@ -1203,17 +1203,25 @@ components:
         conveniences (anyone can derive RFC 7638 from the sealed
         source) and are never part of the sealed contract.
 
-        The postponed `lei` kind is the one deliberate exception:
-        it will seal the subject AID + a key thumbprint only — there
-        is no document to quote, the ACDC is PII, and KERI's KEL is
-        already the authoritative key history. Seal verbatim what
-        has no other tamper-evident home; commit minimally where one
-        exists.
+        The `lei` kind is the one deliberate exception: it seals the
+        subject AID + a key thumbprint only (`{id: <AID>, type:
+        "vLEI-KERI-AID", thumbprint: base64url(SHA-256(AID))}`) —
+        there is no document to quote, the ACDC is PII, and KERI's
+        KEL is already the authoritative key history. Seal verbatim
+        what has no other tamper-evident home; commit minimally where
+        one exists. A `lei` seal is therefore NOT offline
+        re-verifiable from the seal alone: the KEL-backed key state
+        lives at the vlei-verifier (the documented lei trust
+        boundary), whereas a JWS seal carries the key material and so
+        the sealed proof re-verifies offline.
       required: [verificationMethod, signedProof]
       properties:
         verificationMethod:
           type: object
-          description: The DID document's verification-method object, verbatim
+          description: |
+            For JWS kinds, the DID document's verification-method
+            object, verbatim. For `lei`, the synthesized subject-AID
+            object (`id`, `type: vLEI-KERI-AID`, `thumbprint`).
           example:
             id: did:web:identity.acme-corp.com#key-1
             type: JsonWebKey2020
@@ -1221,7 +1229,10 @@ components:
             publicKeyJwk: { kty: OKP, crv: Ed25519, x: "0-e2i2_..." }
         signedProof:
           type: string
-          description: The compact JWS over the served IdentityProofInput
+          description: |
+            The proof over the served IdentityProofInput — a compact
+            JWS for the JWS kinds, or the CESR signature by the
+            subject AID's current key for `lei`.
 
     LinkedIdentityView:
       type: object

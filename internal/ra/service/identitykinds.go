@@ -62,6 +62,63 @@ type ProofSubmission struct {
 	// and the future did:plc / did:ion): one compact JWS per proven
 	// key, every payload equal to the served signingInput verbatim.
 	SignedProofs []string
+	// CESRSignature is the lei (vLEI) proof: one CESR signature over
+	// the served signingInput, produced by the subject AID's current
+	// signing key. Set only for lei; the JWS kinds ignore it.
+	CESRSignature string
+}
+
+// validateExactlyOneFamily enforces the wire oneOf contract declared
+// by VerifyControlRequest in spec/api-spec-v2.yaml: EXACTLY ONE proof
+// family is set per request (JWS kinds → signedProofs; lei →
+// cesrSignature).
+//
+// Checks value-presence, not the spec oneOf's literal key-presence:
+// the plain []string/string types collapse absent, null, and empty to
+// the same zero value, so key-presence is not recoverable here. Value-
+// presence is stricter — it rejects a body with no usable proof rather
+// than deferring to a per-kind verifier — diverging only on a body with
+// both keys present but one empty, which routes by the non-empty family.
+func (s ProofSubmission) validateExactlyOneFamily() error {
+	hasJWS := len(s.SignedProofs) > 0
+	hasCESR := s.CESRSignature != ""
+	if hasJWS == hasCESR {
+		return domain.NewValidationError("IDENTIFIER_PROOF_INVALID",
+			"exactly one of signedProofs or cesrSignature must be set")
+	}
+	return nil
+}
+
+// RegisterOptions carries the additive, per-kind material a register
+// (or rotate) call may need beyond the identifier value. It is empty
+// for kinds with no register-time presentation (did:web, did:key);
+// lei populates VLEIPresentation. Additive by design — a new kind adds
+// a member here, existing callers pass the zero value.
+type RegisterOptions struct {
+	// VLEIPresentation is the lei full-chain CESR export submitted to
+	// the vlei-verifier at register time (the credential + KELs). The
+	// verifier derives the subject AID from it; the caller never
+	// asserts the AID.
+	VLEIPresentation string
+}
+
+// presentationRegistrar is the optional capability a kind implements
+// when it carries credential material at REGISTER time (lei's vLEI
+// presentation), discovered by type-assertion on the controlVerifier so
+// kinds without one (did:web, did:key) grow no dead method.
+//
+// It returns derived facts and never receives the aggregate, so it
+// cannot touch the conditional-persist guard columns (Status,
+// Challenge.Nonce): challenge() stages the returned identifier itself.
+// The presentation fetch is thus race-safe by construction — see the
+// StageChallenge doc block in internal/adapter/store/sqlite/identity.go
+// for the conditional-persist guard the snapshot rides.
+type presentationRegistrar interface {
+	// RegisterPresentation submits the register-time credential to the
+	// verifier, reconciles it against effectiveValue, and returns the
+	// verifier-derived subject identifier and advisory presentation
+	// status ("AUTHORIZED" | "PENDING") for the 202.
+	RegisterPresentation(ctx context.Context, effectiveValue string, opts RegisterOptions) (subjectAID string, status port.PresentationStatus, err error)
 }
 
 // controlVerifier is the per-kind control-proof gate — the design's
@@ -86,15 +143,21 @@ type controlVerifier interface {
 // did:ion, and did:ethr slot in here when their verifiers are real;
 // until then domain.InferIdentifierKind may recognize a value's form
 // but the missing registry entry yields IDENTIFIER_KIND_UNSUPPORTED.
-func newControlVerifiers(resolver port.DIDResolver) map[domain.IdentifierKind]controlVerifier {
+func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifier) map[domain.IdentifierKind]controlVerifier {
 	// NOTE: deliberately NOT exhaustive over IdentifierKind — a
-	// recognized-but-absent kind (lei, until its vlei-verifier
-	// integration ships) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
-	// rather than register a stub. The 404-is-the-signal rule.
-	return map[domain.IdentifierKind]controlVerifier{ //nolint:exhaustive // absence == kind not enabled, by design
+	// recognized-but-absent kind (did:plc, did:ion, did:ethr, until
+	// their verifiers ship) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
+	// rather than register a stub. The 404-is-the-signal rule. LEI
+	// only registered when configured.
+	//exhaustive:ignore // registry is intentionally partial; absent kinds map to IDENTIFIER_KIND_UNSUPPORTED
+	m := map[domain.IdentifierKind]controlVerifier{
 		domain.KindDIDWeb: &didWebVerifier{resolver: resolver},
 		domain.KindDIDKey: &didKeyVerifier{},
 	}
+	if leiCtl != nil {
+		m[domain.KindLEI] = &leiVerifier{v: leiCtl} // absent → IDENTIFIER_KIND_UNSUPPORTED
+	}
+	return m
 }
 
 // ----- shared JWS proof machinery -----
