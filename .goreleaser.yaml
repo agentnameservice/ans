@@ -129,6 +129,8 @@ changelog:
 
 release:
   mode: append
-  github:
-    owner: godaddy
-    name: ans
+  # owner/name are intentionally omitted: GoReleaser infers them from the CI
+  # environment / git remote, so releases keep working across org renames and
+  # transfers. The hardcoded `github.owner: godaddy` is what broke the v0.1.6
+  # release after the repo moved to the agentnameservice org (asset uploads to
+  # the old owner path got 307 redirects GoReleaser cannot follow).
