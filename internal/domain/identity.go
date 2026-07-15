@@ -14,7 +14,7 @@ type IdentifierKind string
 // Identifier kinds. A kind being *recognized* here is independent of
 // it being *enabled* — the service layer dispatches per kind and
 // returns IDENTIFIER_KIND_UNSUPPORTED for kinds this deployment has
-// no control verifier for (lei is recognized but postponed).
+// no control verifier wired for.
 const (
 	// KindDIDWeb — did:web. The authoritative keys live in the DID
 	// document fetched from the operator's web host; control is
@@ -26,8 +26,8 @@ const (
 	KindDIDKey IdentifierKind = "did:key"
 
 	// KindLEI — an ISO 17442 Legal Entity Identifier, proven through
-	// a vLEI credential presentation. Postponed: recognized so the
-	// error is precise, but no control verifier ships yet.
+	// a vLEI credential presentation verified by the LEIControlVerifier
+	// port (noop quickstart adapter, or the real vlei-verifier client).
 	KindLEI IdentifierKind = "lei"
 )
 
@@ -85,13 +85,24 @@ type VerifiedIdentity struct {
 	Value  string
 	Status IdentityStatus
 	// ProofMethod names the control proof that verified this
-	// identity ("did-web-sig" | "did-key-sig"). Empty until the
-	// first successful verify-control.
+	// identity ("did-web-sig" | "did-key-sig" | "lei-vlei-acdc").
+	// Empty until the first successful verify-control.
 	ProofMethod string
 	// PendingValue stages a same-kind replacement during rotation
 	// (§4.2): set by StageRotation, applied by CompleteVerification.
 	// While staged, the previously sealed state stands.
 	PendingValue string
+	// SubjectAID is the lei (vLEI) holder AID the verifier extracted
+	// from the presentation at register time and the RA pinned on the
+	// aggregate — the signer the verify-control proof is checked
+	// against (§3.6 pinning rule; the caller never re-supplies it).
+	// Empty for kinds with no register-time presentation (did:web,
+	// did:key).
+	SubjectAID string
+	// PendingSubjectAID stages the AID a rotation/registration presents,
+	// promoted to SubjectAID only by CompleteVerification — an abandoned
+	// rotation never overwrites the proven signer. Mirrors PendingValue.
+	PendingSubjectAID string
 	// Challenge is the live anti-replay nonce, if any.
 	Challenge  *IdentityChallenge
 	VerifiedAt time.Time // zero until first proof
@@ -157,8 +168,7 @@ func InferIdentifierKind(raw string) (IdentifierKind, string, error) {
 
 // isLEI reports whether the value is shaped like an ISO 17442 LEI:
 // exactly 20 alphanumeric characters. (The mod-97 check digit and the
-// GLEIF status precondition belong to the lei control verifier, which
-// is postponed — this is lexical dispatch only.)
+// GLEIF status precondition belong to the lei control verifier)
 func isLEI(value string) bool {
 	if len(value) != 20 {
 		return false
@@ -385,6 +395,29 @@ func (v *VerifiedIdentity) StageRotation(rawValue string, now time.Time) error {
 	return nil
 }
 
+// EffectiveSubjectAID is the lei holder AID the current proof round is
+// over: the staged AID during a rotation/registration, else the proven
+// one. Mirrors EffectiveValue.
+func (v *VerifiedIdentity) EffectiveSubjectAID() string {
+	if v.PendingSubjectAID != "" {
+		return v.PendingSubjectAID
+	}
+	return v.SubjectAID
+}
+
+// StageSubjectAID stages the lei holder AID the verifier derived from
+// the presentation (§3.6); CompleteVerification promotes it to the
+// proven SubjectAID. Rejects an empty AID — a blank signer would let
+// any key satisfy verify-control.
+func (v *VerifiedIdentity) StageSubjectAID(aid string, now time.Time) error {
+	if aid == "" {
+		return NewValidationError("LEI_PRESENTATION_INVALID", "subject AID is required")
+	}
+	v.PendingSubjectAID = aid
+	v.UpdatedAt = now.UTC()
+	return nil
+}
+
 // CompleteVerification applies a successful control proof:
 //
 //   - PENDING_CONTROL → VERIFIED (first proof; seals IDENTITY_VERIFIED)
@@ -413,7 +446,11 @@ func (v *VerifiedIdentity) CompleteVerification(now time.Time) (string, error) {
 		return "", NewInvalidStateError("IDENTITY_INVALID_STATE",
 			fmt.Sprintf("unexpected identity status %s", v.Status))
 	}
+	if v.PendingSubjectAID != "" {
+		v.SubjectAID = v.PendingSubjectAID
+	}
 	v.PendingValue = ""
+	v.PendingSubjectAID = ""
 	v.ProofMethod = proofMethodForKind(v.Kind)
 	v.VerifiedAt = now.UTC()
 	v.UpdatedAt = now.UTC()
@@ -432,6 +469,7 @@ func (v *VerifiedIdentity) Revoke(now time.Time) error {
 	}
 	v.Status = IdentityRevoked
 	v.PendingValue = ""
+	v.PendingSubjectAID = ""
 	v.Challenge = nil
 	v.UpdatedAt = now.UTC()
 	return nil
