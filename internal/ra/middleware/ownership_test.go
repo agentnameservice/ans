@@ -279,6 +279,9 @@ func (f *fakeAgentStore) FindExistingByFQDN(_ context.Context, _ string) ([]*dom
 func (f *fakeAgentStore) ListByOwner(_ context.Context, _ string, _ port.ListFilter) (*port.CursorPage[*domain.AgentRegistration], error) {
 	return nil, nil
 }
+func (f *fakeAgentStore) ListAll(_ context.Context, _ port.ListFilter) (*port.CursorPage[*domain.AgentRegistration], error) {
+	return nil, nil
+}
 func (f *fakeAgentStore) Delete(_ context.Context, _ int64) error { return nil }
 
 // Silence "unused" on timing imports the testbed may shed.

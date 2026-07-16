@@ -61,6 +61,34 @@ func (s *RegistrationService) List(ctx context.Context, ownerID string, filter p
 	}, nil
 }
 
+// ListPublic returns agents matching the filter across all owners.
+func (s *RegistrationService) ListPublic(ctx context.Context, filter port.ListFilter) (*ListResult, error) {
+	page, err := s.agents.ListAll(ctx, filter)
+	if err != nil {
+		return nil, err
+	}
+
+	endpointsByAgent := map[string]*domain.AgentEndpoints{}
+	if len(page.Items) > 0 {
+		ids := make([]string, 0, len(page.Items))
+		for _, a := range page.Items {
+			ids = append(ids, a.AgentID)
+		}
+		endpointsByAgent, err = s.endpoints.FindByAgentIDs(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return &ListResult{
+		Items:      page.Items,
+		Endpoints:  endpointsByAgent,
+		NextCursor: page.NextCursor,
+		HasMore:    page.HasMore,
+		Limit:      filter.Limit,
+	}, nil
+}
+
 // DetailResult carries everything the detail handler needs to build
 // an AgentDetails response.
 type DetailResult struct {

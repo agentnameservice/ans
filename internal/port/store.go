@@ -60,6 +60,10 @@ type AgentStore interface {
 		filter ListFilter,
 	) (*CursorPage[*domain.AgentRegistration], error)
 
+	// ListAll returns a cursor page of agents across all owners.
+	// Used by the public discovery endpoint.
+	ListAll(ctx context.Context, filter ListFilter) (*CursorPage[*domain.AgentRegistration], error)
+
 	// Delete removes the registration with the given ID. Used only for
 	// administrative cleanup; normal lifecycle uses Revoke.
 	Delete(ctx context.Context, id int64) error

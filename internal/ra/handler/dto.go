@@ -34,6 +34,10 @@ type listItem struct {
 }
 
 func mapListResponse(res *service.ListResult) listResponse {
+	return mapListResponseWithPrefix(res, "/v2/ans/agents/")
+}
+
+func mapListResponseWithPrefix(res *service.ListResult, linkPrefix string) listResponse {
 	items := make([]listItem, 0, len(res.Items))
 	for _, reg := range res.Items {
 		epSlice := []domain.AgentEndpoint{}
@@ -52,7 +56,7 @@ func mapListResponse(res *service.ListResult) listResponse {
 			RegistrationTimestamp: reg.Details.RegistrationTimestamp.Format("2006-01-02T15:04:05Z07:00"),
 			Endpoints:             mapEndpointsToDTO(epSlice),
 			Links: []linkDTO{
-				{Rel: "self", Href: "/v2/ans/agents/" + reg.AgentID},
+				{Rel: "self", Href: linkPrefix + reg.AgentID},
 			},
 		})
 	}

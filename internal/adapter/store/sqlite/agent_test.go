@@ -342,6 +342,202 @@ func TestAgentStore_ListByOwner_InvalidCursor(t *testing.T) {
 	}
 }
 
+// ----- ListAll (public discovery — no owner filter) -----
+
+func TestAgentStore_ListAll_ReturnsAllOwners(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	ctx := context.Background()
+
+	// Insert agents for two different owners.
+	for i, owner := range []string{"alice", "bob"} {
+		ansName, _ := domain.NewAnsName(mustSemVer(t, 1, 0, i), owner+".example.com")
+		_ = store.Save(ctx, &domain.AgentRegistration{
+			AgentID: owner + "-agent", OwnerID: owner,
+			AnsName: ansName, Status: domain.StatusActive,
+			Details: domain.RegistrationDetails{RegistrationTimestamp: time.Now()},
+		})
+	}
+
+	page, err := store.ListAll(ctx, port.ListFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Errorf("ListAll: got %d, want 2 (both owners)", len(page.Items))
+	}
+}
+
+func TestAgentStore_ListAll_StatusFilter(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	ctx := context.Background()
+
+	for _, spec := range []struct {
+		id     string
+		host   string
+		status domain.RegistrationStatus
+	}{
+		{"active-1", "a.example.com", domain.StatusActive},
+		{"revoked-1", "b.example.com", domain.StatusRevoked},
+		{"active-2", "c.example.com", domain.StatusActive},
+	} {
+		ansName, _ := domain.NewAnsName(mustSemVer(t, 1, 0, 0), spec.host)
+		_ = store.Save(ctx, &domain.AgentRegistration{
+			AgentID: spec.id, OwnerID: "owner",
+			AnsName: ansName, Status: spec.status,
+			Details: domain.RegistrationDetails{RegistrationTimestamp: time.Now()},
+		})
+	}
+
+	page, err := store.ListAll(ctx, port.ListFilter{
+		Statuses: []domain.RegistrationStatus{domain.StatusActive},
+		Limit:    10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 2 {
+		t.Errorf("status filter: got %d, want 2 ACTIVE", len(page.Items))
+	}
+	for _, item := range page.Items {
+		if item.Status != domain.StatusActive {
+			t.Errorf("leaked status %s", item.Status)
+		}
+	}
+}
+
+func TestAgentStore_ListAll_AgentHostFilter(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	ctx := context.Background()
+
+	for i, host := range []string{"target.example.com", "other.example.com"} {
+		ansName, _ := domain.NewAnsName(mustSemVer(t, 1, 0, i), host)
+		_ = store.Save(ctx, &domain.AgentRegistration{
+			AgentID: "id-" + host, OwnerID: "owner",
+			AnsName: ansName, Status: domain.StatusActive,
+			Details: domain.RegistrationDetails{RegistrationTimestamp: time.Now()},
+		})
+	}
+
+	page, err := store.ListAll(ctx, port.ListFilter{
+		AgentHost: "target.example.com",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 1 {
+		t.Errorf("host filter: got %d, want 1", len(page.Items))
+	}
+	if page.Items[0].AnsName.FQDN() != "target.example.com" {
+		t.Errorf("wrong host: %s", page.Items[0].AnsName.FQDN())
+	}
+}
+
+func TestAgentStore_ListAll_Pagination(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	ctx := context.Background()
+
+	for i := 1; i <= 5; i++ {
+		ansName, _ := domain.NewAnsName(mustSemVer(t, 1, 0, i), "p.example.com")
+		_ = store.Save(ctx, &domain.AgentRegistration{
+			AgentID: "all-paged-" + ansName.String(), OwnerID: "alice",
+			AnsName: ansName, Status: domain.StatusActive,
+			Details: domain.RegistrationDetails{RegistrationTimestamp: time.Now()},
+		})
+	}
+
+	page1, err := store.ListAll(ctx, port.ListFilter{Limit: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page1.Items) != 2 {
+		t.Errorf("page1: got %d, want 2", len(page1.Items))
+	}
+	if !page1.HasMore || page1.NextCursor == "" {
+		t.Error("HasMore + NextCursor expected")
+	}
+
+	page2, err := store.ListAll(ctx, port.ListFilter{Limit: 2, Cursor: page1.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page2.Items) != 2 {
+		t.Errorf("page2: got %d, want 2", len(page2.Items))
+	}
+	if page1.Items[len(page1.Items)-1].ID <= page2.Items[0].ID {
+		t.Errorf("cursor did not advance: page1 last=%d page2 first=%d",
+			page1.Items[len(page1.Items)-1].ID, page2.Items[0].ID)
+	}
+
+	// Last page.
+	page3, err := store.ListAll(ctx, port.ListFilter{Limit: 2, Cursor: page2.NextCursor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page3.Items) != 1 {
+		t.Errorf("page3: got %d, want 1", len(page3.Items))
+	}
+	if page3.HasMore {
+		t.Error("last page should not have more")
+	}
+}
+
+func TestAgentStore_ListAll_DefaultLimit(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	ctx := context.Background()
+
+	// Insert 3 agents — less than default 20.
+	for i := 1; i <= 3; i++ {
+		ansName, _ := domain.NewAnsName(mustSemVer(t, 1, 0, i), "def.example.com")
+		_ = store.Save(ctx, &domain.AgentRegistration{
+			AgentID: "def-" + ansName.String(), OwnerID: "owner",
+			AnsName: ansName, Status: domain.StatusActive,
+			Details: domain.RegistrationDetails{RegistrationTimestamp: time.Now()},
+		})
+	}
+
+	// Limit 0 → default 20.
+	page, err := store.ListAll(ctx, port.ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 3 {
+		t.Errorf("default limit: got %d, want 3", len(page.Items))
+	}
+	if page.HasMore {
+		t.Error("should not have more with 3 < 20")
+	}
+}
+
+func TestAgentStore_ListAll_Empty(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	page, err := store.ListAll(context.Background(), port.ListFilter{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Items) != 0 {
+		t.Errorf("empty: got %d, want 0", len(page.Items))
+	}
+	if page.HasMore {
+		t.Error("empty DB should not have more")
+	}
+	if page.NextCursor != "" {
+		t.Errorf("empty DB should have empty cursor, got %q", page.NextCursor)
+	}
+}
+
+func TestAgentStore_ListAll_InvalidCursor(t *testing.T) {
+	store := NewAgentStore(newTestDB(t))
+	_, err := store.ListAll(context.Background(), port.ListFilter{Cursor: "!!!"})
+	if err == nil {
+		t.Fatal("expected cursor decode error")
+	}
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "INVALID_CURSOR" {
+		t.Errorf("want INVALID_CURSOR domain error, got %v", err)
+	}
+}
+
 // ----- Delete -----
 
 func TestAgentStore_Delete(t *testing.T) {

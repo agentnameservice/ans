@@ -283,6 +283,81 @@ func (s *AgentStore) ListByOwner(
 	}, nil
 }
 
+// ListAll returns a cursor-paginated list of all agents regardless of owner.
+func (s *AgentStore) ListAll(
+	ctx context.Context,
+	filter port.ListFilter,
+) (*port.CursorPage[*domain.AgentRegistration], error) {
+	limit := filter.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	var args []any
+	var clauses []string
+
+	if filter.AgentHost != "" {
+		clauses = append(clauses, "agent_host = ?")
+		args = append(args, filter.AgentHost)
+	}
+
+	if len(filter.Statuses) > 0 {
+		placeholders := make([]string, len(filter.Statuses))
+		for i, st := range filter.Statuses {
+			placeholders[i] = "?"
+			args = append(args, string(st))
+		}
+		clauses = append(clauses, fmt.Sprintf("status IN (%s)", joinStrings(placeholders, ",")))
+	}
+
+	if filter.Cursor != "" {
+		id, err := decodeCursor(filter.Cursor)
+		if err != nil {
+			return nil, domain.NewValidationError("INVALID_CURSOR", err.Error())
+		}
+		clauses = append(clauses, "id < ?")
+		args = append(args, id)
+	}
+
+	where := "1=1"
+	if len(clauses) > 0 {
+		where = joinStrings(clauses, " AND ")
+	}
+
+	q := fmt.Sprintf(
+		`SELECT * FROM agent_registrations WHERE %s ORDER BY id DESC LIMIT ?`,
+		where,
+	)
+	args = append(args, limit+1)
+
+	var rows []agentRow
+	if err := s.db.extx(ctx).SelectContext(ctx, &rows, q, args...); err != nil {
+		return nil, err
+	}
+
+	hasMore := len(rows) > limit
+	if hasMore {
+		rows = rows[:limit]
+	}
+	items, err := rowsToDomain(rows)
+	if err != nil {
+		return nil, err
+	}
+	nextCursor := ""
+	if hasMore && len(items) > 0 {
+		nextCursor = encodeCursor(items[len(items)-1].ID)
+	}
+	return &port.CursorPage[*domain.AgentRegistration]{
+		Items:         items,
+		NextCursor:    nextCursor,
+		HasMore:       hasMore,
+		ReturnedCount: len(items),
+	}, nil
+}
+
 // Delete removes a registration by ID.
 func (s *AgentStore) Delete(ctx context.Context, id int64) error {
 	_, err := s.db.extx(ctx).ExecContext(ctx, `DELETE FROM agent_registrations WHERE id = ?`, id)

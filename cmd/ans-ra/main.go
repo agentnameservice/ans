@@ -234,6 +234,13 @@ func run(cfgPath string) error {
 	r.With(writeOwnership).Delete("/v2/ans/agents/{agentId}/certificates/server/renewal", lifeH.CancelServerCertRenewal)
 	r.With(writeOwnership).Post("/v2/ans/agents/{agentId}/certificates/server/renewal/verify-acme", lifeH.VerifyRenewalACME)
 
+	// Public discovery routes — unauthenticated reads. The /v2/public/
+	// prefix is registered as an anonymous path in buildAuth so the auth
+	// middleware skips it entirely.
+	pubH := handler.NewPublicHandler(regSvc)
+	r.Get("/v2/public/agents", pubH.List)
+	r.Get("/v2/public/agents/{agentId}", pubH.Detail)
+
 	// V1 RA surface — byte-for-byte parity with the reference V1 API
 	// spec. Shares the same RegistrationService as the V2 routes;
 	// only the DTO marshalling + TL-emit schema version differ. See
@@ -379,6 +386,7 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithAPISecret(cfg.Auth.Static.APISecret),
 			auth.WithAnonymousPath("/v2/admin/health"),
 			auth.WithAnonymousPath("/v2/admin/ready"),
+			auth.WithAnonymousPath("/v2/public/"),
 			auth.WithAnonymousPath("/docs"),
 		), nil
 	case "oidc":
@@ -389,6 +397,7 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			cfg.Auth.OIDC.ClientID,
 			auth.WithOIDCAnonymousPath("/v2/admin/health"),
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
+			auth.WithOIDCAnonymousPath("/v2/public/"),
 			auth.WithOIDCAnonymousPath("/docs"),
 			// Empty AdminGroups means no OIDC user is admin —
 			// preserves prior behaviour for operators who haven't

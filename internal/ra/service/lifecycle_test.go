@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/godaddy/ans/internal/domain"
+	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/service"
 	event "github.com/godaddy/ans/internal/tl/event"
 	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
@@ -196,5 +197,58 @@ func TestSubmitIdentityCSR_NoIdentityCSR_Rejected(t *testing.T) {
 	}
 	if de.Code != "IDENTITY_CSR_NOT_PERMITTED" {
 		t.Fatalf("expected code IDENTITY_CSR_NOT_PERMITTED; got %q", de.Code)
+	}
+}
+
+// TestListPublic_ReturnsAllOwners verifies that ListPublic returns
+// agents across all owners, unlike List which is ownership-scoped.
+func TestListPublic_ReturnsAllOwners(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	ctx := context.Background()
+
+	// Register agent for owner-1 (the fixture default).
+	resp1, err := fx.svc.RegisterAgent(ctx, fx.req)
+	if err != nil {
+		t.Fatalf("register owner-1: %v", err)
+	}
+
+	// Register a second agent for owner-2.
+	semver2, _ := domain.ParseSemVer("2.0.0")
+	ansName2, _ := domain.NewAnsName(semver2, "other.example.com")
+	req2 := fx.req
+	req2.OwnerID = "owner-2"
+	req2.AnsName = ansName2
+	req2.Endpoints = []domain.AgentEndpoint{{
+		Protocol:   domain.Protocol("MCP"),
+		AgentURL:   "https://other.example.com/mcp",
+		Transports: []domain.Transport{domain.Transport("SSE")},
+	}}
+	req2.IdentityCSRPEM = testCSR(t, ansName2.String())
+	req2.ServerCsrPEM = testServerCSR(t, ansName2.FQDN())
+	resp2, err := fx.svc.RegisterAgent(ctx, req2)
+	if err != nil {
+		t.Fatalf("register owner-2: %v", err)
+	}
+
+	// ListPublic with status=ALL should return both.
+	result, err := fx.svc.ListPublic(ctx, port.ListFilter{
+		Statuses: []domain.RegistrationStatus{
+			domain.StatusPendingValidation,
+			domain.StatusActive,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ListPublic: %v", err)
+	}
+	if len(result.Items) != 2 {
+		t.Fatalf("want 2 agents across both owners; got %d", len(result.Items))
+	}
+	seen := map[string]bool{}
+	for _, item := range result.Items {
+		seen[item.AgentID] = true
+	}
+	if !seen[resp1.Registration.AgentID] || !seen[resp2.Registration.AgentID] {
+		t.Errorf("expected both agents in result; seen=%v", seen)
 	}
 }
