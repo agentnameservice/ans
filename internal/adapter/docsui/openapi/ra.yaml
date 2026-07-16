@@ -1030,9 +1030,12 @@ paths:
         is the idempotent re-add: the same `identityId` returns with
         a fresh nonce (the prior nonce is superseded). A value
         already verified — by this owner or any other — returns 409
-        `IDENTIFIER_DUPLICATE`. Kinds without an enabled control
-        verifier (`lei`, postponed) return 422
-        `IDENTIFIER_KIND_UNSUPPORTED`.
+        `IDENTIFIER_DUPLICATE`. A recognized value whose kind has no
+        enabled control verifier (e.g. `did:plc`, `did:ion`, until
+        their verifiers ship) returns 422
+        `IDENTIFIER_KIND_UNSUPPORTED`. The `lei` kind additionally
+        requires a `vleiPresentation` at register time; omitting it
+        returns 422 `IDENTIFIER_PRESENTATION_REQUIRED`.
       operationId: registerIdentity
       requestBody:
         required: true
@@ -1060,7 +1063,20 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Invalid or unsupported identifier
+          description: |
+            Invalid or unsupported identifier; for the `did:web` kind the
+            register-time resolution may fail with `DID_RESOLUTION_FAILED`
+            or `DID_DOCUMENT_ID_MISMATCH`; for the `lei` kind —
+            `IDENTIFIER_PRESENTATION_REQUIRED`, `LEI_PRESENTATION_INVALID`,
+            `LEI_MISMATCH`, `LEI_SUBJECT_AID_INVALID`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: |
+            Upstream unavailable — `LEI_VERIFIER_UNAVAILABLE` (the `lei`
+            verifier runs synchronously at register; retryable).
           content:
             application/json:
               schema:
@@ -1174,7 +1190,21 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
-          description: Invalid replacement value (incl. IDENTIFIER_KIND_MISMATCH)
+          description: |
+            Invalid replacement value (incl. `IDENTIFIER_KIND_MISMATCH`);
+            for the `did:web` kind the register-time resolution may fail
+            with `DID_RESOLUTION_FAILED` or `DID_DOCUMENT_ID_MISMATCH`;
+            for the `lei` kind — `IDENTIFIER_PRESENTATION_REQUIRED`,
+            `LEI_PRESENTATION_INVALID`, `LEI_MISMATCH`,
+            `LEI_SUBJECT_AID_INVALID`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: |
+            Upstream unavailable — `LEI_VERIFIER_UNAVAILABLE` (the `lei`
+            verifier runs synchronously at rotate; retryable).
           content:
             application/json:
               schema:
@@ -1195,6 +1225,12 @@ paths:
         the identifier for `did:key`); one bad proof fails the call
         closed. The nonce is consumed exactly once, inside the
         success transaction — a failed attempt does not consume it.
+
+        The `lei` kind instead submits a single `cesrSignature` over
+        the same `signingInput`: the RA forwards it to the
+        vlei-verifier, which live-rechecks the subject AID's
+        authorization and verifies the signature against its current
+        KEL key state.
 
         JWS bearing unrecognized `crit` header parameters are
         rejected (RFC 7515 §4.1.11) — this verifier implements no
@@ -1255,14 +1291,14 @@ paths:
           description: |
             Proof rejected — `PRICC_SIGNATURE_INVALID`,
             `DID_VERIFICATION_METHOD_INVALID`, `DID_RESOLUTION_FAILED`,
-            `DID_DOCUMENT_ID_MISMATCH`, `IDENTIFIER_PROOF_INVALID`.
+            `DID_DOCUMENT_ID_MISMATCH`, `IDENTIFIER_PROOF_INVALID`, `LEI_NOT_AUTHORIZED`, `LEI_MISMATCH`.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
         '503':
-          description: Transparency Log unavailable (TL_UNAVAILABLE — retryable; the nonce is NOT consumed)
+          description: Upstream unavailable (TL_UNAVAILABLE, or LEI_VERIFIER_UNAVAILABLE — retryable; the nonce is NOT consumed)
           content:
             application/json:
               schema:
@@ -2386,15 +2422,37 @@ components:
       description: |
         Registers (POST) or rotates (PUT) an identifier. The kind is
         inferred from the value's lexical form — `did:web:` prefix,
-        `did:key:` prefix, or a 20-character LEI (recognized but
-        postponed) — never caller-asserted.
+        `did:key:` prefix, or a 20-character LEI — never
+        caller-asserted.
       properties:
         value:
           type: string
           description: The identifier to prove control of
           example: did:web:identity.acme-corp.com
+        vleiPresentation:
+          $ref: '#/components/schemas/VLEIPresentation'
       required:
         - value
+
+    VLEIPresentation:
+      type: object
+      description: |
+        The lei (vLEI) register-time credential presentation. REQUIRED
+        for the `lei` kind and omitted for the JWS kinds (`did:web`,
+        `did:key`). The RA submits the CESR to its configured
+        vlei-verifier, which derives and pins the subject AID; the
+        202's `presentationStatus` reports the verifier's advisory
+        authorization decision.
+      properties:
+        cesr:
+          type: string
+          description: |
+            The full-chain CESR export of the vLEI credential and its
+            supporting KELs/ACDCs (the `credentials().get(said, true)`
+            shape). The RA never parses KERI key state itself — the
+            verifier is the authoritative key-state oracle.
+      required:
+        - cesr
 
     IdentityChallengeResponse:
       type: object
@@ -2426,6 +2484,15 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/IdentityProofChallenge'
+        presentationStatus:
+          type: string
+          enum: [AUTHORIZED, PENDING]
+          description: |
+            The lei register-time advisory authorization status from
+            the vlei-verifier (`AUTHORIZED` | `PENDING`). Omitted for
+            kinds with no register-time presentation (`did:web`,
+            `did:key`). Advisory only — control is finally established
+            by a LIVE re-authorization at verify-control.
       required:
         - identityId
         - kind
@@ -2458,11 +2525,20 @@ components:
     VerifyControlRequest:
       type: object
       description: |
-        One compact JWS per proven key. Supported algorithms match
-        what the verifier implements: EdDSA (Ed25519), ES256
-        (ECDSA P-256), and RS256 (RSA >= 2048). Key-agreement keys
-        (X25519) and curves without a verifier (secp256k1,
-        P-384/521) are rejected with a precise error.
+        The control proof. Its members are additive per identifier
+        kind, and EXACTLY ONE family is set per request:
+
+          - JWS kinds (`did:web`, `did:key`) submit `signedProofs` —
+            one compact JWS per proven key.
+          - The `lei` kind submits `cesrSignature` — a single CESR
+            signature over the served signingInput by the subject
+            AID's current key.
+
+        Supported JWS algorithms match what the verifier implements:
+        EdDSA (Ed25519), ES256 (ECDSA P-256), and RS256 (RSA >=
+        2048). Key-agreement keys (X25519) and curves without a
+        verifier (secp256k1, P-384/521) are rejected with a precise
+        error.
       properties:
         signedProofs:
           type: array
@@ -2476,8 +2552,18 @@ components:
               and MAY carry `jwk` (the signer's public key — required
               by the quickstart noop resolver, ignored by the web
               resolver, which always uses the resolved document).
-      required:
-        - signedProofs
+        cesrSignature:
+          type: string
+          description: |
+            The lei proof: a single CESR signature over the served
+            signingInput by the subject AID's current key. Set only
+            for the `lei` kind. The RA forwards it to the
+            vlei-verifier, which resolves the AID's key state from its
+            KEL and checks the signature over the exact signingInput
+            bytes (the same payload the JWS kinds sign).
+      oneOf:
+        - required: [signedProofs]
+        - required: [cesrSignature]
 
     IdentityLifecycleStatus:
       type: string

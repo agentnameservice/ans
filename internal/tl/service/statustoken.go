@@ -149,8 +149,18 @@ func buildStatusClaims(rec *sqlitetl.EventRecord, status string) (*receipt.Statu
 		// valid: the token still asserts identity + status.
 		return claims, nil
 	}
+	// Attestation cert-list shape is schema-dependent:
+	//   V2 → `identityCerts[]` / `serverCerts[]` (unified arrays).
+	//   V1 → `validIdentityCerts[]` / `validServerCerts[]` (rotation arrays)
+	// Prefer V2; fall back to V1.
 	claims.ValidIdentityCerts = extractCertFingerprints(attest["identityCerts"])
+	if claims.ValidIdentityCerts == nil {
+		claims.ValidIdentityCerts = extractCertFingerprints(attest["validIdentityCerts"])
+	}
 	claims.ValidServerCerts = extractCertFingerprints(attest["serverCerts"])
+	if claims.ValidServerCerts == nil {
+		claims.ValidServerCerts = extractCertFingerprints(attest["validServerCerts"])
+	}
 	claims.MetadataHashes = extractMetadataHashes(attest["metadataHashes"])
 	return claims, nil
 }

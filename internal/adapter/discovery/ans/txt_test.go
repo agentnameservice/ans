@@ -33,12 +33,14 @@ func TestTXTProfile_Records(t *testing.T) {
 			wantHTTPS:   true,
 			wantInValue: []string{
 				"v=ans1",
-				"version=1.0.0",
+				"version=v1.0.0",
 				"p=a2a",
 				"mode=direct",
 				"url=https://agent.example.com/a2a",
 			},
-			wantNotIn: []string{"v1.0.0", "1-0-0"},
+			// version= must carry the v-prefixed ANSName segment
+			// (ANS-3 §6.3), never the bare semver or a mangled form.
+			wantNotIn: []string{"version=1.0.0", "1-0-0"},
 		},
 		{
 			name: "two_endpoints_emit_two_ans_txt_rows_one_https_rr",

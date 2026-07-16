@@ -1,0 +1,211 @@
+# vLEI ecosystem for the ans verify-control demo.
+#
+# Brings up a self-contained, LOCAL GLEIF/KERI stack so a genuine AID
+# holding a (self-issued) vLEI can sign the RA's nonce and the RA's
+# verify-control endpoint can verify it against a real `vlei-verifier`.
+#
+# NO genuine LEI/vLEI is required: the whole chain is self-issued
+# against a synthetic local GLEIF root registered via
+# POST /root_of_trust/{aid} (VERIFIER_ENV=development). The LEI is any
+# well-formed 20-char string; the verifier checks the chain to YOUR
+# local root, not api.gleif.org.
+#
+# Image pinning: the sibling images are pinned to known-good tags for
+# reproducibility (GLEIF's KERI/KERIA/vLEI images move fast and
+# flag/endpoint shapes vary by release). The vlei-verifier image is NOT
+# published to any registry — upstream builds it locally — so we build
+# it from the pinned `0.1.5` source via a git build context and let it
+# use its own bundled `verifier-config-docker-local.json`. See README.md.
+
+services:
+  # KERI witness network — irreducible: chain-walk needs the key-event
+  # logs. Exposes three demo witnesses (wan/wil/wes) on 5642-5644.
+  witnesses:
+    # Pinned to the same keripy the verifier is built on
+    # (verifier.dockerfile: FROM weboftrust/keri:1.2.0-rc4). `kli witness
+    # demo` mints the canonical wan/wil/wes demo AIDs the verifier's
+    # bundled config resolves at boot.
+    image: weboftrust/keri:1.2.0-rc4
+    container_name: ans-vlei-witnesses
+    # The verifier's bundled verifier-config-docker-local.json resolves
+    # witness OOBIs at host `witness-demo`; alias this service to match.
+    networks:
+      default:
+        aliases:
+          - witness-demo
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONIOENCODING=UTF-8
+    # `kli witness demo` reads each witness's config from
+    # scripts/keri/cf/main/<name>.json (Configer headDirPath="scripts",
+    # WORKDIR /keripy). Without these files the witnesses advertise no
+    # reachable `curls`, so KERIA — in its own container — resolves their
+    # KELs but has "no http endpoint" to request receipts from, and AID
+    # inception hangs. These configs point each witness's curls at the
+    # `witness-demo` network alias so KERIA can reach them.
+    # Mounted read-write: keripy's Configer opens the config directory
+    # read-write (lock files), and a read-only mount makes it silently
+    # fall back to an empty ~/.keri/cf/main, leaving the witnesses with
+    # no curls again.
+    volumes:
+      - ./witness-config/main:/keripy/scripts/keri/cf/main
+    # weboftrust/keri's ENTRYPOINT is already `kli`; pass only its args.
+    command:
+      - witness
+      - demo
+    ports:
+      - "127.0.0.1:5642:5642"
+      - "127.0.0.1:5643:5643"
+      - "127.0.0.1:5644:5644"
+    # weboftrust/keri ships no curl; use the bundled python3 to probe the
+    # witness HTTP endpoint (127.0.0.1 to avoid IPv6-localhost refusal).
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:5642/oobi',timeout=3).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # vLEI schema server — serves the ACDC schemas (LE/OOR/ECR/QVI) that
+  # the credential chain is typed against, on 7723.
+  vlei-server:
+    image: gleif/vlei:1.0.0
+    container_name: ans-vlei-server
+    environment:
+      - PYTHONUNBUFFERED=1
+    # Use the image's default entrypoint command (vLEI-server -s /vLEI/schema
+    # -c /vLEI/credentials -o /vLEI/oobis). Overriding the paths breaks schema
+    # OOBI resolution — gleif/vlei:1.0.0 ships schemas under /vLEI/schema, and
+    # the verifier's durls fail to parse an empty body if they're not served.
+    ports:
+      - "127.0.0.1:7723:7723"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:7723/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # KERIA edge agent — hosts the holder's cloud agent so the signify scripts
+  # (build-chain.ts / sign-proof.ts) can incept the holder AID, resolve OOBIs,
+  # and receive/present credentials. Admin 3901, boot 3903.
+  keria:
+    image: gleif/keria:0.3.0
+    container_name: ans-vlei-keria
+    environment:
+      - KERIA_CURLS=http://keria:3902/
+      - PYTHONUNBUFFERED=1
+    # gleif/keria's ENTRYPOINT is already `keria`; pass only its args.
+    # Mounted read-write: KERIA opens this config via
+    # configing.Configer(reopen=True), and a read-only mount makes it
+    # silently fall back to an empty ~/.keri/cf/keria.json — dropping the
+    # `iurls`. KERIA copies those iurls into every new agent's config at
+    # creation, which is how each agent bootstraps the witness endpoints.
+    # Without them, only AIDs whose client explicitly resolves the witness
+    # OOBIs can be incepted; the rest fail with "unknown witness".
+    volumes:
+      - ./keria-docker.json:/keria/config/keri/cf/keria.json
+    command:
+      - start
+      - --config-dir
+      - /keria/config
+      - --config-file
+      - keria
+      - --name
+      - agent
+      - --loglevel
+      - DEBUG
+    ports:
+      - "127.0.0.1:3901:3901"
+      - "127.0.0.1:3902:3902"
+      - "127.0.0.1:3903:3903"
+    depends_on:
+      witnesses:
+        condition: service_healthy
+      vlei-server:
+        condition: service_healthy
+
+  # GLEIF vlei-verifier — the service ans-ra calls. development env so
+  # the local GLEIF root can be registered via POST /root_of_trust/{aid};
+  # VERIFY_ROOT_OF_TRUST=True enables chain-to-root verification.
+  vlei-verifier:
+    # Not published to any registry — built from the pinned 0.1.5 source.
+    # The entrypoint reads VERIFIER_CONFIG_FILE and loads keri-style config
+    # from scripts/keri/cf/<file>.json baked into the image; we point it at
+    # the bundled verifier-config-docker-local.json, which already targets
+    # our witness-demo + vlei-server hostnames.
+    build:
+      # SHA-pinned, not tag-pinned: a git tag is mutable, and up.sh's
+      # `--build` re-resolves the ref on every run, so a moved `0.1.5`
+      # tag would silently change what every developer builds. This SHA
+      # IS the 0.1.5 tag (github.com/GLEIF-IT/vlei-verifier, resolved via
+      # `git ls-remote … refs/tags/0.1.5`); re-pin deliberately on a bump.
+      context: https://github.com/GLEIF-IT/vlei-verifier.git#e742b65b085bb41b9fa25e9ef04dc3cf0644b297
+      dockerfile: images/verifier.dockerfile
+    image: ans-vlei-verifier:0.1.5
+    container_name: ans-vlei-verifier
+    environment:
+      # development env + VERIFY_ROOT_OF_TRUST enable POST /root_of_trust/{aid}
+      # so the local synthetic GLEIF root can be registered.
+      - VERIFIER_ENV=development
+      - VERIFY_ROOT_OF_TRUST=True
+      - VERIFIER_CONFIG_FILE=verifier-config-docker-local.json
+      - PYTHONUNBUFFERED=1
+    ports:
+      - "127.0.0.1:7676:7676"
+    depends_on:
+      witnesses:
+        condition: service_healthy
+      vlei-server:
+        condition: service_healthy
+    # Built on weboftrust/keri (no curl); probe /health with python3.
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:7676/health',timeout=3).status==200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  # Deno / SignifyTS runner — executes build-chain.ts (build the synthetic vLEI
+  # trust chain, issue the ECR to the holder AID, present it, register the local
+  # GLEIF root of trust, export the artifacts) and sign-proof.ts (sign the RA's
+  # verify-control signingInput with the holder AID). No Jupyter/notebook layer — the
+  # demo logic is plain SignifyTS run by Deno. On the same default network as
+  # the rest of the stack, so the scripts reach `keria`, `vlei-server`,
+  # `witness-demo`, and `vlei-verifier` by service name — no external network /
+  # `docker network connect` required.
+  #
+  # Pinned to a known-good Deno (GLEIF's KERI/KERIA/vLEI images move fast and so
+  # do their SignifyTS-facing shapes); bump deliberately. The container idles on
+  # `tail -f /dev/null` so build-chain.sh / verify-control-demo.sh can
+  # `docker compose exec` `deno run` into it; the npm deps are pre-cached at
+  # start so the first exec is fast and a `/tmp/ready` marker gates up.sh.
+  signify:
+    image: denoland/deno:alpine-2.8.2
+    container_name: ans-vlei-signify
+    working_dir: /app
+    environment:
+      # Persist Deno's module cache inside the container for the session so the
+      # second exec (sign-proof.ts) reuses build-chain.ts's downloads.
+      - DENO_DIR=/deno-dir
+    # Bind the signify dir so edits are live AND the exported artifacts
+    # (out/ecr-presentation.json, out/holder-state.json) land on the host for
+    # the shell demo to consume.
+    volumes:
+      - ./signify:/app
+    # Pre-cache npm deps, drop a readiness marker, then idle so the container
+    # stays available for `docker compose exec deno run`.
+    command:
+      - sh
+      - -c
+      - "deno cache scripts_ts/build-chain.ts scripts_ts/sign-proof.ts && touch /tmp/ready && tail -f /dev/null"
+    depends_on:
+      # keria has no healthcheck (it gates on witnesses + vlei-server itself);
+      # build-chain.ts retries against KERIA via signify's own operation waits.
+      keria:
+        condition: service_started
+      vlei-verifier:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+    restart: unless-stopped

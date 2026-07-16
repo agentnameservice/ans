@@ -206,6 +206,18 @@ identity:
     type: ${ANS_IDENTITY_RESOLVER:-noop}
   challenge-ttl: 1h
 
+vlei:
+  # The lei (vLEI) control verifier behind the "lei" identifier kind.
+  # "noop" accepts the same full-chain CESR presentation but waives the
+  # external bindings — GLEIF authorization, the AID↔LEI binding, and the
+  # signature check (structural only); "verifier" routes CESR/KERI
+  # questions to a real vlei-verifier (scripts/demo/vlei brings one up on
+  # :7676).
+  #   ANS_VLEI_TYPE=verifier ANS_VLEI_BASE_URL=http://localhost:7676 \
+  #     scripts/demo/start.sh
+  type: ${ANS_VLEI_TYPE:-noop}
+  base-url: "${ANS_VLEI_BASE_URL:-}"
+
 keys:
   type: file
   file:

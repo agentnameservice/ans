@@ -128,6 +128,14 @@ func TestAnsName_String(t *testing.T) {
 	assert.Equal(t, "ans://v1.2.3.agent.example.com", n.String())
 }
 
+// TestAnsName_VersionSegment pins the ANS-2 v-prefixed segment form —
+// the value TXT builders publish in `version=` and the leading label
+// of the ANS name hostname.
+func TestAnsName_VersionSegment(t *testing.T) {
+	n, _ := NewAnsName(mustSemVer(1, 2, 3), "agent.example.com")
+	assert.Equal(t, "v1.2.3", n.VersionSegment())
+}
+
 func TestAnsName_FQDN(t *testing.T) {
 	n, _ := NewAnsName(mustSemVer(1, 2, 3), "Agent.Example.COM")
 	assert.Equal(t, "agent.example.com", n.FQDN())

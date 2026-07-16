@@ -30,7 +30,10 @@ func BadgeRecord(reg *domain.AgentRegistration, tlPublicBaseURL string) []domain
 	if len(reg.Endpoints) == 0 {
 		return nil
 	}
-	version := reg.AnsName.Version().String()
+	// version= carries the v-prefixed ANSName version segment (ANS-3
+	// §6.3), matching the leading label of the ANS name — not the bare
+	// semver.
+	version := reg.AnsName.VersionSegment()
 	badgeURL := reg.Endpoints[0].AgentURL
 	if tlPublicBaseURL != "" && reg.AgentID != "" {
 		// tlPublicBaseURL is validated at config load (https, no

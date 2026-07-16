@@ -153,6 +153,56 @@ tl-client: {base-url: ""}
 	}
 }
 
+// ----- VLEI validation -----
+
+func TestRAConfig_ValidateVLEI(t *testing.T) {
+	cases := []struct {
+		name    string
+		mutate  func(*RAConfig)
+		wantErr string // substring; "" means must pass
+	}{
+		{"noop default", func(*RAConfig) {}, ""},
+		{"verifier with valid url", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "verifier", BaseURL: "http://vlei-verifier:7676"}
+		}, ""},
+		{"verifier https", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "verifier", BaseURL: "https://vlei.internal"}
+		}, ""},
+		{"verifier missing base-url", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "verifier"}
+		}, "vlei.base-url is required"},
+		{"verifier non-http scheme", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "verifier", BaseURL: "ftp://host"}
+		}, "valid http(s) URL"},
+		{"verifier no host", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "verifier", BaseURL: "http:///path"}
+		}, "valid http(s) URL"},
+		{"unsupported type", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "bogus"}
+		}, "vlei.type"},
+		{"negative present-timeout", func(c *RAConfig) {
+			c.VLEI = VLEI{Type: "noop", PresentTimeout: -time.Second}
+		}, "vlei.present-timeout must not be negative"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := defaultRAConfig()
+			cfg.Auth.Static.APIKey = "test-key" // satisfy the auth check ahead of vlei
+			tc.mutate(cfg)
+			err := cfg.Validate()
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("expected pass, got %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("want error containing %q, got %v", tc.wantErr, err)
+			}
+		})
+	}
+}
+
 // ----- LoadTL -----
 
 func TestLoadTL_MissingFile(t *testing.T) {

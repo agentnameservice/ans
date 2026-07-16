@@ -51,6 +51,7 @@ type agentRow struct {
 	CertOrderRef             sql.NullString `db:"cert_order_ref"`
 	CertOrderState           sql.NullString `db:"cert_order_state"`
 	CertOrderChallenges      sql.NullString `db:"cert_order_challenges"`
+	CertOrderVerified        sql.NullString `db:"cert_order_verified_challenge"`
 	CreatedAtMs              int64          `db:"created_at_ms"`
 	UpdatedAtMs              int64          `db:"updated_at_ms"`
 }
@@ -81,7 +82,7 @@ func (r agentRow) toDomain() (*domain.AgentRegistration, error) {
 	}
 	order, err := certOrderFromRow(
 		r.CertOrderRef, r.CertOrderState, r.CertOrderChallenges,
-		r.ACMEDNS01Token, r.ACMEChallengeExpiresAtMs,
+		r.CertOrderVerified, r.ACMEDNS01Token, r.ACMEChallengeExpiresAtMs,
 	)
 	if err != nil {
 		return nil, err
@@ -143,7 +144,7 @@ func encodeDiscoveryProfiles(profiles []domain.DiscoveryProfile) string {
 // falling back to synthesizing a self-issued single-DNS-01 order from
 // the legacy token columns for rows written before migration 008.
 func certOrderFromRow(
-	ref, state, challengesJSON sql.NullString,
+	ref, state, challengesJSON, verifiedChallenge sql.NullString,
 	legacyDNS01 sql.NullString, legacyExpiresMs sql.NullInt64,
 ) (domain.CertificateOrder, error) {
 	var order domain.CertificateOrder
@@ -153,6 +154,9 @@ func certOrderFromRow(
 		}
 		order.OrderRef = ref.String
 		order.State = domain.OrderState(state.String)
+		// NULL (rows written before migration 012, or a gate that has
+		// not passed yet) decodes to the empty type — "not recorded".
+		order.VerifiedChallenge = domain.ChallengeType(verifiedChallenge.String)
 		if legacyExpiresMs.Valid {
 			order.ExpiresAt = msToTime(legacyExpiresMs.Int64)
 		}
@@ -180,6 +184,7 @@ type certOrderColumns struct {
 	ref        any
 	state      any
 	challenges any
+	verified   any
 	expiresMs  any
 }
 
@@ -197,6 +202,7 @@ func certOrderToRow(order domain.CertificateOrder) (certOrderColumns, error) {
 		ref:        nullableString(order.OrderRef),
 		state:      string(order.State),
 		challenges: string(encoded),
+		verified:   nullableString(string(order.VerifiedChallenge)),
 		expiresMs:  nullableMs(order.ExpiresAt),
 	}, nil
 }
@@ -223,10 +229,11 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
                 registration_timestamp_ms, last_renewal_timestamp_ms,
                 supersedes_registration_id,
                 cert_order_ref, cert_order_state, cert_order_challenges,
+                cert_order_verified_challenge,
                 acme_challenge_expires_at_ms,
                 discovery_profiles,
                 created_at_ms, updated_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
 		res, err := s.db.extx(ctx).ExecContext(ctx, q,
 			agent.AgentID,
 			agent.OwnerID,
@@ -240,6 +247,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 			nullableMs(agent.Details.LastRenewalTimestamp),
 			nullableInt64(agent.SupersedesRegistrationID),
 			order.ref, order.state, order.challenges,
+			order.verified,
 			order.expiresMs,
 			nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 			now, now,
@@ -265,6 +273,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
             cert_order_ref = ?,
             cert_order_state = ?,
             cert_order_challenges = ?,
+            cert_order_verified_challenge = ?,
             acme_challenge_expires_at_ms = ?,
             discovery_profiles = ?,
             updated_at_ms = ?
@@ -276,6 +285,7 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 		nullableMs(agent.Details.LastRenewalTimestamp),
 		nullableInt64(agent.SupersedesRegistrationID),
 		order.ref, order.state, order.challenges,
+		order.verified,
 		order.expiresMs,
 		nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 		now,
