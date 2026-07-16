@@ -122,8 +122,10 @@ git commit -s
 
 Missing sign-offs on an existing branch can be fixed with
 `git rebase --signoff origin/main` followed by a force-push. The `DCO`
-status check enforces this on every pull request; PRs opened by bots
-(Dependabot, release-please) are exempt, and merge commits are skipped.
+status check — the org-wide [DCO app](https://github.com/apps/dco), the
+same enforcement used across Linux Foundation projects — validates this
+on every pull request; bot-authored commits (Dependabot, release-please)
+and merge commits are exempt.
 
 ## AI-Assisted Contributions
 
