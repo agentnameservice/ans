@@ -105,16 +105,28 @@ func TestPoller_TickerDrivesSecondRound(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() { _ = p.Run(ctx); close(done) }()
-	// Long enough for the immediate round plus at least one ticker round.
-	time.Sleep(120 * time.Millisecond)
+	// Poll for the immediate round plus at least one ticker round to
+	// land in the index instead of sleeping a fixed window: on a loaded
+	// runner a fixed sleep flakes, while polling just stretches the
+	// wait. Reading while the poller writes is safe — the store pins a
+	// single connection, so this Search serializes with the writes.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		res, err := idx.Search(context.Background(), index.SearchQuery{Text: "", Limit: 50},
+			time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC))
+		if err == nil && len(res.Results) >= 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatalf("ticker should have driven a second round ingesting both agents, got %d (err=%v)",
+				len(res.Results), err)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	cancel()
 	<-done
-
-	res, _ := idx.Search(context.Background(), index.SearchQuery{Text: "", Limit: 50},
-		time.Date(2099, 1, 1, 0, 0, 0, 0, time.UTC))
-	if len(res.Results) < 2 {
-		t.Errorf("ticker should have driven a second round ingesting both agents, got %d", len(res.Results))
-	}
 }
 
 func TestHTTPFeedClient_LongErrorBodyTruncated(t *testing.T) {
