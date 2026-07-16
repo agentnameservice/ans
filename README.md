@@ -281,3 +281,4 @@ schema versions.
 MIT License. See [LICENSE](LICENSE).
 
 <!-- DCO app verification: temporary test PR, will be closed unmerged -->
+<!-- second line: unsigned commit for the negative test -->
