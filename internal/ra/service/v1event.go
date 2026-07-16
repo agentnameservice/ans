@@ -146,7 +146,12 @@ func v1RevokedCertList(certs []*domain.StoredCertificate) ([]eventv1.Certificate
 //   - `dnsRecordsProvisioned` as map[name]data (V1 lossy shape — a
 //     V2 typed-array lands in a single entry per name; collisions
 //     use last-wins).
-//   - `domainValidation` = "ACME-DNS-01" (reference constant).
+//   - `domainValidation` = the ACME method that satisfied the
+//     domain-control gate ("ACME-DNS-01" / "ACME-HTTP-01"), recorded
+//     on the certificate order at gate-pass time. Omitted for
+//     registrations that predate recording. (The reference emits a
+//     constant "ACME-DNS-01" here; its schema enumerates all three
+//     method tokens, so the faithful value is shape-compatible.)
 //   - `identityCert` singleton — the primary active identity cert.
 //   - `validIdentityCerts[]` rotation array — every currently valid
 //     identity cert (includes the primary). Present even with one
@@ -233,9 +238,13 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 	// min(notAfter) across attested identity + server certs.
 	inner.ExpiresAt = agentCertExpiry(identityCerts, byocCert, now)
 
+	// `domainValidation` mirrors the V2 builder: the method that
+	// actually satisfied the gate, recorded on the order at gate-pass
+	// time; omitted (never guessed) for registrations that predate
+	// recording.
 	inner.Attestations = &eventv1.Attestations{
 		DNSRecordsProvisioned: dnsMap,
-		DomainValidation:      "ACME-DNS-01",
+		DomainValidation:      reg.CertOrder.VerifiedChallenge.ACMEMethodToken(),
 		IdentityCert:          primaryIdentity,
 		ServerCert:            primaryServer,
 		ValidIdentityCerts:    validIdentity,

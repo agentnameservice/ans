@@ -498,7 +498,10 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 //
 // Returns the challenge types found published so ACME-style issuers
 // can answer exactly the satisfied challenge (answering an
-// unsatisfied one would invalidate the authorization).
+// unsatisfied one would invalidate the authorization). A passing gate
+// also records the satisfied type on reg.CertOrder — the terminal
+// attestation's `domainValidation` method token is derived from it in
+// a later call (verify-dns), so it must survive on the aggregate.
 //
 // NOTE: zero-value orders (registrations predating order persistence)
 // skip the gate — no challenge was ever issued to the operator, so
@@ -536,6 +539,17 @@ func (s *RegistrationService) gateOrderChallenges(
 	}
 	verified, verr := s.verifyChallengeArtifacts(ctx, reg.FQDN(), order.Challenges)
 	if len(verified) > 0 {
+		// Record which challenge type satisfied the gate on the order
+		// itself. The terminal AGENT_REGISTERED attestation reports the
+		// validation method, but it is built in a later call
+		// (verify-dns) where this gate result is out of scope — without
+		// persisting it here the event builder could only guess.
+		reg.CertOrder.RecordVerifiedChallenge(verified[0])
+		log.Info().
+			Str("agentId", reg.AgentID).
+			Str("fqdn", reg.FQDN()).
+			Str("challengeType", string(verified[0])).
+			Msg("domain-control challenge gate passed")
 		return verified, nil
 	}
 	if verr != nil {
@@ -1122,8 +1136,14 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 	// spec — the min(notAfter) across attested certs.
 	inner.ExpiresAt = agentCertExpiry(identityCerts, byocCert, now)
 
+	// `domainValidation` is the method that actually satisfied the
+	// domain-control gate, recorded on the order at gate-pass time
+	// (gateOrderChallenges). Empty — and therefore omitted, never
+	// guessed — for registrations that predate recording: the log is
+	// append-only, so a fabricated method token could never be
+	// corrected.
 	inner.Attestations = &event.Attestations{
-		DomainValidation:      "ACME-DNS-01",
+		DomainValidation:      reg.CertOrder.VerifiedChallenge.ACMEMethodToken(),
 		DNSRecordsProvisioned: provisioned,
 		IdentityCerts:         idCertInfos,
 		ServerCerts:           serverCertInfos,
