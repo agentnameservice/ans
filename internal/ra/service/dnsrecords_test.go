@@ -402,12 +402,17 @@ func TestComputeRequiredDNSRecords_UnknownStyleSkipped(t *testing.T) {
 // path) — replacing the old key65280/key65281 set. The fixture endpoints
 // carry a /.well-known/ metadataUrl so cap and well-known are exercised
 // here at the service-composition layer, not only in the adapter unit
-// tests. The slice ORDER and the 7-record SHAPE are unchanged; only the
-// SVCB SvcParam values move the hash. A future drift that is NOT a
-// deliberate SvcParam change is a regression: investigate before
-// touching this constant.
+// tests.
+//
+// REGENERATED again for the ANS-3 §6.3 version= fix (issue #69): the
+// three TXT rows in the union (two `_ans` + one `_ans-badge`) now
+// carry the v-prefixed ANSName version segment (`version=v1.2.3`)
+// instead of the bare semver. The slice ORDER and the 7-record SHAPE
+// are unchanged; only those three TXT values move the hash. A future
+// drift that is NOT a deliberate wire-value change is a regression:
+// investigate before touching this constant.
 func TestComputeRequiredDNSRecords_UnionCanonicalBytesRegression(t *testing.T) {
-	const wantSHA256Hex = "87b2902c6f1114029f888ed7ffe798ef1937f44e30add8fd2d5b8874d4c427c1"
+	const wantSHA256Hex = "2f7b7aefc0032e0900ae446595c503b853c45738e8ae717c3b2ba74c3edf3286"
 
 	svc := newComputeOnlyService(t)
 	reg := mustReg(t, "agent.example.com", "1.2.3",

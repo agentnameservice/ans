@@ -95,6 +95,12 @@ func ParseAnsName(s string) (AnsName, error) {
 // Version returns the semantic version component.
 func (n AnsName) Version() SimplifiedSemVer { return n.version }
 
+// VersionSegment returns the ANS-2 version segment: the v-prefixed
+// semver form ("v1.2.0") that appears as the leading hostname label of
+// the ANS name and as the `version=` value in the `_ans`/`_ans-badge`
+// TXT records (ANS-3 §6.3, ans-txt profile §2).
+func (n AnsName) VersionSegment() string { return "v" + n.version.String() }
+
 // AgentHost returns the FQDN component (lowercase).
 func (n AnsName) AgentHost() string { return n.agentHost }
 
@@ -103,7 +109,7 @@ func (n AnsName) FQDN() string { return n.agentHost }
 
 // String returns the full ANS name: ans://v1.2.0.myagent.example.com.
 func (n AnsName) String() string {
-	return fmt.Sprintf("%sv%s.%s", ansProtocolPrefix, n.version.String(), n.agentHost)
+	return fmt.Sprintf("%s%s.%s", ansProtocolPrefix, n.VersionSegment(), n.agentHost)
 }
 
 // IsZero returns true if the AnsName is uninitialized.

@@ -51,7 +51,7 @@ type LogService struct {
 	attestKeyID string
 	originRAID  string // RAID stamped into the TL's attestation JWS header.
 	nowFn       func() time.Time
-	uuidFn      func() string
+	uuidFn      func() (string, error)
 
 	// shutdownCtx is cancelled when Close is called; the per-append
 	// awaiter goroutines watch it so they drain cleanly at shutdown
@@ -112,7 +112,15 @@ func NewLogService(
 		attestKeyID:    attestKeyID,
 		originRAID:     originRAID,
 		nowFn:          func() time.Time { return time.Now().UTC() },
-		uuidFn:         uuid.NewString,
+		// UUIDv7: time-ordered, per the logId contract in the TL API
+		// spec and the served event schemas.
+		uuidFn: func() (string, error) {
+			id, err := uuid.NewV7()
+			if err != nil {
+				return "", err
+			}
+			return id.String(), nil
+		},
 	}
 }
 
@@ -121,7 +129,7 @@ func NewLogService(
 func (s *LogService) WithClock(fn func() time.Time) { s.nowFn = fn }
 
 // WithUUIDFn overrides the logId generator (for tests).
-func (s *LogService) WithUUIDFn(fn func() string) { s.uuidFn = fn }
+func (s *LogService) WithUUIDFn(fn func() (string, error)) { s.uuidFn = fn }
 
 // AppendV2 ingests a V2-schema producer event. Wired to the
 // `POST /v2/internal/agents/event` route. The RA's V2 routes
@@ -164,7 +172,10 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 	// 2. Codec parses/validates/canonicalizes/wraps per schema version.
 	//    The returned envelope has an empty outer Signature; we sign
 	//    it in step 4.
-	logID := s.uuidFn()
+	logID, err := s.uuidFn()
+	if err != nil {
+		return nil, fmt.Errorf("generate logId: %w", err)
+	}
 	env, innerCanonical, err := codec.ParseAndBuild(in.RawBody, raID, keyID, in.ProducerSignature, logID)
 	if err != nil {
 		return nil, err

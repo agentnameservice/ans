@@ -279,6 +279,21 @@ func newReceiptTestbed(t *testing.T, opts ...receiptTestbedOpt) *receiptTestbed 
 // mimicking what the HTTP handler does with a signed body.
 func (tb *receiptTestbed) appendEvent(t *testing.T) string {
 	t.Helper()
+	body, jws := tb.signedFixtureBody(t)
+	if _, err := tb.logSvc.AppendV2(context.Background(), service.AppendInput{
+		RawBody:           body,
+		ProducerSignature: jws,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return tb.inner.AnsID
+}
+
+// signedFixtureBody marshals the testbed's fixture inner event and
+// signs it with the producer key, returning the raw body plus the
+// detached JWS that belongs in the X-Signature header.
+func (tb *receiptTestbed) signedFixtureBody(t *testing.T) ([]byte, string) {
+	t.Helper()
 	body, err := json.Marshal(tb.inner)
 	if err != nil {
 		t.Fatal(err)
@@ -295,13 +310,7 @@ func (tb *receiptTestbed) appendEvent(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tb.logSvc.AppendV2(context.Background(), service.AppendInput{
-		RawBody:           body,
-		ProducerSignature: jws,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	return tb.inner.AnsID
+	return body, jws
 }
 
 // waitCheckpointCovers polls until a receipt can be minted without

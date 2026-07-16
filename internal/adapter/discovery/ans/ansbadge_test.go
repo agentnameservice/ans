@@ -39,7 +39,7 @@ func TestBadgeRecord(t *testing.T) {
 				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},
 			}),
 			wantName:  "_ans-badge.agent.example.com",
-			wantValue: "v=ans-badge1; version=1.2.3; url=https://agent.example.com/a2a",
+			wantValue: "v=ans-badge1; version=v1.2.3; url=https://agent.example.com/a2a",
 		},
 		{
 			name: "multiple_endpoints_badge_uses_first_url",
@@ -48,7 +48,7 @@ func TestBadgeRecord(t *testing.T) {
 				{Protocol: domain.ProtocolA2A, AgentURL: "https://agent.example.com/a2a"},
 			}),
 			wantName:  "_ans-badge.agent.example.com",
-			wantValue: "v=ans-badge1; version=2.0.0; url=https://agent.example.com/mcp",
+			wantValue: "v=ans-badge1; version=v2.0.0; url=https://agent.example.com/mcp",
 		},
 		{
 			// When the deployment supplies a public TL URL and the
@@ -62,7 +62,7 @@ func TestBadgeRecord(t *testing.T) {
 			agentID:   "test-agent-id",
 			tlBaseURL: "https://tl.example.org",
 			wantName:  "_ans-badge.agent.example.com",
-			wantValue: "v=ans-badge1; version=1.0.0; url=https://tl.example.org/v1/agents/test-agent-id",
+			wantValue: "v=ans-badge1; version=v1.0.0; url=https://tl.example.org/v1/agents/test-agent-id",
 		},
 		{
 			// Fallback: a TL URL is set but the registration has no AgentID,
@@ -74,7 +74,7 @@ func TestBadgeRecord(t *testing.T) {
 			}),
 			tlBaseURL: "https://tl.example.org",
 			wantName:  "_ans-badge.agent.example.com",
-			wantValue: "v=ans-badge1; version=1.0.0; url=https://agent.example.com/mcp",
+			wantValue: "v=ans-badge1; version=v1.0.0; url=https://agent.example.com/mcp",
 		},
 	}
 	for _, tc := range tests {
