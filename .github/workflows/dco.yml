@@ -1,5 +1,8 @@
 name: DCO
 
+# Thin caller: the actual check lives in the org-shared reusable workflow
+# at agentnameservice/.github — fix or extend the policy there, not here.
+
 on:
   pull_request:
     types: [opened, synchronize, reopened]
@@ -10,50 +13,4 @@ permissions:
 jobs:
   dco:
     name: DCO
-    # Bot-opened PRs (Dependabot, release-please) are exempt: bots cannot
-    # certify the DCO. A skipped job still satisfies a required status check.
-    if: ${{ !endsWith(github.event.pull_request.user.login, '[bot]') }}
-    runs-on: ubuntu-latest
-    steps:
-      - name: Verify Signed-off-by on every commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
-          PR: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          bad=0
-          # Merge commits and bot-authored commits are skipped; every other
-          # commit needs a Signed-off-by trailer whose email matches the
-          # commit author or committer (Developer Certificate of Origin).
-          for row in $(gh api "repos/${REPO}/pulls/${PR}/commits" --paginate \
-              --jq '.[] | select((.parents | length) < 2) | select(((.author.login // "") | endswith("[bot]")) | not) | @base64'); do
-            field() { echo "$row" | base64 -d | jq -r "$1"; }
-            sha=$(field '.sha')
-            author_email=$(field '.commit.author.email' | tr '[:upper:]' '[:lower:]')
-            committer_email=$(field '.commit.committer.email' | tr '[:upper:]' '[:lower:]')
-            signoff_emails=$(field '.commit.message' \
-              | grep -E '^Signed-off-by: .+ <[^<>@ ]+@[^<>@ ]+>$' \
-              | sed -E 's/.*<([^<>]+)>.*/\1/' \
-              | tr '[:upper:]' '[:lower:]' || true)
-            ok=0
-            for email in $signoff_emails; do
-              if [ "$email" = "$author_email" ] || [ "$email" = "$committer_email" ]; then
-                ok=1
-              fi
-            done
-            if [ "$ok" -ne 1 ]; then
-              echo "::error::commit ${sha} has no Signed-off-by matching its author or committer (${author_email})"
-              bad=1
-            fi
-          done
-          if [ "$bad" -ne 0 ]; then
-            echo ""
-            echo "One or more commits lack a valid DCO sign-off."
-            echo "Certify the Developer Certificate of Origin (https://developercertificate.org)"
-            echo "by signing each commit:"
-            echo "  new commits:      git commit -s"
-            echo "  existing commits: git rebase --signoff origin/main && git push --force-with-lease"
-            exit 1
-          fi
-          echo "All commits carry a valid Signed-off-by."
+    uses: agentnameservice/.github/.github/workflows/dco-check.yml@main
