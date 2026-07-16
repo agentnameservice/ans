@@ -278,9 +278,11 @@ type EventsFeed struct {
 	// Retention bounds how far back the feed serves, anchored on each
 	// event's enqueue time. Events older than now-retention age out and
 	// become invisible to the feed. Defaults to 720h (30 days),
-	// matching the production feed's documented retention. A
-	// non-positive value disables the lower bound (serve everything
-	// delivered) — intended for tests only.
+	// matching the production feed's documented retention. Validate
+	// normalizes a non-positive value to that default, so the floor
+	// cannot be disabled through configuration; the store's no-floor
+	// mode (retention <= 0 serves everything delivered) is reachable
+	// only by constructing the feed store directly, which tests do.
 	Retention time.Duration `koanf:"retention"`
 }
 
