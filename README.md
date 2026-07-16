@@ -279,3 +279,5 @@ schema versions.
 ## License
 
 MIT License. See [LICENSE](LICENSE).
+
+<!-- DCO app verification: temporary test PR, will be closed unmerged -->
