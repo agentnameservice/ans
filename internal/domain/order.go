@@ -28,6 +28,24 @@ func (t ChallengeType) IsValid() bool {
 	}
 }
 
+// ACMEMethodToken maps the challenge type to the ACME
+// validation-method token the TL attestation schemas enumerate for
+// `attestations.domainValidation` ("ACME-DNS-01" / "ACME-HTTP-01").
+// Empty for unrecognized types — callers tag the field omitempty, so
+// an unknown method is omitted from the sealed event rather than
+// fabricated: the TL is append-only and a wrong method token can
+// never be corrected.
+func (t ChallengeType) ACMEMethodToken() string {
+	switch t {
+	case ChallengeTypeDNS01:
+		return "ACME-DNS-01"
+	case ChallengeTypeHTTP01:
+		return "ACME-HTTP-01"
+	default:
+		return ""
+	}
+}
+
 // Challenge is a single domain-control challenge the domain owner must
 // satisfy by publishing an artifact (a DNS TXT record or an HTTP
 // resource) in the zone or site they control. Challenges are relayed
@@ -150,6 +168,16 @@ type CertificateOrder struct {
 	State      OrderState  `json:"state,omitempty"`
 	Challenges []Challenge `json:"challenges,omitempty"`
 	ExpiresAt  time.Time   `json:"expiresAt,omitzero"`
+
+	// VerifiedChallenge is the challenge type whose artifact satisfied
+	// the domain-control gate (the gate is any-of, so exactly one type
+	// is recorded — the first found published). Set when the gate
+	// passes and persisted with the order, because the terminal
+	// AGENT_REGISTERED attestation that reports the validation method
+	// is built in a later call (verify-dns) where the gate result is
+	// no longer in scope. Empty on orders that predate recording and
+	// on orders whose gate has not passed yet.
+	VerifiedChallenge ChallengeType `json:"verifiedChallenge,omitempty"`
 }
 
 // NewSelfIssuedOrder builds the BYOC-path validation order from a
@@ -169,7 +197,16 @@ func NewSelfIssuedOrder(dns01Token, http01Token string, expiresAt time.Time) Cer
 // IsZero reports whether the order is unset — true for registrations
 // that predate order persistence.
 func (o *CertificateOrder) IsZero() bool {
-	return o.OrderRef == "" && o.State == "" && len(o.Challenges) == 0 && o.ExpiresAt.IsZero()
+	return o.OrderRef == "" && o.State == "" && len(o.Challenges) == 0 &&
+		o.ExpiresAt.IsZero() && o.VerifiedChallenge == ""
+}
+
+// RecordVerifiedChallenge pins the challenge type that satisfied the
+// domain-control gate onto the order, so the validation method
+// survives to the later call that seals it into the terminal
+// attestation.
+func (o *CertificateOrder) RecordVerifiedChallenge(t ChallengeType) {
+	o.VerifiedChallenge = t
 }
 
 // ChallengeOfType returns the first challenge of the given type.

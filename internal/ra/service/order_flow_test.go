@@ -2,6 +2,7 @@ package service_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -13,6 +14,8 @@ import (
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/service"
+	event "github.com/godaddy/ans/internal/tl/event"
+	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
 )
 
 // errStrayFinalize is returned by refOnlyIssuer when handed an empty
@@ -1148,11 +1151,219 @@ func (r *refOnlyIssuer) GetCACertificate(ctx context.Context) (string, error) {
 	return r.real.GetCACertificate(ctx)
 }
 
+// challengeBlindDNSVerifier simulates an operator who never published
+// the DNS-01 TXT record but did publish everything else: the
+// challenge gate's DOMAIN_VALIDATION probe reports unpublished, while
+// the production record set (the verify-dns leg) verifies live. Used
+// to force the any-of gate down the HTTP-01 path end-to-end.
+type challengeBlindDNSVerifier struct{}
+
+func (challengeBlindDNSVerifier) VerifyRecords(
+	_ context.Context, _ string, expected []domain.ExpectedDNSRecord,
+) (*port.VerificationResult, error) {
+	results := make([]port.RecordVerification, len(expected))
+	all := true
+	for i, r := range expected {
+		found := r.Purpose != "DOMAIN_VALIDATION"
+		if !found && r.Required {
+			all = false
+		}
+		results[i] = port.RecordVerification{Record: r, Found: found}
+		if found {
+			results[i].Actual = r.Value
+		}
+	}
+	return &port.VerificationResult{AllRequired: all, Results: results}, nil
+}
+
+// claimAgentRegistered claims the outbox and returns the canonical
+// inner-event bytes of the first AGENT_REGISTERED row carrying the
+// given schema version. Both lanes share the eventType token, so the
+// probe decode works for either envelope shape.
+func claimAgentRegistered(t *testing.T, fx *regFixture, schemaVersion string) []byte {
+	t.Helper()
+	rows, err := fx.outboxStore.Claim(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	for _, row := range rows {
+		if row.SchemaVersion != schemaVersion {
+			continue
+		}
+		var p service.OutboxPayload
+		if err := json.Unmarshal(row.PayloadJSON, &p); err != nil {
+			t.Fatalf("unmarshal OutboxPayload: %v", err)
+		}
+		var probe struct {
+			EventType string `json:"eventType"`
+		}
+		if err := json.Unmarshal(p.InnerEventCanonical, &probe); err != nil {
+			t.Fatalf("unmarshal inner event: %v", err)
+		}
+		if probe.EventType == string(event.TypeAgentRegistered) {
+			return p.InnerEventCanonical
+		}
+	}
+	t.Fatalf("no AGENT_REGISTERED event with schema version %s in the outbox", schemaVersion)
+	return nil
+}
+
+// driveToActive registers the fixture request and drives it through
+// verify-acme → verify-dns with the given service, returning the
+// agentID. The schemaVersion selects the TL lane.
+func driveToActive(t *testing.T, fx *regFixture, svc *service.RegistrationService, schemaVersion string) string {
+	t.Helper()
+	req := fx.req
+	req.SchemaVersion = schemaVersion
+	if _, err := svc.RegisterAgent(context.Background(), req); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agentID := anyAgentID(t, fx, fx.req.AnsName)
+	in := service.VerifyInput{SchemaVersion: schemaVersion}
+	if _, err := svc.VerifyACME(context.Background(), agentID, in); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+	if _, err := svc.VerifyDNS(context.Background(), agentID, in); err != nil {
+		t.Fatalf("verify-dns: %v", err)
+	}
+	return agentID
+}
+
+// TestVerifyDNS_HTTP01Gate_SealsACMEHTTP01 is the regression test for
+// issue #61: an agent whose domain control was proven via the HTTP-01
+// resource (the DNS-01 TXT record was never published) must be sealed
+// into the append-only log with `domainValidation: "ACME-HTTP-01"` —
+// not the "ACME-DNS-01" constant the V2 builder previously hardcoded.
+// Also pins the structural half of the fix: the satisfied type is
+// persisted on the order at verify-acme time, because the event is
+// built in the later verify-dns call.
+func TestVerifyDNS_HTTP01Gate_SealsACMEHTTP01(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	svc := rebuildWithIssuer(fx, fx.serverCA, challengeBlindDNSVerifier{}, staticHTTPVerifier{ok: true})
+
+	req := fx.req
+	if _, err := svc.RegisterAgent(context.Background(), req); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agentID := anyAgentID(t, fx, fx.req.AnsName)
+	if _, err := svc.VerifyACME(context.Background(), agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+
+	// The satisfied challenge type must survive the call boundary:
+	// persisted with the order, not just threaded into FinalizeOrder.
+	stored, err := fx.agents.FindByAgentID(context.Background(), agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.CertOrder.VerifiedChallenge != domain.ChallengeTypeHTTP01 {
+		t.Fatalf("persisted verified challenge: got %q want %q",
+			stored.CertOrder.VerifiedChallenge, domain.ChallengeTypeHTTP01)
+	}
+
+	if _, err := svc.VerifyDNS(context.Background(), agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-dns: %v", err)
+	}
+	var ev event.Event
+	if err := json.Unmarshal(claimAgentRegistered(t, fx, event.SchemaVersion), &ev); err != nil {
+		t.Fatalf("unmarshal inner V2 event: %v", err)
+	}
+	if ev.Attestations == nil {
+		t.Fatal("V2 AGENT_REGISTERED must carry attestations")
+	}
+	if ev.Attestations.DomainValidation != "ACME-HTTP-01" {
+		t.Fatalf("domainValidation: got %q want ACME-HTTP-01", ev.Attestations.DomainValidation)
+	}
+}
+
+// TestVerifyDNS_HTTP01Gate_SealsACMEHTTP01_V1Lane is the V1-lane half
+// of the issue #61 regression: the V1 envelope builder read the same
+// hardcoded constant, so an HTTP-01-validated agent registered through
+// the V1 API was equally mis-attested.
+func TestVerifyDNS_HTTP01Gate_SealsACMEHTTP01_V1Lane(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	svc := rebuildWithIssuer(fx, fx.serverCA, challengeBlindDNSVerifier{}, staticHTTPVerifier{ok: true})
+
+	driveToActive(t, fx, svc, "V1")
+
+	var ev eventv1.Event
+	if err := json.Unmarshal(claimAgentRegistered(t, fx, eventv1.SchemaVersion), &ev); err != nil {
+		t.Fatalf("unmarshal inner V1 event: %v", err)
+	}
+	if ev.Attestations == nil {
+		t.Fatal("V1 AGENT_REGISTERED must carry attestations")
+	}
+	if ev.Attestations.DomainValidation != "ACME-HTTP-01" {
+		t.Fatalf("domainValidation: got %q want ACME-HTTP-01", ev.Attestations.DomainValidation)
+	}
+}
+
+// TestVerifyDNS_DNS01Gate_SealsACMEDNS01 pins the complementary path:
+// when the DNS-01 TXT record satisfied the gate (the quickstart noop
+// verifier accepts it, and DNS-01 is probed first), the sealed method
+// token is ACME-DNS-01 — now because it was verified, not hardcoded.
+func TestVerifyDNS_DNS01Gate_SealsACMEDNS01(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	driveToActive(t, fx, fx.svc, "")
+
+	var ev event.Event
+	if err := json.Unmarshal(claimAgentRegistered(t, fx, event.SchemaVersion), &ev); err != nil {
+		t.Fatalf("unmarshal inner V2 event: %v", err)
+	}
+	if ev.Attestations == nil || ev.Attestations.DomainValidation != "ACME-DNS-01" {
+		t.Fatalf("domainValidation: got %+v want ACME-DNS-01", ev.Attestations)
+	}
+}
+
+// TestVerifyDNS_UnrecordedGateMethod_OmitsDomainValidation covers rows
+// that predate verified-challenge recording (pre-migration-012 rows
+// mid-flow during a deploy): with no recorded method the builder must
+// OMIT domainValidation from the sealed attestation rather than
+// fabricate one — the log is append-only and a wrong method token can
+// never be corrected. Omission is valid: the field is optional in
+// both lanes' attestation schemas.
+func TestVerifyDNS_UnrecordedGateMethod_OmitsDomainValidation(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+
+	if _, err := fx.svc.RegisterAgent(context.Background(), fx.req); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agentID := anyAgentID(t, fx, fx.req.AnsName)
+	if _, err := fx.svc.VerifyACME(context.Background(), agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+
+	// Simulate a row written before recording existed: strip the
+	// recorded method the gate just persisted.
+	stored, err := fx.agents.FindByAgentID(context.Background(), agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.CertOrder.VerifiedChallenge = ""
+	if err := fx.agents.Save(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fx.svc.VerifyDNS(context.Background(), agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-dns: %v", err)
+	}
+	raw := claimAgentRegistered(t, fx, event.SchemaVersion)
+	if strings.Contains(string(raw), `"domainValidation"`) {
+		t.Fatalf("domainValidation must be omitted when the gate method was never recorded; canonical event: %s", raw)
+	}
+}
+
 // Compile-time interface checks for the fakes and the ACME adapter.
 var (
 	_ port.ServerCertificateIssuer = (*asyncIssuer)(nil)
 	_ port.ServerCertificateIssuer = (*cert.ACMEIssuer)(nil)
 	_ port.DNSVerifier             = failingDNSVerifier{}
+	_ port.DNSVerifier             = challengeBlindDNSVerifier{}
 	_ port.HTTPChallengeVerifier   = staticHTTPVerifier{}
 	_                              = cert.ServerSelfCA{}
 )
