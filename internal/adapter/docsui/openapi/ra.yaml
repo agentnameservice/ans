@@ -178,7 +178,7 @@ paths:
         an Identity certificate can be issued. Identity certificates are
         issued by the RA.
 
-        The request can optionally include a server CSR (for RA-issued server cert)
+        The request must include a server CSR (for RA-issued server cert)
         or a BYOC server certificate with its chain.
       operationId: registerAgent
       requestBody:
