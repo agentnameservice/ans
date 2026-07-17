@@ -1,0 +1,23 @@
+{
+  "logId": "019a7b00-8888-7b5b-b048-d0b78f4b4c5f",
+  "eventType": "AGENT_REGISTERED",
+  "createdAt": "2025-01-08T12:30:00-08:00",
+  "expiresAt": "2026-01-08T12:30:00-08:00",
+  "agentId": "bb0e8400-e29b-41d4-a716-446655440666",
+  "ansName": "ans://v1.0.0.pacific.example.com",
+  "agentHost": "pacific.example.com",
+  "agentDisplayName": "Pacific Time Agent",
+  "agentDescription": "Created with a non-Z UTC offset to pin verbatim passthrough",
+  "version": "1.0.0",
+  "providerId": "PC_0000000004",
+  "endpoints": [
+    {
+      "agentUrl": "https://pacific.example.com/mcp",
+      "metaDataUrl": "https://pacific.example.com/.well-known/mcp.json",
+      "protocol": "MCP",
+      "functions": [
+        {"id": "tz_convert", "name": "Timezone Convert", "tags": ["time"]}
+      ]
+    }
+  ]
+}

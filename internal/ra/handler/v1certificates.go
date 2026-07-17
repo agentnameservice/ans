@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/ra/service"
@@ -35,12 +36,13 @@ import (
 // CSR submission is intermediate state that the reference records
 // in its domain-level lifecycle store, not the TL.
 type V1CertificatesHandler struct {
+	responder
 	svc *service.RegistrationService
 }
 
 // NewV1CertificatesHandler constructs a V1CertificatesHandler.
-func NewV1CertificatesHandler(svc *service.RegistrationService) *V1CertificatesHandler {
-	return &V1CertificatesHandler{svc: svc}
+func NewV1CertificatesHandler(svc *service.RegistrationService, logger zerolog.Logger) *V1CertificatesHandler {
+	return &V1CertificatesHandler{responder: newResponder(logger), svc: svc}
 }
 
 // GetIdentityCerts handles GET /v1/agents/{agentId}/certificates/identity.
@@ -48,7 +50,7 @@ func (h *V1CertificatesHandler) GetIdentityCerts(w http.ResponseWriter, r *http.
 	agentID := chi.URLParam(r, "agentId")
 	certs, err := h.svc.IdentityCertificates(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	out := make([]certificateResponse, 0, len(certs))
@@ -63,7 +65,7 @@ func (h *V1CertificatesHandler) GetServerCerts(w http.ResponseWriter, r *http.Re
 	agentID := chi.URLParam(r, "agentId")
 	certs, err := h.svc.ServerCertificates(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	out := make([]certificateResponse, 0, len(certs))
@@ -89,7 +91,7 @@ func (h *V1CertificatesHandler) GetCSRStatus(w http.ResponseWriter, r *http.Requ
 	csrID := chi.URLParam(r, "csrId")
 	csr, err := h.svc.GetCSRStatus(r.Context(), agentID, csrID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mapCSRStatus(csr))
@@ -107,16 +109,16 @@ func (h *V1CertificatesHandler) submitCSR(
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
 	var req csrSubmissionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
 		return
 	}
 	if req.CsrPEM == "" {
-		WriteError(w, domain.NewValidationError("MISSING_CSR_PEM", "csrPEM is required"))
+		h.writeError(w, domain.NewValidationError("MISSING_CSR_PEM", "csrPEM is required"))
 		return
 	}
 	csrID, err := submit(r.Context(), agentID, req.CsrPEM)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, csrSubmissionResponse{

@@ -32,10 +32,13 @@ stop_one() {
     rm -f "$pidfile"
     return 0
   fi
-  # Polite SIGTERM, wait up to 5s, then SIGKILL.
+  # Polite SIGTERM, wait up to 10s, then SIGKILL. The grace matches the
+  # daemons' graceful-shutdown budget (ans-finder/ans-tl/ans-ra each give
+  # their HTTP server a 10s context on SIGTERM), so we don't SIGKILL a
+  # process that is still draining cleanly.
   kill "$pid" 2>/dev/null || true
   local i=0
-  while [ $i -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+  while [ $i -lt 10 ] && kill -0 "$pid" 2>/dev/null; do
     sleep 1
     i=$((i + 1))
   done
@@ -48,6 +51,7 @@ stop_one() {
 }
 
 header "Stop daemons"
+stop_one ans-finder "$DATA/finder.pid"
 stop_one ans-ra "$DATA/ra.pid"
 stop_one ans-tl "$DATA/tl.pid"
 stop_one ans-dns "$DATA/ans-dns.pid"

@@ -272,19 +272,34 @@ type Log struct {
 	Format string `koanf:"format"` // "text" | "json"
 }
 
+// EventsFeed configures the public agent-events feed
+// (GET /v1/agents/events) the ANS Finder ingests (RA only).
+type EventsFeed struct {
+	// Retention bounds how far back the feed serves, anchored on each
+	// event's enqueue time. Events older than now-retention age out and
+	// become invisible to the feed. Defaults to 720h (30 days),
+	// matching the production feed's documented retention. Validate
+	// normalizes a non-positive value to that default, so the floor
+	// cannot be disabled through configuration; the store's no-floor
+	// mode (retention <= 0 serves everything delivered) is reachable
+	// only by constructing the feed store directly, which tests do.
+	Retention time.Duration `koanf:"retention"`
+}
+
 // RAConfig is the full configuration for ans-ra.
 type RAConfig struct {
-	Server   Server    `koanf:"server"`
-	Auth     Auth      `koanf:"auth"`
-	CA       CA        `koanf:"ca"`
-	DNS      DNS       `koanf:"dns"`
-	Identity Identity  `koanf:"identity"`
-	VLEI     VLEI      `koanf:"vlei"`
-	Keys     Keys      `koanf:"keys"`
-	Store    Store     `koanf:"store"`
-	TLClient TLClient  `koanf:"tl-client"`
-	Signer   SignerCfg `koanf:"signer"`
-	Log      Log       `koanf:"log"`
+	Server     Server     `koanf:"server"`
+	Auth       Auth       `koanf:"auth"`
+	CA         CA         `koanf:"ca"`
+	DNS        DNS        `koanf:"dns"`
+	Identity   Identity   `koanf:"identity"`
+	VLEI       VLEI       `koanf:"vlei"`
+	Keys       Keys       `koanf:"keys"`
+	Store      Store      `koanf:"store"`
+	TLClient   TLClient   `koanf:"tl-client"`
+	Signer     SignerCfg  `koanf:"signer"`
+	EventsFeed EventsFeed `koanf:"events-feed"`
+	Log        Log        `koanf:"log"`
 }
 
 // SignerCfg names the KeyManager-managed key the RA uses to sign
@@ -393,6 +408,18 @@ func loadKoanf(path, envPrefix string) (*koanf.Koanf, error) {
 	return k, nil
 }
 
+// Adapter-type discriminator values shared between Validate and the
+// package defaults. Hoisted to constants so the canonical spelling
+// lives in one place and the same literal is not repeated across the
+// validators (goconst). verifierTypeNoop covers the no-op adapters —
+// the DNS verifier (dns.type), the did:web resolver
+// (identity.resolver.type), and the vLEI verifier (vlei.type) — which
+// share the "noop" sentinel.
+const (
+	caTypeSelf       = "self"
+	verifierTypeNoop = "noop"
+)
+
 // Validate ensures the RA config is internally consistent.
 func (c *RAConfig) Validate() error {
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
@@ -401,7 +428,7 @@ func (c *RAConfig) Validate() error {
 	if err := validateAuth(&c.Auth); err != nil {
 		return err
 	}
-	if c.CA.Type != "self" {
+	if c.CA.Type != caTypeSelf {
 		return fmt.Errorf("ca.type %q not supported (expected 'self')", c.CA.Type)
 	}
 	if c.CA.Self == nil || c.CA.Self.DataDir == "" {
@@ -415,7 +442,7 @@ func (c *RAConfig) Validate() error {
 		return err
 	}
 	switch c.DNS.Type {
-	case "noop", "lookup":
+	case verifierTypeNoop, "lookup":
 	default:
 		return fmt.Errorf("dns.type %q not supported (expected 'noop' or 'lookup')", c.DNS.Type)
 	}
@@ -424,12 +451,12 @@ func (c *RAConfig) Validate() error {
 	// the public provider's challenge before the owner published the
 	// artifact, and the provider would mark the authorization (and the
 	// order) invalid. A real provider needs the real lookup verifier.
-	if c.CA.Server.IsACME() && c.DNS.Type == "noop" {
+	if c.CA.Server.IsACME() && c.DNS.Type == verifierTypeNoop {
 		return errors.New(
 			"ca.server.type 'acme' requires dns.type 'lookup': a noop challenge gate would answer the provider's challenge before the artifact exists and invalidate every order")
 	}
 	switch c.Identity.Resolver.Type {
-	case "noop", "web":
+	case verifierTypeNoop, "web":
 	default:
 		return fmt.Errorf("identity.resolver.type %q not supported (expected 'noop' or 'web')", c.Identity.Resolver.Type)
 	}
@@ -456,6 +483,9 @@ func (c *RAConfig) Validate() error {
 	}
 	if c.TLClient.Timeout <= 0 {
 		c.TLClient.Timeout = 10 * time.Second
+	}
+	if c.EventsFeed.Retention <= 0 {
+		c.EventsFeed.Retention = 720 * time.Hour
 	}
 	return nil
 }
@@ -496,7 +526,7 @@ func validateCAServer(s *CAServer) error {
 		return nil
 	}
 	switch s.Type {
-	case "", "self":
+	case "", caTypeSelf:
 		if s.DataDir == "" {
 			return errors.New("ca.server.data-dir is required when ca.server block is set")
 		}
@@ -525,7 +555,7 @@ func validateCAServer(s *CAServer) error {
 // negative.
 func validateVLEI(v *VLEI) error {
 	switch v.Type {
-	case "off", "noop":
+	case "off", verifierTypeNoop:
 	case "verifier":
 		if v.BaseURL == "" {
 			return errors.New("vlei.base-url is required when vlei.type is 'verifier'")
@@ -583,24 +613,41 @@ func validatePublicBaseURL(raw string) error {
 	if raw == "" {
 		return errors.New("tl-client.public-base-url is required")
 	}
+	// The RA→TL public base URL is always https (no dev override): it is
+	// woven into DNS _ans-badge records that third parties resolve.
+	return validateAbsoluteServiceURL(raw, false, "tl-client.public-base-url")
+}
+
+// validateAbsoluteServiceURL enforces the shared service-URL policy used
+// for base URLs the binaries fetch or advertise: absolute with an
+// explicit scheme, https (http permitted only under allowHTTP, a dev
+// override), and no userinfo, query string, or fragment. label names the
+// offending config field in error messages.
+func validateAbsoluteServiceURL(raw string, allowHTTP bool, label string) error {
 	u, err := url.Parse(raw)
 	if err != nil {
-		return fmt.Errorf("tl-client.public-base-url: %w", err)
-	}
-	if u.Scheme != "https" {
-		return fmt.Errorf("tl-client.public-base-url must use https scheme, got %q", u.Scheme)
+		return fmt.Errorf("%s: %w", label, err)
 	}
 	if u.Host == "" {
-		return errors.New("tl-client.public-base-url: missing host")
+		return fmt.Errorf("%s: missing host", label)
+	}
+	switch u.Scheme {
+	case "https":
+	case "http":
+		if !allowHTTP {
+			return fmt.Errorf("%s must use https scheme, got %q", label, u.Scheme)
+		}
+	default:
+		return fmt.Errorf("%s scheme %q not permitted", label, u.Scheme)
 	}
 	if u.User != nil {
-		return errors.New("tl-client.public-base-url: userinfo not allowed")
+		return fmt.Errorf("%s: userinfo not allowed", label)
 	}
 	if u.RawQuery != "" {
-		return errors.New("tl-client.public-base-url: query string not allowed")
+		return fmt.Errorf("%s: query string not allowed", label)
 	}
 	if u.Fragment != "" {
-		return errors.New("tl-client.public-base-url: fragment not allowed")
+		return fmt.Errorf("%s: fragment not allowed", label)
 	}
 	return nil
 }

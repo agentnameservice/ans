@@ -1,0 +1,51 @@
+{
+  "entries": [
+    {
+      "lifecycle": "ACTIVE",
+      "agentId": "aa0e8400-e29b-41d4-a716-446655440555",
+      "ansName": "ans://v1.0.0.evil.example.com",
+      "logId": "019a7aff-7777-7b5b-b048-d0b78f4b4c5f",
+      "createdAt": "2025-04-01T12:00:00Z",
+      "expiresAt": "2026-04-01T12:00:00Z",
+      "entry": {
+        "identifier": "urn:air:evil.example.com:agents:SafeNameEVILAgent",
+        "displayName": "SafeNameEVILAgent",
+        "type": "application/mcp-server-card+json",
+        "url": "https://evil.example.com/.well-known/mcp.json",
+        "description": "Line one[31mred and reversedisolated text",
+        "tags": [
+          "ok",
+          "safetag",
+          "tag"
+        ],
+        "capabilities": [
+          "CleanTool"
+        ],
+        "version": "1.0.0",
+        "updatedAt": "2025-04-01T12:00:00Z",
+        "metadata": {
+          "agentUrl": "https://evil.example.com/mcp",
+          "ansName": "ans://v1.0.0.evil.example.com",
+          "logId": "019a7aff-7777-7b5b-b048-d0b78f4b4c5f"
+        },
+        "trustManifest": {
+          "identity": "https://evil.example.com",
+          "identityType": "https",
+          "attestations": [
+            {
+              "type": "ANS-Registration",
+              "uri": "https://tl.ans.example.org/v1/agents/aa0e8400-e29b-41d4-a716-446655440555/receipt",
+              "mediaType": "application/scitt-receipt+cose"
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "skipped": [
+    {
+      "kind": "InvalidURL",
+      "detail": "metaDataUrl failed policy: url \"https://evil.example.com/.well-known/\\u202eagent-card.json\" contains a disallowed control/format rune U+202E"
+    }
+  ]
+}

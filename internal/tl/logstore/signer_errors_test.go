@@ -125,32 +125,6 @@ func TestNewJWSCheckpointSigner_NonECDSAKey(t *testing.T) {
 	}
 }
 
-// ----- VerifyC2SPECDSA negative paths -----
-
-// VerifyC2SPECDSA's malformed-input branches return false instead of
-// an error.
-func TestVerifyC2SPECDSA_NilPubKey(t *testing.T) {
-	if logstore.VerifyC2SPECDSA(nil, []byte("body"), []byte{0x01, 0x02}) {
-		t.Error("expected false for nil public key")
-	}
-}
-
-func TestVerifyC2SPECDSA_EmptySig(t *testing.T) {
-	pub, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if logstore.VerifyC2SPECDSA(&pub.PublicKey, []byte("body"), nil) {
-		t.Error("expected false for empty signature")
-	}
-}
-
-func TestVerifyC2SPECDSA_MalformedSig(t *testing.T) {
-	pub, _ := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	// 5 bytes is neither a valid DER signature nor a legacy P-256
-	// P1363 signature.
-	if logstore.VerifyC2SPECDSA(&pub.PublicKey, []byte("body"), []byte{1, 2, 3, 4, 5}) {
-		t.Error("expected false for malformed signature")
-	}
-}
-
 // ----- C2SPECDSASigner.Sign error path -----
 //
 // When the underlying KeyManager Sign fails, the signer must

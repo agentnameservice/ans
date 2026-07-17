@@ -118,11 +118,19 @@ func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, 
 	return out, rows.Err()
 }
 
-// MarkSent records that the event was successfully delivered.
-func (s *OutboxStore) MarkSent(ctx context.Context, id int64) error {
+// MarkSent records that the event was successfully delivered, writing
+// the TL-assigned logId and the send timestamp in a single UPDATE so a
+// row never appears delivered without its logId. The agent-events feed
+// gates on both columns being non-NULL, so this atomicity is what makes
+// "row is in the feed" imply "row has a resolvable receipt".
+//
+// logID is the value the TL echoed in its ingest response
+// (AppendResult.LogID). It is also echoed on idempotent duplicate
+// retries, so a re-delivered row records the same logId.
+func (s *OutboxStore) MarkSent(ctx context.Context, id int64, logID string) error {
 	_, err := s.db.db.ExecContext(ctx,
-		`UPDATE outbox_events SET sent_at_ms = ? WHERE id = ?`,
-		time.Now().UnixMilli(), id)
+		`UPDATE outbox_events SET sent_at_ms = ?, log_id = ? WHERE id = ?`,
+		time.Now().UnixMilli(), logID, id)
 	return mapSQLErr(err)
 }
 

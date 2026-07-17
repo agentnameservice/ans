@@ -1,0 +1,23 @@
+{
+  "logId": "019a7a99-1111-7b5b-b048-d0b78f4b4c5f",
+  "eventType": "AGENT_REVOKED",
+  "createdAt": "2025-03-10T09:00:00Z",
+  "expiresAt": "2026-01-08T12:30:00Z",
+  "agentId": "550e8400-e29b-41d4-a716-446655440000",
+  "ansName": "ans://v1.0.0.myagent.example.com",
+  "agentHost": "myagent.example.com",
+  "agentDisplayName": "Sentiment Analyzer",
+  "agentDescription": "An agent that analyzes sentiment in text",
+  "version": "1.0.0",
+  "providerId": "PC_1234567890",
+  "endpoints": [
+    {
+      "agentUrl": "https://myagent.example.com/mcp",
+      "metaDataUrl": "https://myagent.example.com/.well-known/mcp.json",
+      "protocol": "MCP",
+      "functions": [
+        {"id": "domain_suggest", "name": "Domain Suggest", "tags": ["domain"]}
+      ]
+    }
+  ]
+}

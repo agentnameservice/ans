@@ -4,8 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/ecdsa"
-	"encoding/base64"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -15,7 +13,6 @@ import (
 	"os"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,8 +21,7 @@ import (
 	"github.com/transparency-dev/tessera/api"
 	"github.com/transparency-dev/tessera/api/layout"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/tl/logstore"
+	"github.com/godaddy/ans/internal/lognote"
 	"github.com/godaddy/ans/internal/tl/receipt"
 )
 
@@ -478,13 +474,6 @@ func checkpointTreeSize(ctx context.Context, client *http.Client, baseURL string
 	return cp.LogSize, nil
 }
 
-// VerifiedCheckpoint is a parsed + signature-verified checkpoint.
-type VerifiedCheckpoint struct {
-	Origin   string
-	Size     uint64
-	RootHash []byte
-}
-
 // verifiedCheckpoint fetches /checkpoint (raw C2SP signed note),
 // verifies the signature against one of keysByHash, and returns the
 // parsed origin/size/rootHash.
@@ -493,12 +482,16 @@ type VerifiedCheckpoint struct {
 // /v1/log/checkpoint than the real tree contains and the walker
 // would never fetch the tiles holding agents the attacker wants
 // hidden — a textbook omission attack against a transparency log.
+//
+// Parsing and signature verification live in internal/lognote so this
+// binary links the verification path without the log-writer dependency
+// tree (logstore + Tessera).
 func verifiedCheckpoint(
 	ctx context.Context,
 	client *http.Client,
 	baseURL string,
 	keysByHash map[string]*ecdsa.PublicKey,
-) (*VerifiedCheckpoint, error) {
+) (*lognote.Checkpoint, error) {
 	if len(keysByHash) == 0 {
 		return nil, errors.New("no verification keys available")
 	}
@@ -506,97 +499,7 @@ func verifiedCheckpoint(
 	if err != nil {
 		return nil, fmt.Errorf("fetch /checkpoint: %w", err)
 	}
-	return verifyCheckpointNote(body, keysByHash)
-}
-
-// verifyCheckpointNote is the pure (network-free) half of
-// verifiedCheckpoint, split out so the parsing + signature
-// verification can be unit-tested against synthetic notes.
-//
-// A C2SP-shaped signed note is:
-//
-//	<origin>\n
-//	<size>\n
-//	<base64 rootHash>\n
-//	\n
-//	— <name> <base64(keyhash:4 || sig)>\n
-//	[— ...]            (optional additional signature lines)
-//
-// Verification succeeds when at least one signature line's keyhash
-// matches a known verifier key and the ECDSA P-256 signature
-// validates against the body bytes (everything up to and including
-// the blank separator line).
-func verifyCheckpointNote(raw []byte, keysByHash map[string]*ecdsa.PublicKey) (*VerifiedCheckpoint, error) {
-	// Body / signature split is the first "\n\n" separator.
-	sep := bytes.Index(raw, []byte("\n\n"))
-	if sep < 0 {
-		return nil, errors.New("checkpoint note: missing body/signature separator")
-	}
-	body := raw[:sep+1] // body INCLUDES the trailing newline per signed-note spec
-	sigLines := bytes.Split(bytes.TrimRight(raw[sep+2:], "\n"), []byte("\n"))
-
-	bodyLines := bytes.Split(bytes.TrimRight(body, "\n"), []byte("\n"))
-	if len(bodyLines) < 3 {
-		return nil, fmt.Errorf("checkpoint note: body must have ≥3 lines, got %d", len(bodyLines))
-	}
-	origin := string(bodyLines[0])
-	size, err := strconv.ParseUint(string(bodyLines[1]), 10, 64)
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint note: parse size %q: %w", bodyLines[1], err)
-	}
-	rootHash, err := base64.StdEncoding.DecodeString(string(bodyLines[2]))
-	if err != nil {
-		return nil, fmt.Errorf("checkpoint note: decode rootHash: %w", err)
-	}
-
-	var lastSigErr error
-	for _, line := range sigLines {
-		if !bytes.HasPrefix(line, []byte("— ")) {
-			// Not a signature line (or non-UTF8 prefix on Windows
-			// CRLF input); skip.
-			continue
-		}
-		// Format: "— <name> <base64>". Last space-separated token is
-		// the base64-encoded keyhash+signature.
-		fields := bytes.Fields(line)
-		if len(fields) < 3 {
-			continue
-		}
-		blob, err := base64.StdEncoding.DecodeString(string(fields[len(fields)-1]))
-		if err != nil {
-			lastSigErr = fmt.Errorf("decode sig line: %w", err)
-			continue
-		}
-		if len(blob) < 4 {
-			lastSigErr = errors.New("sig line: blob shorter than keyhash")
-			continue
-		}
-		keyhashHex := fmt.Sprintf("%08x", binary.BigEndian.Uint32(blob[:4]))
-		pub, ok := keysByHash[keyhashHex]
-		if !ok {
-			continue // signature is for an unknown key — try the next line
-		}
-		if !logstore.VerifyC2SPECDSA(pub, body, blob[4:]) {
-			lastSigErr = fmt.Errorf("sig for kid %s did not verify", keyhashHex)
-			continue
-		}
-		return &VerifiedCheckpoint{Origin: origin, Size: size, RootHash: rootHash}, nil
-	}
-	if lastSigErr == nil {
-		lastSigErr = errors.New("no signature line matched a known verifier key")
-	}
-	return nil, fmt.Errorf("checkpoint note: %w", lastSigErr)
-}
-
-// keyHashHex returns the 8-char hex string the /root-keys line
-// publishes for pub. Used by tests to wire keysByHash without
-// reaching into anscrypto.
-func keyHashHex(pub *ecdsa.PublicKey) (string, error) {
-	h, err := anscrypto.SPKIKeyHash4(pub)
-	if err != nil {
-		return "", err
-	}
-	return fmt.Sprintf("%08x", binary.BigEndian.Uint32(h)), nil
+	return lognote.VerifyCheckpointNote(body, keysByHash)
 }
 
 // httpGetBytes is a minimal GET helper for the walker. Distinct from

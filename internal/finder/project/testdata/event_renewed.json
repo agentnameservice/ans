@@ -1,0 +1,25 @@
+{
+  "logId": "019a7abb-3333-7b5b-b048-d0b78f4b4c5f",
+  "eventType": "AGENT_RENEWED",
+  "createdAt": "2025-06-01T00:00:00Z",
+  "expiresAt": "2026-06-01T00:00:00Z",
+  "agentId": "770e8400-e29b-41d4-a716-446655440222",
+  "ansName": "ans://v1.1.0.weather.example.net",
+  "agentHost": "weather.example.net",
+  "agentDisplayName": "Weather Data Node",
+  "agentDescription": "Enterprise weather MCP server for live telemetry",
+  "version": "1.1.0",
+  "providerId": "PC_9876543210",
+  "endpoints": [
+    {
+      "agentUrl": "https://weather.example.net/mcp",
+      "metaDataUrl": "https://weather.example.net/.well-known/mcp.json",
+      "protocol": "MCP",
+      "functions": [
+        {"id": "current_weather", "name": "Current Weather", "tags": ["weather"]},
+        {"id": "forecast", "name": "Forecast", "tags": ["weather", "forecast"]}
+      ],
+      "transports": ["STREAMABLE-HTTP"]
+    }
+  ]
+}

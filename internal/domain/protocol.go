@@ -14,6 +14,14 @@ const (
 	ProtocolHTTPAPI Protocol = "HTTP_API"
 )
 
+// AllProtocols returns every defined Protocol constant — the canonical
+// enumeration of the set. Callers that must iterate the full set (the
+// domain→wire token map, conformance tests) use this instead of
+// hand-copying a list that can silently drift from the consts.
+func AllProtocols() []Protocol {
+	return []Protocol{ProtocolA2A, ProtocolMCP, ProtocolHTTPAPI}
+}
+
 // ParseProtocol parses a protocol string (case-insensitive).
 func ParseProtocol(s string) (Protocol, error) {
 	switch strings.ToUpper(strings.TrimSpace(s)) {
@@ -55,6 +63,15 @@ const (
 	TransportREST           Transport = "REST"
 	TransportHTTP           Transport = "HTTP"
 )
+
+// AllTransports returns every defined Transport constant — the
+// canonical enumeration of the set (see AllProtocols for rationale).
+func AllTransports() []Transport {
+	return []Transport{
+		TransportStreamableHTTP, TransportSSE, TransportJSONRPC,
+		TransportGRPC, TransportREST, TransportHTTP,
+	}
+}
 
 // ParseTransport parses a transport string (case-insensitive).
 func ParseTransport(s string) (Transport, error) {
