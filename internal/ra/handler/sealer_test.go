@@ -3,6 +3,7 @@ package handler_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 )
 
@@ -24,11 +25,11 @@ type sealedAgentEvent struct {
 	InnerCanonical []byte
 }
 
-func (r *recordingAgentSealer) SealAgentEvent(_ context.Context, schemaVersion string, innerCanonical []byte, _ string) error {
+func (r *recordingAgentSealer) SealAgentEvent(_ context.Context, schemaVersion string, innerCanonical []byte, _ string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.failErr != nil {
-		return r.failErr
+		return "", r.failErr
 	}
 	var meta struct {
 		EventType string `json:"eventType"`
@@ -39,7 +40,9 @@ func (r *recordingAgentSealer) SealAgentEvent(_ context.Context, schemaVersion s
 		EventType:      meta.EventType,
 		InnerCanonical: append([]byte(nil), innerCanonical...),
 	})
-	return nil
+	// Deterministic fake of the TL ack's logId; the activation records it
+	// on the pre-delivered feed row.
+	return fmt.Sprintf("test-log-%d", len(r.events)), nil
 }
 
 // sealed returns a copy of the events sealed so far.

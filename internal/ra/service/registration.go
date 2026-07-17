@@ -34,6 +34,13 @@ import (
 // would leak SQL details into the port.
 type OutboxEnqueuer interface {
 	Enqueue(ctx context.Context, eventType, agentID, schemaVersion string, payload []byte, earliestAttempt time.Time) (int64, error)
+	// RecordSealed inserts a row that is already delivered (sent + logId
+	// set at insert), invisible to the worker's Claim. Used by the inline
+	// activation seal so the sealed AGENT_REGISTERED still surfaces on the
+	// agent-events feed — a read model over delivered outbox rows — even
+	// though it never rides the worker. Runs inside the activation
+	// transaction via the context-threaded tx.
+	RecordSealed(ctx context.Context, eventType, agentID, schemaVersion string, payload []byte, logID string) (int64, error)
 }
 
 // RegisterRequest is the command input for RegisterAgent. It is the
@@ -186,12 +193,15 @@ type RegistrationService struct {
 // V1/V2 ingest lane and returns only after the TL acknowledges the seal.
 // It is the agent-lane analogue of IdentityEventSealer: used to seal
 // AGENT_REGISTERED inline at activation so an agent is reported ACTIVE
-// only once its leaf is durable in the Transparency Log. A failed seal is
-// a failed activation — nothing is committed and the agent stays
-// PENDING_DNS for the operator to retry. Implementations map failures to
-// domain error kinds (ErrUnavailable for transient).
+// only once its leaf is durable in the Transparency Log. On success it
+// returns the TL-assigned logId from the ack, which the activation
+// persists on a pre-delivered outbox row so the sealed event is visible
+// to the agent-events feed. A failed seal is a failed activation —
+// nothing is committed and the agent stays PENDING_DNS for the operator
+// to retry. Implementations map failures to domain error kinds
+// (ErrUnavailable for transient).
 type AgentEventSealer interface {
-	SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) error
+	SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) (logID string, err error)
 }
 
 // EventSigner bundles the dependencies the RA needs to produce a
@@ -647,11 +657,14 @@ func (s *RegistrationService) cancelConflictingPendings(ctx context.Context, age
 }
 
 // errHostTaken is the 409 returned when an FQDN is held by another owner.
+// "Live" mirrors holdsHostExclusivity: an ACTIVE registration or a
+// DEPRECATED one (superseded but still resolving) both hold the host, so
+// the message must not suggest that deprecating an agent frees the FQDN.
 func errHostTaken(agentHost string) error {
 	return domain.NewConflictError(
 		"AGENT_HOST_TAKEN",
-		fmt.Sprintf("agentHost %q has an active registration owned by another operator; "+
-			"it cannot be used until no active registration remains", agentHost),
+		fmt.Sprintf("agentHost %q has a live (ACTIVE or DEPRECATED) registration owned by another operator; "+
+			"it cannot be used until no live registration remains", agentHost),
 	)
 }
 
@@ -668,6 +681,19 @@ func (s *RegistrationService) signCanonical(ctx context.Context, innerCanonical 
 	)
 }
 
+// sealedActivation is what a successful inline activation seal leaves
+// behind for the commit phase: the lane tag, the exact OutboxPayload
+// bytes the TL verified (canonical inner event + producer signature),
+// and the TL-assigned logId from the ack. VerifyDNS persists these on a
+// pre-delivered outbox row inside the activation transaction so the
+// sealed event surfaces on the agent-events feed (the ARD Finder's
+// ingest source) atomically with the ACTIVE commit.
+type sealedActivation struct {
+	SchemaVersion string
+	Payload       []byte
+	LogID         string
+}
+
 // sealActivationEvent builds the AGENT_REGISTERED event for the lane,
 // signs it once, and submits it to the TL inline, returning only on the
 // seal acknowledgment — seal-before-success for activation (ANS-1 §12.3,
@@ -680,25 +706,40 @@ func (s *RegistrationService) sealActivationEvent(
 	ctx context.Context, reg *domain.AgentRegistration,
 	expected []domain.ExpectedDNSRecord, perRecord []port.RecordVerification,
 	schemaVersion string, now time.Time,
-) error {
+) (*sealedActivation, error) {
 	if s.agentSealer == nil {
-		return domain.NewUnavailableError("TL_UNAVAILABLE",
+		return nil, domain.NewUnavailableError("TL_UNAVAILABLE",
 			"agent sealing is not configured; activation cannot report success without a sealed event")
 	}
 
 	schemaVer, innerCanonical, err := s.buildActivationLeaf(ctx, reg, expected, perRecord, schemaVersion, now)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	producerSig, err := s.signCanonical(ctx, innerCanonical, now)
 	if err != nil {
-		return fmt.Errorf("sign agent event: %w", err)
+		return nil, fmt.Errorf("sign agent event: %w", err)
 	}
 
 	sealCtx, cancel := context.WithTimeout(ctx, s.sealTimeout)
 	defer cancel()
-	return s.agentSealer.SealAgentEvent(sealCtx, schemaVer, innerCanonical, producerSig)
+	logID, err := s.agentSealer.SealAgentEvent(sealCtx, schemaVer, innerCanonical, producerSig)
+	if err != nil {
+		return nil, err
+	}
+
+	// Persist exactly the bytes the TL verified — the same
+	// {innerEventCanonical, producerSignature} wrapper worker-delivered
+	// rows carry, so the feed's projection parses both identically.
+	payload, err := json.Marshal(OutboxPayload{
+		InnerEventCanonical: json.RawMessage(innerCanonical),
+		ProducerSignature:   producerSig,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal sealed activation payload: %w", err)
+	}
+	return &sealedActivation{SchemaVersion: schemaVer, Payload: payload, LogID: logID}, nil
 }
 
 // buildActivationLeaf builds and JCS-canonicalizes the single terminal

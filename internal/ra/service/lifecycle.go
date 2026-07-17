@@ -967,26 +967,39 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// (Both lanes emit the same eventType token in version-specific
 	// envelope shapes; the seal runs outside the tx so the network round
 	// trip never holds the SQLite write lock.)
-	if err := s.sealActivationEvent(ctx, reg, expected, perRecord, in.SchemaVersion, now); err != nil {
+	sealed, err := s.sealActivationEvent(ctx, reg, expected, perRecord, in.SchemaVersion, now)
+	if err != nil {
 		return nil, err
 	}
 
-	// Sealed: commit the ACTIVE transition and cancel any losing pending
-	// registrations on this host atomically. The AGENT_REGISTERED event is
-	// already durable in the TL, so — unlike the outbox path used by
-	// revocation — there is nothing to enqueue here.
+	// Sealed: commit the ACTIVE transition, record the sealed event as a
+	// pre-delivered outbox row, and cancel any losing pending
+	// registrations on this host — atomically. The AGENT_REGISTERED event
+	// is already durable in the TL, so the worker never touches the row
+	// (Claim skips sent rows); it exists because the agent-events feed —
+	// the ARD Finder's ingest source — is a read model over DELIVERED
+	// outbox rows, and an inline-sealed event would otherwise never
+	// surface there. Committing it in the activation tx means "agent is
+	// ACTIVE" and "activation is feed-visible" are the same fact.
 	//
 	// The seal round trip above is a window a commit failure (SQLITE_BUSY,
 	// crash) can land in: the agent then stays PENDING_DNS and the operator
 	// retries verify-dns. The retry recomputes `now`, so its
 	// AGENT_REGISTERED leaf carries fresh timestamps and a fresh content
 	// hash — TL dedup will not match, appending a second AGENT_REGISTERED
-	// leaf. That is the intended benign residue, accepted exactly as on the
-	// identity lane: agent status keys on the ACTIVE row by agentId and
-	// read-side status derives from any terminal leaf, so the duplicate is
-	// invisible to verifiers and badges. It is not a dedup regression.
+	// leaf (and, on commit, a second feed row). That is the intended benign
+	// residue, accepted exactly as on the identity lane: agent status keys
+	// on the ACTIVE row by agentId, read-side status derives from any
+	// terminal leaf, and feed consumers apply events idempotently by
+	// agentId, so the duplicate is invisible to verifiers, badges, and
+	// discovery. It is not a dedup regression.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
 		if err := s.agents.Save(txCtx, reg); err != nil {
+			return err
+		}
+		if _, err := s.outbox.RecordSealed(txCtx,
+			string(event.TypeAgentRegistered), reg.AgentID,
+			sealed.SchemaVersion, sealed.Payload, sealed.LogID); err != nil {
 			return err
 		}
 		// The winner now holds the FQDN exclusively: cancel any other

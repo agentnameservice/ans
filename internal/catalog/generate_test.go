@@ -78,9 +78,9 @@ func mustJSON(t *testing.T, v any) string {
 
 // TestBuildEntry_SingleA2A_Golden pins the full single-protocol entry
 // shape, byte-for-byte, against the IMPL Appendix B.1 worked example —
-// with the identifier label derived from the leftmost DNS label
-// ("ai-agent") rather than B.1's supplied "support", since this RA derives
-// the label from the agentHost. Catches field-order and shape drift.
+// with the identifier label derived from the labelized display name
+// ("Acme Support Agent" → "Acme-Support-Agent"), the same derivation the
+// ARD Finder mints from feed events. Catches field-order and shape drift.
 func TestBuildEntry_SingleA2A_Golden(t *testing.T) {
 	reg := newReg(t, a2aEndpoint())
 
@@ -89,7 +89,7 @@ func TestBuildEntry_SingleA2A_Golden(t *testing.T) {
 		t.Fatalf("BuildEntry: %v", err)
 	}
 
-	const want = `{"identifier":"urn:air:ai-agent.acmecorp.com:agents:ai-agent",` +
+	const want = `{"identifier":"urn:air:ai-agent.acmecorp.com:agents:Acme-Support-Agent",` +
 		`"displayName":"Acme Support Agent",` +
 		`"description":"Customer-support agent for Acme retail accounts.",` +
 		`"version":"2.1.0",` +
@@ -98,7 +98,7 @@ func TestBuildEntry_SingleA2A_Golden(t *testing.T) {
 		`"updatedAt":"2026-06-12T17:03:11Z",` +
 		`"publisher":{"identifier":"ai-agent.acmecorp.com","displayName":"ai-agent.acmecorp.com","identityType":"dns"},` +
 		`"metadata":{"ansName":"ans://v2.1.0.ai-agent.acmecorp.com","agentHost":"ai-agent.acmecorp.com","badgeUrl":"https://transparency-log.example.com/v1/agents/550e8400-e29b-41d4-a716-446655440000"},` +
-		`"trustManifest":{"identity":"urn:air:ai-agent.acmecorp.com:agents:ai-agent","attestations":[{"type":"ANS-Registration","uri":"https://transparency-log.example.com/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt","mediaType":"application/scitt-receipt+cose"}]}}`
+		`"trustManifest":{"identity":"urn:air:ai-agent.acmecorp.com:agents:Acme-Support-Agent","attestations":[{"type":"ANS-Registration","uri":"https://transparency-log.example.com/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt","mediaType":"application/scitt-receipt+cose"}]}}`
 
 	if got := mustJSON(t, entry); got != want {
 		t.Errorf("entry JSON mismatch:\n got: %s\nwant: %s", got, want)
@@ -404,18 +404,37 @@ func TestBuildEntry_NotActive(t *testing.T) {
 	}
 }
 
+// TestDeriveLabel pins the label rule to the ARD Finder's labelize
+// (internal/finder/project/urn.go): trim, collapse whitespace runs to
+// single hyphens, preserve case, empty in → empty out (the caller gates).
 func TestDeriveLabel(t *testing.T) {
-	tests := []struct{ host, want string }{
-		{"ai-agent.acmecorp.com", "ai-agent"},
-		{"acmecorp.com", "acmecorp"},
-		{"AI-AGENT.ACMECORP.COM", "ai-agent"},
-		{"singlelabel", "singlelabel"},         // no-dot fallback
-		{".leadingdot.com", ".leadingdot.com"}, // IndexByte == 0 → whole host
+	tests := []struct{ displayName, want string }{
+		{"Acme Support Agent", "Acme-Support-Agent"},
+		{"demo-agent", "demo-agent"},
+		{"  spaced   out\tname ", "spaced-out-name"}, // runs collapse, edges trim
+		{"CasePreserved", "CasePreserved"},           // label case is publisher-owned
+		{"", ""},                                     // missing display name → no mintable label
+		{"   \t  ", ""},                              // whitespace-only → no mintable label
 	}
 	for _, tc := range tests {
-		if got := deriveLabel(tc.host); got != tc.want {
-			t.Errorf("deriveLabel(%q) = %q, want %q", tc.host, got, tc.want)
+		if got := deriveLabel(tc.displayName); got != tc.want {
+			t.Errorf("deriveLabel(%q) = %q, want %q", tc.displayName, got, tc.want)
 		}
+	}
+}
+
+// TestBuildEntry_NoLabel covers the mintable-label gate: a registration
+// whose display name is empty (or sanitizes away to nothing) has no URN
+// terminal segment, so no entry is produced — mirroring the ARD Finder,
+// which skips such feed events rather than substituting a fallback.
+func TestBuildEntry_NoLabel(t *testing.T) {
+	reg := newReg(t, a2aEndpoint())
+	reg.Details.DisplayName = "\u200b" // Cf-only: sanitizes to empty
+
+	_, err := BuildEntry(reg, Options{TLPublicBaseURL: testTLBase})
+	var ne *NotEligibleError
+	if !errors.As(err, &ne) || ne.Reason != ReasonNoLabel {
+		t.Fatalf("want NO_LABEL NotEligibleError, got %v", err)
 	}
 }
 

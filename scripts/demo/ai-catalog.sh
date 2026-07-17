@@ -61,9 +61,12 @@ reg_eligible() {
   esac
   gen_csrs "$host" "$ans"
   local body
+  # All versions of this host's agent share ONE display name: the URN
+  # label is the labelized display name (Finder-parity derivation), and a
+  # shared name is what makes successive versions share the lineage URN.
   body=$(jq -n --arg host "$host" --arg ver "$ver" --arg url "https://$host$path" \
     --arg meta "$meta" --arg proto "$proto" --arg idc "$IDENTITY_CSR_PEM" --arg sc "$SERVER_CSR_PEM" '{
-    agentDisplayName: ("Catalog " + $proto + " v" + $ver),
+    agentDisplayName: "Catalog Demo Agent",
     version: $ver,
     agentHost: $host,
     endpoints: [{ agentUrl: $url, metaDataUrl: $meta, protocol: $proto }],
@@ -99,7 +102,9 @@ reg_ineligible() {
 
 RAND="$(openssl rand -hex 4)"
 HOST="catalog-host-$RAND.example.com"
-LABEL="${HOST%%.*}"
+# URN label = labelized display name ("Catalog Demo Agent"), shared by
+# every version reg_eligible registers — the Finder-parity derivation.
+LABEL="Catalog-Demo-Agent"
 URN="urn:air:$HOST:agents:$LABEL"
 OTHER="catalog-other-$RAND.example.com"
 

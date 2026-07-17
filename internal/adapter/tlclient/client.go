@@ -272,21 +272,25 @@ func (c *Client) SealIdentityEvent(ctx context.Context, innerCanonical []byte, p
 // client half of seal-before-success for agent ACTIVATION (ANS-1 §12.3:
 // "the RA MUST NOT activate without a sealed event"). Used by the
 // registration service to seal AGENT_REGISTERED inline at verify-dns,
-// before the agent is reported ACTIVE. Error mapping mirrors
-// SealIdentityEvent: transient → TL_UNAVAILABLE (retryable, nothing
-// consumed — the activation can be retried), permanent → TL_REJECTED_EVENT
-// (the RA produced an event the TL refuses — a pipeline bug operators must
-// see). schemaVersion selects the lane ("V1" or "V2").
-func (c *Client) SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) error {
-	_, err := c.Append(ctx, schemaVersion, innerCanonical, producerSig)
+// before the agent is reported ACTIVE. On success it returns the
+// TL-assigned logId from the ack — the activation path persists it on a
+// pre-delivered outbox row so the sealed event surfaces on the
+// agent-events feed (which gates on log_id) without riding the worker.
+// Error mapping mirrors SealIdentityEvent: transient → TL_UNAVAILABLE
+// (retryable, nothing consumed — the activation can be retried),
+// permanent → TL_REJECTED_EVENT (the RA produced an event the TL refuses
+// — a pipeline bug operators must see). schemaVersion selects the lane
+// ("V1" or "V2").
+func (c *Client) SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) (string, error) {
+	res, err := c.Append(ctx, schemaVersion, innerCanonical, producerSig)
 	switch {
 	case err == nil:
-		return nil
+		return res.LogID, nil
 	case IsTransient(err):
-		return domain.NewUnavailableError("TL_UNAVAILABLE",
+		return "", domain.NewUnavailableError("TL_UNAVAILABLE",
 			"the transparency log did not confirm the seal; activation is retryable and nothing was consumed")
 	default:
-		return domain.NewInternalError("TL_REJECTED_EVENT",
+		return "", domain.NewInternalError("TL_REJECTED_EVENT",
 			"the transparency log rejected the agent event", err)
 	}
 }

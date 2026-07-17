@@ -723,13 +723,15 @@ func TestVerifyDNS_ActivatesWhenRecordsMatch(t *testing.T) {
 		t.Errorf("eventType: got %q, want AGENT_REGISTERED", sealed[0])
 	}
 
-	// Activation seals inline, so the outbox must be empty.
+	// Activation seals inline, so nothing is claimable by the outbox
+	// worker — the only row it writes is the pre-delivered feed row
+	// (sent + logId at insert), which Claim never returns.
 	rows, err := fx.outbox.Claim(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(rows) != 0 {
-		t.Fatalf("outbox rows: got %d, want 0 (activation seals inline)", len(rows))
+		t.Fatalf("claimable outbox rows: got %d, want 0 (activation seals inline)", len(rows))
 	}
 }
 
@@ -870,9 +872,12 @@ type handlerFixture struct {
 //
 // Once a registration goes live (ACTIVE/DEPRECATED) on an FQDN, that FQDN
 // belongs to its owner alone: a different owner may neither register nor
-// activate on it until no live registration remains. Enforced at
-// registration (entry gate) and re-checked atomically at activation
-// (verify-dns) to close the pending-window race.
+// activate on it until no live registration remains. Enforced at every
+// progression step (register, verify-acme, verify-dns). The verify-dns
+// check is BEST-EFFORT against a concurrent pending-window race — it runs
+// before the inline seal and outside the activation transaction (see
+// preflightRegistrationConflicts) — so these tests pin the sequential
+// contract, not an atomic activation-time guarantee.
 
 // registerRaw POSTs a registration and returns the recorder without
 // asserting status — for the conflict paths where 409 is the expectation.

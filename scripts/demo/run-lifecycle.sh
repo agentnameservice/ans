@@ -440,7 +440,10 @@ header "20. GET /v2/ans/agents/$AGENT_ID/catalog-entry  (AI Catalog record)"
 # assertion below is the guard: a 422/error body has no matching
 # .identifier and fails it.
 CAT_ENTRY=$(curl_json GET "/v2/ans/agents/$AGENT_ID/catalog-entry")
-want_urn="urn:air:${AGENT_HOST}:agents:${AGENT_HOST%%.*}"
+# URN label = labelized display name ("demo-agent", registered in step 1) —
+# the SAME identifier the Finder surfaced in step 15, proving search and
+# the published catalog hand consumers one lineage handle.
+want_urn="urn:air:${AGENT_HOST}:agents:demo-agent"
 want_receipt="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}/receipt"
 want_badge="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}"
 printf '%s' "$CAT_ENTRY" | jq -e \

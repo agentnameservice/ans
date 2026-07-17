@@ -45,6 +45,11 @@ const (
 	// ReasonNoEligibleEndpoint: no A2A/MCP endpoint carries a
 	// policy-passing metaDataUrl (§3.6 Gate 2).
 	ReasonNoEligibleEndpoint = "NO_ELIGIBLE_ENDPOINT"
+	// ReasonNoLabel: the display name is missing or sanitizes away to
+	// nothing, so no URN label can be minted. Mirrors the ARD Finder,
+	// which skips such feed events instead of substituting a fallback
+	// discovery handle.
+	ReasonNoLabel = "NO_LABEL"
 )
 
 func (e *NotEligibleError) Error() string { return e.msg }
@@ -104,7 +109,24 @@ func BuildEntry(reg *domain.AgentRegistration, opts Options) (Entry, error) {
 	}
 
 	agentHost := reg.AnsName.AgentHost()
-	urn := sanitizeText(buildURN(agentHost, deriveLabel(agentHost)))
+
+	// Gate: a mintable label. The URN's terminal segment is the labelized
+	// display name — the SAME derivation the ARD Finder uses when it
+	// projects feed events into search results (see
+	// internal/finder/project/urn.go mintURN), so discovery and the
+	// published catalog hand consumers ONE lineage identifier per agent.
+	// A display name that is missing (it is optional at registration) or
+	// sanitizes away to nothing yields no usable discovery handle; the
+	// Finder skips such events, and the catalog mirrors that as
+	// not-eligible rather than substituting a fallback segment.
+	label := deriveLabel(sanitizeText(reg.Details.DisplayName))
+	if label == "" {
+		return Entry{}, &NotEligibleError{
+			Reason: ReasonNoLabel,
+			msg:    "registration has no display name to derive the URN label from; a catalog entry needs a usable lineage identifier",
+		}
+	}
+	urn := sanitizeText(buildURN(agentHost, label))
 
 	// Gate 2: collect endpoints eligible for an entry.
 	eligible := collectEligibleEndpoints(reg.Endpoints, agentHost, opts.AllowInsecureURLs)
@@ -207,26 +229,30 @@ func protocolMediaType(p domain.Protocol) (string, bool) {
 	}
 }
 
-// deriveLabel returns the lineage label for the URN: the leftmost DNS label
-// of agentHost (e.g. ai-agent.acmecorp.com → "ai-agent"). agentHost is
-// RFC-1123 validated upstream (at least two non-empty labels), so the
-// result is always non-empty. The label is stable across versions —
-// agentHost is immutable (ANS-1 §5), and one agentHost is one logical
-// agent (§3.4) — and is keyed on neither agentId (rotates per version) nor
-// displayName (mutable), satisfying §3.3 from data the RA already holds.
-func deriveLabel(agentHost string) string {
-	host := strings.ToLower(strings.TrimSpace(agentHost))
-	if i := strings.IndexByte(host, '.'); i > 0 {
-		return host[:i]
+// deriveLabel returns the URN's terminal lineage segment: the sanitized
+// display name, trimmed, with each internal whitespace run collapsed to a
+// single hyphen (e.g. "Support  Assistant" → "Support-Assistant"). Case is
+// preserved — the intra-host label space is the publisher's to manage.
+// This is deliberately the SAME rule the ARD Finder applies when minting
+// identifiers from feed events (internal/finder/project/urn.go labelize),
+// so a consumer correlating a search result with the host's published
+// ai-catalog.json sees one lineage handle, not two. Successive versions of
+// one logical agent share the label by sharing a display name; an empty
+// result means no handle can be minted and the caller gates on it.
+func deriveLabel(displayName string) string {
+	s := strings.TrimSpace(displayName)
+	if s == "" {
+		return ""
 	}
-	return host
+	return strings.Join(strings.Fields(s), "-")
 }
 
-// buildURN composes the domain-anchored lineage handle (§3.3). The host
-// segment is the registration's own agentHost, so a registry reads the
-// publisher domain directly from the identifier.
+// buildURN composes the domain-anchored lineage handle (ARD §4.2.1). The
+// host segment is the registration's own agentHost (lowercased), so a
+// registry reads the publisher domain directly from the identifier; the
+// label keeps its case — the intra-host label space is the publisher's.
 func buildURN(agentHost, label string) string {
-	return "urn:air:" + agentHost + ":agents:" + label
+	return "urn:air:" + strings.ToLower(agentHost) + ":agents:" + label
 }
 
 // buildPublisher builds the Publisher block (§3.7). ANS has no verified

@@ -79,6 +79,51 @@ func (s *OutboxStore) Enqueue(
 	return id, nil
 }
 
+// RecordSealed inserts an outbox row that is ALREADY delivered: both
+// sent_at_ms and log_id are set at insert time, so the row is never
+// visible to Claim (which selects `sent_at_ms IS NULL`) and the worker
+// never re-sends it. It exists for events sealed INLINE
+// (seal-before-success — agent activation): the TL has already acked the
+// append and returned logId, but the agent-events feed is a read model
+// over delivered outbox rows (`sent_at_ms IS NOT NULL AND log_id IS NOT
+// NULL`, migration 006), so without this row an inline-sealed event
+// would never surface on GET /v1/agents/events and the Finder would
+// never discover the agent. Called inside the activation transaction so
+// feed visibility commits atomically with the ACTIVE status.
+func (s *OutboxStore) RecordSealed(
+	ctx context.Context,
+	eventType, agentID, schemaVersion string,
+	payload []byte,
+	logID string,
+) (int64, error) {
+	if len(payload) == 0 {
+		return 0, errors.New("sqlite/outbox: payload is empty")
+	}
+	if logID == "" {
+		return 0, errors.New("sqlite/outbox: logID is empty — a sealed row must carry the TL ack's logId")
+	}
+	switch schemaVersion {
+	case "V1", "V2":
+	default:
+		return 0, fmt.Errorf("sqlite/outbox: invalid schemaVersion %q (want V1 or V2)", schemaVersion)
+	}
+	const q = `
+        INSERT INTO outbox_events(event_type, agent_id, schema_version, payload_json,
+            next_attempt_at_ms, created_at_ms, sent_at_ms, log_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	now := time.Now().UnixMilli()
+	res, err := s.db.extx(ctx).ExecContext(ctx, q, eventType, agentID, schemaVersion, string(payload),
+		now, now, now, logID)
+	if err != nil {
+		return 0, mapSQLErr(err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 // Claim returns up to batchSize pending outbox events whose
 // next_attempt_at_ms has passed. Callers process each event and then
 // call MarkSent or MarkFailed. There is no explicit lease — we rely on

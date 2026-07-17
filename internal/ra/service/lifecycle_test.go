@@ -1,13 +1,16 @@
 package service_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/godaddy/ans/internal/adapter/dns"
+	"github.com/godaddy/ans/internal/adapter/store/sqlite"
 	"github.com/godaddy/ans/internal/domain"
+	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/ra/service"
 	event "github.com/godaddy/ans/internal/tl/event"
 	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
@@ -304,5 +307,72 @@ func TestVerifyDNS_NilSealer_FailsClosed(t *testing.T) {
 	}
 	if got.Status != domain.StatusPendingDNS {
 		t.Fatalf("agent must stay PENDING_DNS with no sealer configured; got %q", got.Status)
+	}
+}
+
+// TestVerifyDNS_SealedActivationIsFeedVisible pins the contract between
+// seal-before-success and the ARD agent-events feed (GET
+// /v1/agents/events — the Finder's ingest source). The feed is a read
+// model over DELIVERED outbox rows (sent_at_ms + log_id set), and the
+// inline seal bypasses the outbox worker entirely, so activation must
+// record a PRE-DELIVERED row in the activation transaction: same
+// {innerEventCanonical, producerSignature} payload the TL verified,
+// stamped with the ack's logId. Without that row, an inline-sealed agent
+// would never appear on the feed and the Finder would never discover it.
+// The row must also be invisible to the worker (never claimable) — it
+// was already delivered by construction.
+func TestVerifyDNS_SealedActivationIsFeedVisible(t *testing.T) {
+	t.Parallel()
+	fx := newRegFixture(t)
+	ctx := context.Background()
+
+	resp, err := fx.svc.RegisterAgent(ctx, fx.req)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	agentID := resp.Registration.AgentID
+	if _, err := fx.svc.VerifyACME(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-acme: %v", err)
+	}
+	if _, err := fx.svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatalf("verify-dns: %v", err)
+	}
+
+	sealedEvents := fx.sealer.sealed()
+	if len(sealedEvents) != 1 {
+		t.Fatalf("expected exactly one sealed event; got %d", len(sealedEvents))
+	}
+
+	// The worker must never see the row: it is delivered at insert.
+	if rows, _ := fx.outboxStore.Claim(ctx, 100); len(rows) != 0 {
+		t.Fatalf("sealed activation must not be claimable by the outbox worker; got %d rows", len(rows))
+	}
+
+	// The feed must see exactly this activation, carrying the TL ack's
+	// logId and the exact payload bytes the TL verified.
+	feed := sqlite.NewFeedStore(fx.db, 0)
+	items, err := feed.ReadFeed(ctx, port.FeedQuery{Limit: 10})
+	if err != nil {
+		t.Fatalf("ReadFeed: %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("feed rows: got %d, want 1 (the sealed AGENT_REGISTERED)", len(items))
+	}
+	row := items[0]
+	if row.EventType != "AGENT_REGISTERED" {
+		t.Errorf("feed eventType: got %q, want AGENT_REGISTERED", row.EventType)
+	}
+	if row.AgentID != agentID {
+		t.Errorf("feed agentId: got %q, want %q", row.AgentID, agentID)
+	}
+	if row.LogID != sealedEvents[0].LogID {
+		t.Errorf("feed logId: got %q, want the seal ack's %q", row.LogID, sealedEvents[0].LogID)
+	}
+	var payload service.OutboxPayload
+	if err := json.Unmarshal(row.PayloadJSON, &payload); err != nil {
+		t.Fatalf("unmarshal feed payload: %v", err)
+	}
+	if !bytes.Equal(payload.InnerEventCanonical, sealedEvents[0].InnerCanonical) {
+		t.Error("feed payload's innerEventCanonical must be byte-identical to the sealed event")
 	}
 }

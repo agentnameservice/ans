@@ -90,7 +90,7 @@ func TestHostCatalog_ActiveAgentAppears(t *testing.T) {
 	if len(doc.Entries) != 1 {
 		t.Fatalf("entries = %d, want 1 (the ACTIVE agent)", len(doc.Entries))
 	}
-	if doc.Entries[0].Identifier != "urn:air:"+host+":agents:ai-agent" {
+	if doc.Entries[0].Identifier != "urn:air:"+host+":agents:Catalog-Agent" {
 		t.Errorf("entry identifier = %q", doc.Entries[0].Identifier)
 	}
 }
@@ -208,8 +208,9 @@ func TestHostCatalog_HostComplete_MultipleVersions(t *testing.T) {
 	if !got["1.0.0"] || !got["2.0.0"] {
 		t.Errorf("want versions {1.0.0, 2.0.0}, got %v", got)
 	}
-	// Both versions share the one lineage handle (leftmost DNS label).
-	wantURN := "urn:air:" + host + ":agents:multi-version"
+	// Both versions share the one lineage handle: same display name →
+	// same labelized URN segment (the Finder-parity derivation).
+	wantURN := "urn:air:" + host + ":agents:Catalog-Agent"
 	for _, e := range doc.Entries {
 		if e.Identifier != wantURN {
 			t.Errorf("entry identifier = %q, want %q", e.Identifier, wantURN)
@@ -271,7 +272,7 @@ func TestCatalogEntry_EligibleReturns200(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &entry); err != nil {
 		t.Fatalf("parse entry: %v", err)
 	}
-	if entry.Identifier != "urn:air:ai-agent.acme.example.com:agents:ai-agent" {
+	if entry.Identifier != "urn:air:ai-agent.acme.example.com:agents:Catalog-Agent" {
 		t.Errorf("identifier = %q", entry.Identifier)
 	}
 	if entry.MediaType != "application/a2a-agent-card+json" {

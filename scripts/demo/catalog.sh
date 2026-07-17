@@ -48,7 +48,9 @@ RAND="$(openssl rand -hex 4)"
 header "1. Eligible single-protocol agent (MCP + metaDataUrl)"
 H1="catalog-single-$RAND.example.com"
 ANS1="ans://v1.0.0.$H1"
-URN1="urn:air:$H1:agents:${H1%%.*}"
+# URN label = labelized display name ("Catalog Single" → "Catalog-Single"),
+# the same derivation the ARD Finder mints from feed events.
+URN1="urn:air:$H1:agents:Catalog-Single"
 META1="https://$H1/.well-known/mcp/server-card.json"
 gen_csrs "$H1" "$ANS1"
 REQ1=$(jq -n --arg host "$H1" --arg meta "$META1" --arg idc "$IDENTITY_CSR_PEM" --arg sc "$SERVER_CSR_PEM" '{
@@ -77,7 +79,7 @@ header "1b. GET /v2/ans/agents/$A1/catalog-entry"
 cat_req GET "/v2/ans/agents/$A1/catalog-entry"
 assert_status 200 "catalog-entry single"
 E1="$CAT_BODY"
-cassert "identifier is the urn:air lineage handle (leftmost DNS label)" "$E1" ".identifier == \"$URN1\""
+cassert "identifier is the urn:air lineage handle (labelized display name)" "$E1" ".identifier == \"$URN1\""
 cassert "mediaType is the card type for MCP"                          "$E1" '.mediaType == "application/mcp-server-card+json"'
 cassert "exactly one of url|data (single -> url)"                     "$E1" '(.url|type=="string") and (has("data")|not)'
 cassert "url is the declared metaDataUrl"                             "$E1" ".url == \"$META1\""
@@ -94,7 +96,7 @@ cassert "ANS-Registration SCITT-receipt attestation (no digest)"      "$E1" \
 header "2. Eligible multi-protocol agent (A2A + MCP) -> nested entry"
 H2="catalog-multi-$RAND.example.com"
 ANS2="ans://v1.0.0.$H2"
-URN2="urn:air:$H2:agents:${H2%%.*}"
+URN2="urn:air:$H2:agents:Catalog-Multi"
 gen_csrs "$H2" "$ANS2"
 REQ2=$(jq -n --arg host "$H2" --arg idc "$IDENTITY_CSR_PEM" --arg sc "$SERVER_CSR_PEM" '{
   agentDisplayName: "Catalog Multi",

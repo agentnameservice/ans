@@ -35,7 +35,7 @@ func TestBuildHostDocument_HostObjectAndEntries(t *testing.T) {
 	if len(doc.Entries) != 1 {
 		t.Fatalf("entries = %d, want 1", len(doc.Entries))
 	}
-	if doc.Entries[0].Identifier != "urn:air:"+host+":agents:ai-agent" {
+	if doc.Entries[0].Identifier != "urn:air:"+host+":agents:Acme-Support-Agent" {
 		t.Errorf("entry identifier = %q", doc.Entries[0].Identifier)
 	}
 

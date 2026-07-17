@@ -2135,8 +2135,12 @@ components:
           description: |
             Stable, version-spanning lineage handle
             `urn:air:{agentHost}:agents:{label}`, where `{label}` is the
-            leftmost DNS label of agentHost. Never the per-version agentId.
-          example: urn:air:ai-agent.acmecorp.com:agents:ai-agent
+            agent's display name with whitespace runs collapsed to single
+            hyphens — the same derivation the ARD discovery service (the
+            Finder) mints from feed events, so search results and the
+            published catalog carry one identifier per agent. Never the
+            per-version agentId.
+          example: urn:air:ai-agent.acmecorp.com:agents:Support-Assistant
         displayName:
           type: string
           maxLength: 64

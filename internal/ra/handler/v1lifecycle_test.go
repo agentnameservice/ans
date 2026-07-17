@@ -86,10 +86,12 @@ func TestV1VerifyDNS_EmitsAgentRegistered(t *testing.T) {
 	}
 
 	// AGENT_REGISTERED seals INLINE at the verify-dns ACTIVE transition
-	// (seal-before-success), stamped schema_version=V1 — not enqueued
-	// to the outbox. Earlier steps (register + verify-acme) must not
+	// (seal-before-success), stamped schema_version=V1 — never handed to
+	// the outbox WORKER. Earlier steps (register + verify-acme) must not
 	// have sealed anything, because V1 emits only on terminal
-	// transitions. The outbox must stay empty for this lifecycle.
+	// transitions. Claim must return nothing: the only outbox row this
+	// lifecycle writes is the pre-delivered feed row recorded at
+	// activation (sent + logId at insert), which is invisible to Claim.
 	var registered int
 	for _, s := range fx.sealer.sealed() {
 		if s.SchemaVersion != "V1" {
@@ -107,7 +109,7 @@ func TestV1VerifyDNS_EmitsAgentRegistered(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(rows) != 0 {
-		t.Errorf("activation seals inline; outbox must be empty, got %d rows", len(rows))
+		t.Errorf("activation seals inline; nothing must be claimable by the worker, got %d rows", len(rows))
 	}
 }
 

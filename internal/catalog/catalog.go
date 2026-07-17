@@ -57,8 +57,10 @@ const (
 // specVersion (§2).
 type Entry struct {
 	// Identifier is the stable, version-spanning lineage handle
-	// urn:air:{agentHost}:agents:{label} (§3.3) — never the per-version
-	// agentId. MUST.
+	// urn:air:{agentHost}:agents:{label} (ARD §4.2.1) — never the
+	// per-version agentId. {label} is the labelized display name, the
+	// same derivation the ARD Finder mints (see generate.go deriveLabel).
+	// MUST.
 	Identifier string `json:"identifier"`
 	// DisplayName is the agent's human-readable name (≤64). MUST.
 	DisplayName string `json:"displayName"`
