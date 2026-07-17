@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -380,8 +381,15 @@ func (h *LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
 		return
 	}
+
 	if req.Reason == "" {
 		WriteError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		return
+	}
+
+	if len(req.Comments) > maxCommentsLength {
+		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
+			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
 	}
 

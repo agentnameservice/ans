@@ -847,6 +847,24 @@ func TestRevoke_BadReason_422(t *testing.T) {
 	}
 }
 
+func TestRevoke_CommentsTooLong_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID, _ := fx.v1RegisterAgent(t, "alice", "agent.example.com", "1.0.0")
+	revBody, _ := json.Marshal(map[string]any{
+		"reason":   "KEY_COMPROMISE",
+		"comments": strings.Repeat("a", 201),
+	})
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/revoke",
+		bytes.NewReader(revBody), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "COMMENTS_TOO_LONG") {
+		t.Errorf("expected COMMENTS_TOO_LONG code, got %s", rec.Body)
+	}
+}
+
 func TestRevoke_NotOwnedReturns403(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
