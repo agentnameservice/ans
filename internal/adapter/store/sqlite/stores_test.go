@@ -127,8 +127,9 @@ func TestOutboxStore_EnqueueAndClaim(t *testing.T) {
 		t.Errorf("schema: got %q", claimed[0].SchemaVersion)
 	}
 
-	// MarkSent hides the event from future claims.
-	if err := store.MarkSent(ctx, id); err != nil {
+	// MarkSent hides the event from future claims and records the
+	// TL-assigned logId atomically with sent_at_ms.
+	if err := store.MarkSent(ctx, id, "log-abc"); err != nil {
 		t.Fatal(err)
 	}
 	claimed2, err := store.Claim(ctx, 10)
@@ -137,6 +138,16 @@ func TestOutboxStore_EnqueueAndClaim(t *testing.T) {
 	}
 	if len(claimed2) != 0 {
 		t.Errorf("MarkSent didn't remove from claim set: %d", len(claimed2))
+	}
+
+	// The logId is persisted on the delivered row.
+	var gotLogID string
+	if err := db.DBX().GetContext(ctx, &gotLogID,
+		`SELECT log_id FROM outbox_events WHERE id = ?`, id); err != nil {
+		t.Fatalf("read log_id: %v", err)
+	}
+	if gotLogID != "log-abc" {
+		t.Errorf("log_id: got %q, want %q", gotLogID, "log-abc")
 	}
 }
 

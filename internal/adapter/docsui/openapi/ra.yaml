@@ -59,6 +59,14 @@ tags:
     description: Agent certificate revocation operations
   - name: Certificate Management
     description: Certificate retrieval, CSR submission, and renewal operations
+  - name: Events
+    description: |
+      Public, unauthenticated agent-lifecycle events feed. Lives on the
+      `/v1` path (not `/v2`) because it is the production-compatible
+      ingestion contract the ANS Finder consumes; its shape is pinned to
+      the production `getAgentEvents` operation. The operation declares a
+      path-level `servers` override so the documented path resolves at
+      the host root rather than under this document's `/v2` server prefix.
   - name: Verified Identities
     description: |
       The "who" behind agents — owner-level identities (did:web,
@@ -77,6 +85,101 @@ security:
   - bearerAuth: []
 
 paths:
+  # ──────────────────────────────────────────────────────────────────
+  # Events — public agent-lifecycle feed (the Finder's ingestion source)
+  #
+  # Path-level `servers` override: this operation lives at the host
+  # ROOT (`/v1/agents/events`), not under this document's `/v2` server
+  # prefix. The override makes the rendered URL correct in Swagger UI.
+  # The shape is byte-compatible with the production `getAgentEvents`
+  # operation; the OSS RA owns a conformance test asserting that.
+  # ──────────────────────────────────────────────────────────────────
+  /v1/agents/events:
+    servers:
+      - url: http://localhost:18080
+        description: Local dev — quickstart ra-local.yaml (feed is not under /v2)
+      - url: https://api.ans.example.org
+        description: Main ANS API server
+    get:
+      tags:
+        - Events
+      summary: Retrieve ANS agent lifecycle events
+      description: |
+        Returns a paginated, strictly-ordered stream of ANS agent
+        lifecycle events (registrations and revocations). This is the
+        ingestion contract the ANS Finder polls to build its discovery
+        catalog.
+
+        **Anonymous.** This route requires no authentication (`security: []`).
+
+        **Only sealed events appear.** An event is served only after it
+        has been accepted by the Transparency Log and a `logId` assigned,
+        so an item in the feed is provably sealed in the log and its
+        receipt is resolvable from `logId`.
+
+        **Pagination.** Pass the `lastLogId` from a response as the next
+        request's `lastLogId` query parameter to fetch the following
+        page. Omit it for the first page. When the response omits
+        `lastLogId`, there are no more results.
+
+        **Retention.** Events are retained for a bounded window (default
+        30 days) and then age out. Because of this, an unknown
+        `lastLogId` and one that has aged out are indistinguishable: both
+        restart the stream from the oldest retained event rather than
+        erroring.
+
+        **providerId.** Accepted for production-shape parity. This
+        open-source RA has no provider concept, so supplying a non-empty
+        `providerId` yields an empty page.
+      operationId: getAgentEvents
+      security: []
+      parameters:
+        - name: providerId
+          in: query
+          description: |
+            Optional provider identifier. This OSS RA has no provider
+            concept; a non-empty value returns an empty page.
+          required: false
+          schema:
+            type: string
+        - name: lastLogId
+          in: query
+          description: |
+            Opaque cursor — the `lastLogId` from a previous response.
+            Omit for the first page. An unknown or aged-out cursor
+            restarts from the oldest retained event.
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of events to return (1-200, default 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPageResponse'
+        '422':
+          description: Invalid request parameters (out-of-range or non-numeric limit)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
   # ──────────────────────────────────────────────────────────────────
   # Management — ownership-scoped
   # ──────────────────────────────────────────────────────────────────
@@ -1965,6 +2068,100 @@ components:
         - id
         - name
 
+    # ── Events feed (GET /v1/agents/events) ──────────────────────
+    # Byte-compatible with the production `getAgentEvents` response.
+    # Reuses AgentEndpoint / AgentFunction above (the feed's endpoint
+    # shape is the same minus metaDataHash, which the feed never emits).
+    EventPageResponse:
+      type: object
+      description: Paginated response containing ANS events.
+      properties:
+        items:
+          type: array
+          description: Array of event items (always present; `[]` when empty).
+          items:
+            $ref: '#/components/schemas/EventItem'
+        lastLogId:
+          type: string
+          description: |
+            The logId of the last event in this page. Pass it as the next
+            request's `lastLogId` to fetch the following page. Omitted
+            when there are no more results.
+      required:
+        - items
+
+    EventItem:
+      type: object
+      description: One ANS lifecycle event with agent details and event metadata.
+      properties:
+        logId:
+          type: string
+          description: Unique identifier for this event in the stream.
+          example: 019a7a52-e5bf-7b5b-b048-d0b78f4b4c5f
+        eventType:
+          type: string
+          description: Type of ANS event.
+          enum: [AGENT_DEPRECATED, AGENT_REGISTERED, AGENT_REVOKED, AGENT_RENEWED]
+          example: AGENT_REGISTERED
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp when the event was created (producer time).
+          example: '2025-01-08T12:30:00Z'
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the agent's registration expires (if applicable).
+          example: '2026-01-08T12:30:00Z'
+        agentId:
+          type: string
+          format: uuid
+          description: Unique identifier of the agent.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        ansName:
+          type: string
+          description: Fully qualified ANS name (ans://{version}.{agentHost}).
+          example: ans://v1.0.0.myagent.example.com
+        agentHost:
+          type: string
+          maxLength: 253
+          description: The agent's hosting domain.
+          example: myagent.example.com
+        agentDisplayName:
+          type: string
+          maxLength: 64
+          description: Human-readable display name for the agent.
+          example: Sentiment Analyzer
+        agentDescription:
+          type: string
+          maxLength: 150
+          description: Description of the agent.
+          example: An agent that analyzes sentiment in text
+        version:
+          type: string
+          description: Semantic version of the agent.
+          example: 1.0.0
+        providerId:
+          type: string
+          description: |
+            Provider identifier (production field). This OSS RA never
+            emits it — the only principal id is the registrant's owner
+            id, which is not exposed.
+          example: PC_1234567890
+        endpoints:
+          type: array
+          description: Agent endpoints with protocol-specific configuration.
+          items:
+            $ref: '#/components/schemas/AgentEndpoint'
+      required:
+        - logId
+        - eventType
+        - createdAt
+        - agentId
+        - ansName
+        - agentHost
+        - version
+
     CertificateResponse:
       type: object
       properties:
@@ -2155,6 +2352,40 @@ components:
       required:
         - status
         - nextStep
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 problem details — the body every RA error response
+        carries, served as `application/problem+json`. `type`, `title`,
+        and `status` are always present; `detail` is the human-readable
+        explanation specific to this occurrence, and `code` is a stable,
+        machine-readable error identifier (read `code` for programmatic
+        handling, `detail` for display).
+      properties:
+        type:
+          type: string
+          description: A URI reference identifying the problem type.
+          example: about:blank
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+          example: Validation Failed
+        status:
+          type: integer
+          description: The HTTP status code for this occurrence.
+          example: 422
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        code:
+          type: string
+          description: Stable, machine-readable error code.
+          example: INVALID_LIMIT
+      required:
+        - type
+        - title
+        - status
 
     ErrorResponse:
       type: object

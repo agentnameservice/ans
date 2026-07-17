@@ -87,3 +87,25 @@ func TestTransport_String_IsValid(t *testing.T) {
 	assert.True(t, TransportSSE.IsValid())
 	assert.False(t, Transport("OTHER").IsValid())
 }
+
+func TestAllProtocols(t *testing.T) {
+	all := AllProtocols()
+	assert.Len(t, all, 3)
+	for _, p := range all {
+		assert.Truef(t, p.IsValid(), "AllProtocols entry %q must be IsValid", p)
+	}
+	// The enumeration must contain each known constant exactly once.
+	assert.ElementsMatch(t, []Protocol{ProtocolA2A, ProtocolMCP, ProtocolHTTPAPI}, all)
+}
+
+func TestAllTransports(t *testing.T) {
+	all := AllTransports()
+	assert.Len(t, all, 6)
+	for _, tr := range all {
+		assert.Truef(t, tr.IsValid(), "AllTransports entry %q must be IsValid", tr)
+	}
+	assert.ElementsMatch(t, []Transport{
+		TransportStreamableHTTP, TransportSSE, TransportJSONRPC,
+		TransportGRPC, TransportREST, TransportHTTP,
+	}, all)
+}

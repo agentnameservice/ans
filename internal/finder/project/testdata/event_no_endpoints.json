@@ -1,0 +1,13 @@
+{
+  "logId": "019a7add-5555-7b5b-b048-d0b78f4b4c5f",
+  "eventType": "AGENT_REGISTERED",
+  "createdAt": "2025-02-20T08:00:00Z",
+  "expiresAt": "2026-02-20T08:00:00Z",
+  "agentId": "880e8400-e29b-41d4-a716-446655440333",
+  "ansName": "ans://v1.0.0.endpointless.example.com",
+  "agentHost": "endpointless.example.com",
+  "agentDisplayName": "Endpointless Agent",
+  "agentDescription": "Registered with a display name but no endpoints",
+  "version": "1.0.0",
+  "providerId": "PC_0000000001"
+}

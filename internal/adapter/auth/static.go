@@ -47,21 +47,52 @@ func WithIdentity(ctx context.Context, id *port.Identity) context.Context {
 //
 // Do not use StaticProvider in production. Use OIDCProvider instead.
 type StaticProvider struct {
-	apiKey         string
-	apiSecret      string   // optional; enables the sso-key format when set
-	anonymousPaths []string // paths under which auth is not required
-	subject        string   // synthetic subject reported on success
+	apiKey    string
+	apiSecret string // optional; enables the sso-key format when set
+	// anonymousPaths are SUBTREE prefixes under which auth is skipped:
+	// a request whose path equals the prefix or extends it past a `/`
+	// boundary is anonymous. Used for `/docs` (which also serves
+	// `/docs/openapi.yaml`) and `/v2/admin/*`.
+	anonymousPaths []string
+	// anonymousExactPaths are EXACT paths under which auth is skipped —
+	// only an identical path matches, never a child or a same-prefix
+	// sibling. Required for leaf routes like `/v1/agents/events` that
+	// sit next to authenticated wildcard siblings
+	// (`/v1/agents/{agentId}/…`): a subtree exemption there would skip
+	// auth for `/v1/agents/events/revoke`, which chi backtracks onto
+	// the `{agentId}` route as `agentId="events"`.
+	anonymousExactPaths []string
+	subject             string // synthetic subject reported on success
 }
 
 // StaticOption configures a StaticProvider.
 type StaticOption func(*StaticProvider)
 
-// WithAnonymousPath marks a URL-path prefix as unauthenticated.
-// Handlers can still call IdentityFromContext; it will return (nil, false).
-// Typically used for /admin/health and /v1/agents/* public reads.
+// WithAnonymousPath marks a URL-path SUBTREE as unauthenticated: the
+// prefix itself and any descendant past a `/` boundary. Handlers can
+// still call IdentityFromContext; it will return (nil, false). Use for
+// genuinely subtree-shaped exemptions like `/docs` (also serves
+// `/docs/openapi.yaml`).
+//
+// Do NOT use this for a leaf route that sits beside an authenticated
+// wildcard sibling — use WithAnonymousExactPath. A subtree exemption on
+// `/v1/agents/events` would also exempt `/v1/agents/events/revoke`,
+// which chi routes to the authenticated `/v1/agents/{agentId}/revoke`
+// handler with `agentId="events"`.
 func WithAnonymousPath(prefix string) StaticOption {
 	return func(p *StaticProvider) {
 		p.anonymousPaths = append(p.anonymousPaths, prefix)
+	}
+}
+
+// WithAnonymousExactPath marks a single exact URL path as
+// unauthenticated. Only a request whose path is byte-identical matches —
+// never a child (`/path/child`) and never a same-prefix sibling
+// (`/pathfoo`). This is the safe exemption for a public leaf route
+// adjacent to authenticated wildcard routes.
+func WithAnonymousExactPath(path string) StaticOption {
+	return func(p *StaticProvider) {
+		p.anonymousExactPaths = append(p.anonymousExactPaths, path)
 	}
 }
 
@@ -216,12 +247,37 @@ func (p *StaticProvider) Middleware() func(http.Handler) http.Handler {
 }
 
 func (p *StaticProvider) isAnonymousPath(path string) bool {
+	for _, exact := range p.anonymousExactPaths {
+		if path == exact {
+			return true
+		}
+	}
 	for _, prefix := range p.anonymousPaths {
-		if strings.HasPrefix(path, prefix) {
+		if isSubtreeMatch(path, prefix) {
 			return true
 		}
 	}
 	return false
+}
+
+// isSubtreeMatch reports whether path is prefix itself or a descendant
+// of it past a `/` boundary. Unlike a bare strings.HasPrefix, it does
+// NOT treat `/docsfoo` as under `/docs` — a prefix exemption must not
+// leak to a same-prefix sibling segment.
+//
+// A trailing slash on the registered prefix is normalized away first,
+// so callers may register either form: `/v1/agents` and `/v1/agents/`
+// behave identically. Without this, a registered `/v1/agents/` would
+// test HasPrefix(path, "/v1/agents//") — a doubled slash that never
+// matches — silently 401ing every descendant. The TL registers its
+// public-read prefixes with trailing slashes (`/v1/agents/`, `/v1/log/`,
+// `/tile/`), so this tolerance is load-bearing, not cosmetic.
+func isSubtreeMatch(path, prefix string) bool {
+	prefix = strings.TrimRight(prefix, "/")
+	if path == prefix {
+		return true
+	}
+	return strings.HasPrefix(path, prefix+"/")
 }
 
 // extractBearerToken reads the token from an Authorization: Bearer <token>

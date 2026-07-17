@@ -16,6 +16,7 @@ import (
 	"testing"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	authpkg "github.com/godaddy/ans/internal/adapter/auth"
 	"github.com/godaddy/ans/internal/domain"
@@ -42,7 +43,7 @@ func directReq(method, path, agentID string) *http.Request {
 func TestV1LifecycleHandler_VerifyACME_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1LifecycleHandler(fx.svc)
+	h := handler.NewV1LifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.VerifyACME(rec, directReq(http.MethodPost, "/v1/agents/no-such/verify-acme", "no-such"))
 	if rec.Code == http.StatusOK || rec.Code == http.StatusAccepted {
@@ -55,7 +56,7 @@ func TestV1LifecycleHandler_VerifyACME_ServiceErrorBranch(t *testing.T) {
 func TestV1LifecycleHandler_VerifyDNS_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1LifecycleHandler(fx.svc)
+	h := handler.NewV1LifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.VerifyDNS(rec, directReq(http.MethodPost, "/v1/agents/no-such/verify-dns", "no-such"))
 	if rec.Code == http.StatusOK || rec.Code == http.StatusAccepted {
@@ -69,7 +70,7 @@ func TestV1LifecycleHandler_VerifyDNS_ServiceErrorBranch(t *testing.T) {
 func TestV1RegistrationHandler_Detail_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1RegistrationHandler(fx.svc)
+	h := handler.NewV1RegistrationHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.Detail(rec, directReq(http.MethodGet, "/v1/agents/no-such", "no-such"))
 	if rec.Code == http.StatusOK {
@@ -82,7 +83,7 @@ func TestV1RegistrationHandler_Detail_ServiceErrorBranch(t *testing.T) {
 func TestV1RegistrationHandler_Detail_EmptyAgentID(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1RegistrationHandler(fx.svc)
+	h := handler.NewV1RegistrationHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.Detail(rec, directReq(http.MethodGet, "/v1/agents/", ""))
 	if rec.Code != http.StatusUnprocessableEntity {
@@ -95,7 +96,7 @@ func TestV1RegistrationHandler_Detail_EmptyAgentID(t *testing.T) {
 func TestV1RenewalHandler_GetServerCertRenewal_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1RenewalHandler(fx.svc)
+	h := handler.NewV1RenewalHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.GetServerCertRenewal(rec, directReq(http.MethodGet,
 		"/v1/agents/no-such/certificates/server/renewal", "no-such"))
@@ -109,7 +110,7 @@ func TestV1RenewalHandler_GetServerCertRenewal_ServiceErrorBranch(t *testing.T) 
 func TestV1RenewalHandler_CancelServerCertRenewal_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1RenewalHandler(fx.svc)
+	h := handler.NewV1RenewalHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.CancelServerCertRenewal(rec, directReq(http.MethodDelete,
 		"/v1/agents/no-such/certificates/server/renewal", "no-such"))
@@ -127,7 +128,7 @@ func TestV1RenewalHandler_CancelServerCertRenewal_ServiceErrorBranch(t *testing.
 func TestLifecycleHandler_Detail_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.Detail(rec, directReq(http.MethodGet, "/v2/ans/agents/no-such", "no-such"))
 	if rec.Code == http.StatusOK {
@@ -138,7 +139,7 @@ func TestLifecycleHandler_Detail_ServiceErrorBranch(t *testing.T) {
 func TestLifecycleHandler_VerifyACME_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.VerifyACME(rec, directReq(http.MethodPost, "/v2/ans/agents/no-such/verify-acme", "no-such"))
 	if rec.Code == http.StatusAccepted {
@@ -149,7 +150,7 @@ func TestLifecycleHandler_VerifyACME_ServiceErrorBranch(t *testing.T) {
 func TestLifecycleHandler_VerifyDNS_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.VerifyDNS(rec, directReq(http.MethodPost, "/v2/ans/agents/no-such/verify-dns", "no-such"))
 	if rec.Code == http.StatusAccepted {
@@ -160,7 +161,7 @@ func TestLifecycleHandler_VerifyDNS_ServiceErrorBranch(t *testing.T) {
 func TestLifecycleHandler_CancelServerCertRenewal_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.CancelServerCertRenewal(rec, directReq(http.MethodDelete,
 		"/v2/ans/agents/no-such/certificates/server/renewal", "no-such"))
@@ -172,7 +173,7 @@ func TestLifecycleHandler_CancelServerCertRenewal_ServiceErrorBranch(t *testing.
 func TestLifecycleHandler_VerifyRenewalACME_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.VerifyRenewalACME(rec, directReq(http.MethodPost,
 		"/v2/ans/agents/no-such/certificates/server/renewal/verify-acme", "no-such"))
@@ -184,7 +185,7 @@ func TestLifecycleHandler_VerifyRenewalACME_ServiceErrorBranch(t *testing.T) {
 func TestLifecycleHandler_GetServerCertRenewal_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.GetServerCertRenewal(rec, directReq(http.MethodGet,
 		"/v2/ans/agents/no-such/certificates/server/renewal", "no-such"))
@@ -250,7 +251,7 @@ func TestV1SubmitRenewal_BYOCPath(t *testing.T) {
 func TestList_NoIdentityReturns403(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	// httptest.NewRequest gives a bare context — no identity.
 	h.List(rec, httptest.NewRequest(http.MethodGet, "/v2/ans/agents", nil))
@@ -263,7 +264,7 @@ func TestList_NoIdentityReturns403(t *testing.T) {
 func TestRegister_NoIdentityReturns403(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewRegistrationHandler(fx.svc)
+	h := handler.NewRegistrationHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{
 		"version":   "1.0.0",
@@ -280,7 +281,7 @@ func TestRegister_NoIdentityReturns403(t *testing.T) {
 func TestV1Register_NoIdentityReturns403(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1RegistrationHandler(fx.svc)
+	h := handler.NewV1RegistrationHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{
 		"version":   "1.0.0",
@@ -526,7 +527,7 @@ func TestVerifyDNS_MismatchReturns422(t *testing.T) {
 func TestV1Revoke_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1LifecycleHandler(fx.svc)
+	h := handler.NewV1LifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"reason": "KEY_COMPROMISE"})
 	req := httptest.NewRequest(http.MethodPost, "/v1/agents/no-such/revoke", bytes.NewReader(body))
@@ -544,7 +545,7 @@ func TestV1Revoke_ServiceErrorBranch(t *testing.T) {
 func TestRevoke_ServiceErrorBranch(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"reason": "KEY_COMPROMISE"})
 	req := httptest.NewRequest(http.MethodPost, "/v2/ans/agents/no-such/revoke", bytes.NewReader(body))
@@ -564,7 +565,7 @@ func TestRevoke_ServiceErrorBranch(t *testing.T) {
 func TestSubmitIdentityCSR_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"csrPEM": newTestCSR(t, "ans://v1.0.0.x.example.com")})
 	req := httptest.NewRequest(http.MethodPost,
@@ -582,7 +583,7 @@ func TestSubmitIdentityCSR_ServiceError(t *testing.T) {
 func TestSubmitServerCSR_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"csrPEM": newTestServerCSR(t, "x.example.com")})
 	req := httptest.NewRequest(http.MethodPost,
@@ -601,7 +602,7 @@ func TestSubmitServerCSR_ServiceError(t *testing.T) {
 func TestSubmitServerCertRenewal_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"serverCsrPEM": newTestServerCSR(t, "x.example.com")})
 	req := httptest.NewRequest(http.MethodPost,
@@ -619,7 +620,7 @@ func TestSubmitServerCertRenewal_ServiceError(t *testing.T) {
 func TestV1SubmitIdentityCSR_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1CertificatesHandler(fx.svc)
+	h := handler.NewV1CertificatesHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"csrPEM": newTestCSR(t, "ans://v1.0.0.x.example.com")})
 	req := httptest.NewRequest(http.MethodPost,
@@ -636,7 +637,7 @@ func TestV1SubmitIdentityCSR_ServiceError(t *testing.T) {
 func TestV1SubmitServerCSR_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1CertificatesHandler(fx.svc)
+	h := handler.NewV1CertificatesHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"csrPEM": newTestServerCSR(t, "x.example.com")})
 	req := httptest.NewRequest(http.MethodPost,
@@ -655,7 +656,7 @@ func TestV1SubmitServerCSR_ServiceError(t *testing.T) {
 func TestV1SubmitServerCertRenewal_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1RenewalHandler(fx.svc)
+	h := handler.NewV1RenewalHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	body, _ := json.Marshal(map[string]any{"serverCsrPEM": newTestServerCSR(t, "x.example.com")})
 	req := httptest.NewRequest(http.MethodPost,
@@ -688,7 +689,7 @@ func cancelledCtxReq(method, path, agentID string) *http.Request {
 func TestV1GetIdentityCerts_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1CertificatesHandler(fx.svc)
+	h := handler.NewV1CertificatesHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.GetIdentityCerts(rec, cancelledCtxReq(http.MethodGet,
 		"/v1/agents/x/certificates/identity", "x"))
@@ -700,7 +701,7 @@ func TestV1GetIdentityCerts_ServiceError(t *testing.T) {
 func TestV1GetServerCerts_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewV1CertificatesHandler(fx.svc)
+	h := handler.NewV1CertificatesHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.GetServerCerts(rec, cancelledCtxReq(http.MethodGet,
 		"/v1/agents/x/certificates/server", "x"))
@@ -713,7 +714,7 @@ func TestV1GetServerCerts_ServiceError(t *testing.T) {
 func TestGetIdentityCerts_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.GetIdentityCerts(rec, cancelledCtxReq(http.MethodGet,
 		"/v2/ans/agents/x/certificates/identity", "x"))
@@ -725,7 +726,7 @@ func TestGetIdentityCerts_ServiceError(t *testing.T) {
 func TestGetServerCerts_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	h.GetServerCerts(rec, cancelledCtxReq(http.MethodGet,
 		"/v2/ans/agents/x/certificates/server", "x"))
@@ -739,7 +740,7 @@ func TestGetServerCerts_ServiceError(t *testing.T) {
 func TestList_ServiceError(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
-	h := handler.NewLifecycleHandler(fx.svc)
+	h := handler.NewLifecycleHandler(fx.svc, zerolog.Nop())
 	rec := httptest.NewRecorder()
 	// Need a real Identity in context first; then layer cancel.
 	id := &port.Identity{Subject: "alice"}

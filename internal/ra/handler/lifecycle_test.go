@@ -942,8 +942,8 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		WithServerCertificateIssuer(serverCA)
 
 	r := chi.NewRouter()
-	regH := handler.NewRegistrationHandler(svc)
-	lifeH := handler.NewLifecycleHandler(svc)
+	regH := handler.NewRegistrationHandler(svc, zerolog.Nop())
+	lifeH := handler.NewLifecycleHandler(svc, zerolog.Nop())
 	readOwn := ramiddleware.ReadOwnership(agents)
 	writeOwn := ramiddleware.WriteOwnership(agents)
 
@@ -966,23 +966,23 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	// V1 RA routes — mount on the same router so V1 handler tests can
 	// reuse the fixture. Shares services with V2; only the DTOs +
 	// URL prefixes differ.
-	v1regH := handler.NewV1RegistrationHandler(svc)
+	v1regH := handler.NewV1RegistrationHandler(svc, zerolog.Nop())
 	r.Post("/v1/agents/register", v1regH.Register)
 	r.With(readOwn).Get("/v1/agents/{agentId}", v1regH.Detail)
 
-	v1lifeH := handler.NewV1LifecycleHandler(svc)
+	v1lifeH := handler.NewV1LifecycleHandler(svc, zerolog.Nop())
 	r.With(writeOwn).Post("/v1/agents/{agentId}/verify-acme", v1lifeH.VerifyACME)
 	r.With(writeOwn).Post("/v1/agents/{agentId}/verify-dns", v1lifeH.VerifyDNS)
 	r.With(writeOwn).Post("/v1/agents/{agentId}/revoke", v1lifeH.Revoke)
 
-	v1certH := handler.NewV1CertificatesHandler(svc)
+	v1certH := handler.NewV1CertificatesHandler(svc, zerolog.Nop())
 	r.With(readOwn).Get("/v1/agents/{agentId}/certificates/identity", v1certH.GetIdentityCerts)
 	r.With(readOwn).Get("/v1/agents/{agentId}/certificates/server", v1certH.GetServerCerts)
 	r.With(readOwn).Get("/v1/agents/{agentId}/csrs/{csrId}/status", v1certH.GetCSRStatus)
 	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/identity", v1certH.SubmitIdentityCSR)
 	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server", v1certH.SubmitServerCSR)
 
-	v1renH := handler.NewV1RenewalHandler(svc)
+	v1renH := handler.NewV1RenewalHandler(svc, zerolog.Nop())
 	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server/renewal", v1renH.SubmitServerCertRenewal)
 	r.With(readOwn).Get("/v1/agents/{agentId}/certificates/server/renewal", v1renH.GetServerCertRenewal)
 	r.With(writeOwn).Delete("/v1/agents/{agentId}/certificates/server/renewal", v1renH.CancelServerCertRenewal)
