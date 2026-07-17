@@ -140,6 +140,44 @@ func TestList_UnfilterableStatusReturns422(t *testing.T) {
 	}
 }
 
+func TestList_ValidFilterableStatusesReturn200(t *testing.T) {
+	t.Parallel()
+	// The four AgentLifecycleStatusFilter members (spec
+	// §AgentLifecycleStatusFilter, non-ALL) are each accepted by the
+	// status filter. A new caller owns nothing, so every valid filter
+	// resolves to 200 with an empty items list.
+	for _, status := range []string{"PENDING_DNS", "ACTIVE", "DEPRECATED", "REVOKED"} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			fx := newHandlerFixture(t)
+			rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status="+status, nil, fx.asOwner("alice"))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%s want 200, got %d body=%s", status, rec.Code, rec.Body)
+			}
+			var resp struct {
+				Items []any `json:"items"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(resp.Items) != 0 {
+				t.Errorf("new caller should see 0 items; got %d", len(resp.Items))
+			}
+		})
+	}
+}
+
+func TestList_MultipleValidStatusesReturn200(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Multiple status values combine (OR); all valid → 200.
+	rec := fx.request(t, http.MethodGet,
+		"/v2/ans/agents?status=ACTIVE&status=DEPRECATED&status=REVOKED", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
 func TestDetail_OwnedReturns200(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
