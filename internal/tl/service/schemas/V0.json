@@ -260,11 +260,15 @@
           "enum": [
             "AA_COMPROMISE",
             "AFFILIATION_CHANGED",
+            "CA_COMPROMISE",
             "CERTIFICATE_HOLD",
             "CESSATION_OF_OPERATION",
+            "EXPIRED_CERT",
             "KEY_COMPROMISE",
             "PRIVILEGE_WITHDRAWN",
-            "SUPERSEDED"
+            "REMOVE_FROM_CRL",
+            "SUPERSEDED",
+            "UNSPECIFIED"
           ],
           "type": "string"
         }
