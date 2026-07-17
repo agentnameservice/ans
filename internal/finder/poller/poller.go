@@ -94,7 +94,7 @@ func New(client FeedClient, idx index.Catalog, cfg Config, log zerolog.Logger, n
 // ctx.Done (graceful stop); it never returns an ingestion error, because
 // a poll failure is logged and retried, not fatal.
 func (p *Poller) Run(ctx context.Context) error {
-	p.runOnce(ctx)
+	p.RunOnce(ctx)
 
 	ticker := time.NewTicker(p.cfg.Interval)
 	defer ticker.Stop()
@@ -103,18 +103,20 @@ func (p *Poller) Run(ctx context.Context) error {
 		case <-ctx.Done():
 			return nil
 		case <-ticker.C:
-			p.runOnce(ctx)
+			p.RunOnce(ctx)
 		}
 	}
 }
 
-// runOnce executes one poll round: drain pages from the current cursor
+// RunOnce executes one poll round: drain pages from the current cursor
 // until the feed reports no more, applying each and advancing the cursor.
 // A failure mid-round leaves the cursor at the last fully-applied page so
 // the next round resumes cleanly; the error is logged, not propagated. A
 // failure that recurs at the same cursor for wedgeThreshold rounds emits
-// an escalation line for the operator.
-func (p *Poller) runOnce(ctx context.Context) {
+// an escalation line for the operator. Run drives RunOnce on the
+// configured interval; callers that schedule polling themselves
+// (one-shot ingestion, tests) may invoke it directly.
+func (p *Poller) RunOnce(ctx context.Context) {
 	cursor, err := p.idx.Cursor(ctx)
 	if err != nil {
 		p.log.Error().Err(err).Msg("finder poller: read cursor")

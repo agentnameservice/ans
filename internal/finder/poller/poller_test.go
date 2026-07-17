@@ -74,25 +74,13 @@ var silent = zerolog.Nop()
 
 func fixedClock(ts time.Time) poller.Clock { return func() time.Time { return ts } }
 
-// runRound runs exactly one poll round by cancelling the context after a
-// short delay; New+Run does the immediate first round before the ticker.
+// runRound runs exactly one poll round synchronously. Run wraps the same
+// RunOnce with the interval ticker, so these tests exercise identical
+// round code without any wall-clock dependence — the old
+// start-Run-sleep-cancel shape raced the round on loaded runners.
 func runRound(t *testing.T, p *poller.Poller) {
 	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		_ = p.Run(ctx)
-		close(done)
-	}()
-	// The immediate first round runs synchronously at Run entry, before
-	// the ticker; give it a moment, then cancel.
-	time.Sleep(50 * time.Millisecond)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("poller did not stop after cancel")
-	}
+	p.RunOnce(context.Background())
 }
 
 func TestPoller_IngestsAndAdvancesCursor(t *testing.T) {

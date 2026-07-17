@@ -37,23 +37,7 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// runFor runs the poller for the given duration, then cancels and waits
-// for it to stop. Used by tests that need several ticker rounds.
-func runFor(t *testing.T, p *poller.Poller, d time.Duration) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() { _ = p.Run(ctx); close(done) }()
-	time.Sleep(d)
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("poller did not stop after cancel")
-	}
-}
-
-// cursorErrIndex fails Cursor reads, exercising the runOnce cursor-read
+// cursorErrIndex fails Cursor reads, exercising the RunOnce cursor-read
 // error branch.
 type cursorErrIndex struct{ index.Catalog }
 
@@ -336,12 +320,14 @@ func TestPoller_WedgeEscalationAfterRepeatedFailures(t *testing.T) {
 	// counter climbs across rounds and must escalate at the threshold.
 	buf := &syncBuffer{}
 	logger := zerolog.New(buf)
-	// Short interval so several rounds fire quickly; the immediate first
-	// round plus ticker rounds reach the wedge threshold (5).
-	p := poller.New(&alwaysErrClient{}, idx, poller.Config{Interval: 15 * time.Millisecond, PageSize: 100},
+	p := poller.New(&alwaysErrClient{}, idx, poller.Config{Interval: time.Hour, PageSize: 100},
 		logger, fixedClock(time.Now()))
 
-	runFor(t, p, 300*time.Millisecond)
+	// Drive exactly the wedge threshold (5) of consecutive failing rounds
+	// synchronously; the escalation line must appear on the last one.
+	for range 5 {
+		p.RunOnce(context.Background())
+	}
 
 	if !strings.Contains(buf.String(), "ingestion wedged at logId") {
 		t.Errorf("expected wedge escalation line after repeated failures; log was:\n%s", buf.String())
