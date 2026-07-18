@@ -28,6 +28,12 @@ func TestValidateEmittedURL(t *testing.T) {
 		{"empty raw rejected", "", host, false, false},
 		{"empty agentHost rejected", "https://ai-agent.acmecorp.com/card.json", "", false, false},
 		{"unparseable URL rejected", "https://ho\x00st/card.json", host, false, false},
+		// Cc/Cf runes are rejected anywhere in the raw URL BEFORE parsing:
+		// url.Parse only rejects ASCII controls, so a zero-width or bidi
+		// rune in the path would otherwise parse cleanly and pass the host
+		// pin. Rejection (never stripping) mirrors the Finder's policy.
+		{"zero-width rune in path rejected", "https://ai-agent.acmecorp.com/ca\u200brd.json", host, false, false},
+		{"bidi override in path rejected", "https://ai-agent.acmecorp.com/\u202ejson.card", host, false, false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

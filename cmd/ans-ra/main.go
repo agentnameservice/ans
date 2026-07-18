@@ -214,7 +214,7 @@ func run(cfgPath string) error {
 	// fail-closed checks aren't defeated by a typed-nil interface.
 	var tlSealer *tlclient.Client
 	if !cfg.TLClient.Disabled {
-		tlSealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout)
+		tlSealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout).WithLogger(logger)
 	} else {
 		logger.Warn().Msg("TL client disabled — agent activation and identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
 	}
@@ -229,7 +229,8 @@ func run(cfgPath string) error {
 	}).WithDNSVerifier(dnsVerifier).
 		WithHTTPChallengeVerifier(challenge.NewHTTPVerifier()).
 		WithServerCertificateIssuer(serverCA).
-		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL)
+		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL).
+		WithLogger(logger)
 	if tlSealer != nil {
 		regSvc = regSvc.WithAgentSealer(tlSealer)
 	}
@@ -313,7 +314,7 @@ func run(cfgPath string) error {
 	// registrant's own view of how their agent appears in a catalog; it
 	// is NOT public — the crawlable surface is the population export
 	// (later slice) and the AHP-published well-known document.
-	catH := handler.NewCatalogHandler(regSvc)
+	catH := handler.NewCatalogHandler(regSvc, logger)
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/catalog-entry", catH.CatalogEntry)
 	// Host-complete AI Catalog document (the file the AHP publishes at
 	// /.well-known/ai-catalog.json). Owner-scoped, served as

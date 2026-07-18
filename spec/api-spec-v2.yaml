@@ -320,9 +320,9 @@ paths:
             operator; the FQDN belongs to that owner until no live
             registration remains).
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '422':
           description: Invalid registration request
           content:
@@ -424,21 +424,21 @@ paths:
         '401':
           description: Authentication failed
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '403':
           description: Authorization failed
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '404':
           description: Agent not found or not owned by caller
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '422':
           description: |
             Registration is not catalog-eligible: not ACTIVE (no
@@ -446,15 +446,15 @@ paths:
             A2A/MCP endpoint with a policy-passing metaDataUrl. `code` is
             `NOT_CATALOG_ELIGIBLE`; `detail` names the specific gate.
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '500':
           description: Internal server error
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
 
   /ans/agents/{agentId}/ai-catalog:
     get:
@@ -511,27 +511,27 @@ paths:
         '401':
           description: Authentication failed
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '403':
           description: Authorization failed
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '404':
           description: Agent not found or not owned by caller
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '500':
           description: Internal server error
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
 
   # ──────────────────────────────────────────────────────────────────
   # Registration Validation
@@ -579,9 +579,9 @@ paths:
             live (it activated first). This registration lost the host and
             was cancelled; it can no longer progress.
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '422':
           description: Validation failed
           content:
@@ -647,9 +647,9 @@ paths:
             window. The FQDN belongs to that owner until no live
             registration remains, so this activation is refused.
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '422':
           description: DNS records not found or incorrect
           content:
@@ -669,9 +669,9 @@ paths:
             `PENDING_DNS` and nothing is committed; retry verify-dns once
             the TL is reachable.
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
 
   # ──────────────────────────────────────────────────────────────────
   # Revocation
@@ -2772,6 +2772,38 @@ components:
         - type
         - title
         - status
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 Problem Details — the actual error shape every RA failure
+        path emits, served as `application/problem+json`. Clients read
+        `code` for programmatic handling and `detail` for the
+        human-readable explanation.
+
+        (The legacy `ErrorResponse` schema below is retained only for the
+        pre-existing routes still declared against it; new routes point
+        here. Migrating the remaining declarations is tracked separately.)
+      properties:
+        type:
+          type: string
+          description: URI reference identifying the problem type.
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+        status:
+          type: integer
+          description: HTTP status code.
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        code:
+          type: string
+          description: Stable, machine-readable error code for programmatic handling.
+      required:
+        - title
+        - status
+        - code
 
     ErrorResponse:
       type: object

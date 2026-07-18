@@ -28,6 +28,17 @@ func validateEmittedURL(raw, agentHost string, allowInsecure bool) (string, bool
 	if raw == "" || agentHost == "" {
 		return "", false
 	}
+	// Reject — never strip — any control (Cc) or format (Cf) rune anywhere
+	// in the raw URL before parsing. url.Parse only rejects ASCII controls,
+	// so a bidi override or zero-width rune in the path would otherwise
+	// parse cleanly, pass the host pin, and ship verbatim into a document
+	// rendered in UIs and LLM contexts. Stripping would silently emit a
+	// different URL than the registrant declared; refusal keeps the
+	// endpoint out of the catalog instead. Mirrors the Finder's
+	// validateEmittedURL (internal/finder/project/sanitize.go).
+	if strings.ContainsFunc(raw, isControlOrFormat) {
+		return "", false
+	}
 	u, err := url.Parse(raw)
 	if err != nil {
 		return "", false

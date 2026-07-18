@@ -4,6 +4,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/godaddy/ans/internal/ard"
 	"github.com/godaddy/ans/internal/domain"
 )
 
@@ -110,23 +111,21 @@ func BuildEntry(reg *domain.AgentRegistration, opts Options) (Entry, error) {
 
 	agentHost := reg.AnsName.AgentHost()
 
-	// Gate: a mintable label. The URN's terminal segment is the labelized
-	// display name — the SAME derivation the ARD Finder uses when it
-	// projects feed events into search results (see
-	// internal/finder/project/urn.go mintURN), so discovery and the
+	// Gate: a mintable identifier. The URN derivation is shared with the
+	// ARD Finder's search projection (internal/ard), so discovery and the
 	// published catalog hand consumers ONE lineage identifier per agent.
 	// A display name that is missing (it is optional at registration) or
 	// sanitizes away to nothing yields no usable discovery handle; the
 	// Finder skips such events, and the catalog mirrors that as
 	// not-eligible rather than substituting a fallback segment.
-	label := deriveLabel(sanitizeText(reg.Details.DisplayName))
-	if label == "" {
+	urn, ok := mintURN(agentHost, sanitizeText(reg.Details.DisplayName))
+	if !ok {
 		return Entry{}, &NotEligibleError{
 			Reason: ReasonNoLabel,
 			msg:    "registration has no display name to derive the URN label from; a catalog entry needs a usable lineage identifier",
 		}
 	}
-	urn := sanitizeText(buildURN(agentHost, label))
+	urn = sanitizeText(urn)
 
 	// Gate 2: collect endpoints eligible for an entry.
 	eligible := collectEligibleEndpoints(reg.Endpoints, agentHost, opts.AllowInsecureURLs)
@@ -169,8 +168,13 @@ func BuildEntry(reg *domain.AgentRegistration, opts Options) (Entry, error) {
 	children := make([]Entry, 0, len(eligible))
 	for _, e := range eligible {
 		children = append(children, Entry{
-			Identifier:  urn + ":" + strings.ToLower(string(e.protocol)),
-			DisplayName: sanitizeText(reg.Details.DisplayName) + " (" + string(e.protocol) + ")",
+			Identifier: urn + ":" + strings.ToLower(string(e.protocol)),
+			// The child reuses the parent's name verbatim: it is already
+			// fully discriminated by its :a2a/:mcp identifier segment and
+			// its mediaType, and any suffix could push a maximum-length
+			// (64-char) registered name past the published CatalogEntry
+			// displayName cap — a 200 body that fails our own schema.
+			DisplayName: sanitizeText(reg.Details.DisplayName),
 			MediaType:   e.mediaType,
 			URL:         e.url,
 		})
@@ -229,30 +233,17 @@ func protocolMediaType(p domain.Protocol) (string, bool) {
 	}
 }
 
-// deriveLabel returns the URN's terminal lineage segment: the sanitized
-// display name, trimmed, with each internal whitespace run collapsed to a
-// single hyphen (e.g. "Support  Assistant" → "Support-Assistant"). Case is
-// preserved — the intra-host label space is the publisher's to manage.
-// This is deliberately the SAME rule the ARD Finder applies when minting
-// identifiers from feed events (internal/finder/project/urn.go labelize),
-// so a consumer correlating a search result with the host's published
-// ai-catalog.json sees one lineage handle, not two. Successive versions of
-// one logical agent share the label by sharing a display name; an empty
-// result means no handle can be minted and the caller gates on it.
-func deriveLabel(displayName string) string {
-	s := strings.TrimSpace(displayName)
-	if s == "" {
-		return ""
-	}
-	return strings.Join(strings.Fields(s), "-")
-}
-
-// buildURN composes the domain-anchored lineage handle (ARD §4.2.1). The
-// host segment is the registration's own agentHost (lowercased), so a
-// registry reads the publisher domain directly from the identifier; the
-// label keeps its case — the intra-host label space is the publisher's.
-func buildURN(agentHost, label string) string {
-	return "urn:air:" + strings.ToLower(agentHost) + ":agents:" + label
+// mintURN is ard.MintURN — the single shared derivation of the
+// urn:air:{agentHost}:agents:{label} lineage handle, used by both this
+// catalog and the ARD Finder's search projection
+// (internal/finder/project/urn.go). Sharing the implementation is what
+// makes "search results and the published catalog hand consumers one
+// identifier per agent" structural rather than two mirrored copies.
+// Successive versions of one logical agent share the handle by sharing a
+// display name; a false second result means no usable label exists and
+// the caller gates on it (ReasonNoLabel).
+func mintURN(agentHost, sanitizedDisplayName string) (string, bool) {
+	return ard.MintURN(agentHost, sanitizedDisplayName)
 }
 
 // buildPublisher builds the Publisher block (§3.7). ANS has no verified

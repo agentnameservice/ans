@@ -872,12 +872,11 @@ type handlerFixture struct {
 //
 // Once a registration goes live (ACTIVE/DEPRECATED) on an FQDN, that FQDN
 // belongs to its owner alone: a different owner may neither register nor
-// activate on it until no live registration remains. Enforced at every
-// progression step (register, verify-acme, verify-dns). The verify-dns
-// check is BEST-EFFORT against a concurrent pending-window race — it runs
-// before the inline seal and outside the activation transaction (see
-// preflightRegistrationConflicts) — so these tests pin the sequential
-// contract, not an atomic activation-time guarantee.
+// activate on it until no live registration remains. Checked at every
+// progression step (register, verify-acme, verify-dns) as a fast-fail,
+// and decided authoritatively by commitActivation's in-tx re-check —
+// these tests pin the sequential contract; the mid-seal race interleavings
+// are pinned by the service-level TestVerifyDNS_Rival* tests.
 
 // registerRaw POSTs a registration and returns the recorder without
 // asserting status — for the conflict paths where 409 is the expectation.
@@ -1071,7 +1070,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	r.Post("/v2/ans/agents", regH.Register)
 	r.Get("/v2/ans/agents", lifeH.List)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}", lifeH.Detail)
-	catH := handler.NewCatalogHandler(svc)
+	catH := handler.NewCatalogHandler(svc, zerolog.Nop())
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}/catalog-entry", catH.CatalogEntry)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}/ai-catalog", catH.HostCatalog)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}/certificates/identity", lifeH.GetIdentityCerts)

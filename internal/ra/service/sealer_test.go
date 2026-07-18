@@ -18,6 +18,11 @@ type recordingAgentSealer struct {
 	mu      sync.Mutex
 	events  []sealedAgentEvent
 	failErr error
+	// hook, when set, runs inside the seal round trip (after the TL
+	// "ack", before the caller's commit phase) — the window a rival
+	// writer can land in. Race tests use it to commit conflicting store
+	// state mid-seal, mirroring the identity lane's recordingSealer.hook.
+	hook func()
 }
 
 type sealedAgentEvent struct {
@@ -40,6 +45,9 @@ func (r *recordingAgentSealer) SealAgentEvent(_ context.Context, schemaVersion s
 		ProducerSig:    producerSig,
 		LogID:          logID,
 	})
+	if r.hook != nil {
+		r.hook()
+	}
 	return logID, nil
 }
 

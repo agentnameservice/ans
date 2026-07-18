@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/catalog"
 	"github.com/godaddy/ans/internal/domain"
@@ -27,12 +28,16 @@ const catalogDocumentMediaType = "application/ai-catalog+json"
 // (a later slice) and the well-known per-host document an AHP publishes —
 // not these agent-keyed routes.
 type CatalogHandler struct {
+	responder
 	svc *service.RegistrationService
 }
 
-// NewCatalogHandler constructs a CatalogHandler.
-func NewCatalogHandler(svc *service.RegistrationService) *CatalogHandler {
-	return &CatalogHandler{svc: svc}
+// NewCatalogHandler constructs a CatalogHandler. The logger feeds the
+// embedded responder: the RA has no request-log middleware and the
+// service layer does not log reads, so h.writeError is the one place a
+// non-domain 500's cause on these routes gets recorded.
+func NewCatalogHandler(svc *service.RegistrationService, logger zerolog.Logger) *CatalogHandler {
+	return &CatalogHandler{responder: newResponder(logger), svc: svc}
 }
 
 // CatalogEntry handles GET /v2/ans/agents/{agentId}/catalog-entry. It
@@ -45,7 +50,7 @@ func (h *CatalogHandler) CatalogEntry(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.GetByAgentID(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	// GetByAgentID returns endpoints as a sibling slice; the catalog
@@ -58,10 +63,10 @@ func (h *CatalogHandler) CatalogEntry(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		var notEligible *catalog.NotEligibleError
 		if errors.As(err, &notEligible) {
-			WriteError(w, domain.NewValidationError("NOT_CATALOG_ELIGIBLE", notEligible.Error()))
+			h.writeError(w, domain.NewValidationError("NOT_CATALOG_ELIGIBLE", notEligible.Error()))
 			return
 		}
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, entry)
@@ -81,7 +86,7 @@ func (h *CatalogHandler) HostCatalog(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.GetByAgentID(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	host := res.Registration.AnsName.AgentHost()
@@ -90,13 +95,13 @@ func (h *CatalogHandler) HostCatalog(w http.ResponseWriter, r *http.Request) {
 	// OwnerID is the authenticated owner — use it to scope the document.
 	regs, err := h.svc.HostRegistrations(r.Context(), res.Registration.OwnerID, host)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	doc := catalog.BuildHostDocument(host, regs, catalog.Options{
 		TLPublicBaseURL: h.svc.TLPublicBaseURL(),
 	})
-	writeCatalogDocument(w, r, doc)
+	h.writeCatalogDocument(w, r, doc)
 }
 
 // writeCatalogDocument serializes a catalog document once, derives a
@@ -104,10 +109,10 @@ func (h *CatalogHandler) HostCatalog(w http.ResponseWriter, r *http.Request) {
 // application/ai-catalog+json. A matching If-None-Match short-circuits to
 // 304 Not Modified with no body (§6.3). The body is marshalled with the
 // standard library (HTML-escaping on, §3.8) — never the JCS marshaller.
-func writeCatalogDocument(w http.ResponseWriter, r *http.Request, doc catalog.Document) {
+func (h *CatalogHandler) writeCatalogDocument(w http.ResponseWriter, r *http.Request, doc catalog.Document) {
 	body, err := json.Marshal(doc)
 	if err != nil {
-		WriteError(w, domain.NewInternalError("CATALOG_MARSHAL", "marshal catalog document", err))
+		h.writeError(w, domain.NewInternalError("CATALOG_MARSHAL", "marshal catalog document", err))
 		return
 	}
 	sum := sha256.Sum256(body)

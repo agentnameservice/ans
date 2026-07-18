@@ -972,41 +972,39 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		return nil, err
 	}
 
-	// Sealed: commit the ACTIVE transition, record the sealed event as a
-	// pre-delivered outbox row, and cancel any losing pending
-	// registrations on this host — atomically. The AGENT_REGISTERED event
-	// is already durable in the TL, so the worker never touches the row
-	// (Claim skips sent rows); it exists because the agent-events feed —
-	// the ARD Finder's ingest source — is a read model over DELIVERED
-	// outbox rows, and an inline-sealed event would otherwise never
-	// surface there. Committing it in the activation tx means "agent is
-	// ACTIVE" and "activation is feed-visible" are the same fact.
+	// Sealed: CA-side revocation for the losers this activation is about
+	// to conflict-cancel runs FIRST and outside the transaction (an
+	// external, idempotent side effect that cannot roll back — the same
+	// ordering cancelPending uses). The store flips happen in-tx below.
+	if err := s.revokeConflictLoserCertsAtCA(ctx, reg.FQDN(), reg.OwnerID); err != nil {
+		return nil, err
+	}
+
+	// Commit phase (commitActivation): under the store's single writer
+	// this is the authoritative exclusivity decision — it re-reads this
+	// row and the host's rows in-tx, aborts with AGENT_HOST_TAKEN if a
+	// rival activated (or conflict-cancelled us) during the seal round
+	// trip, conflict-cancels losing pendings (flipping their VALID
+	// identity certs), and commits ACTIVE together with the sealed
+	// event's pre-delivered outbox row. That row is what surfaces the
+	// activation on the agent-events feed — the ARD Finder's ingest
+	// source, a read model over DELIVERED outbox rows — so "agent is
+	// ACTIVE" and "activation is feed-visible" are the same fact; the
+	// worker never touches it (Claim skips sent rows).
 	//
-	// The seal round trip above is a window a commit failure (SQLITE_BUSY,
-	// crash) can land in: the agent then stays PENDING_DNS and the operator
-	// retries verify-dns. The retry recomputes `now`, so its
-	// AGENT_REGISTERED leaf carries fresh timestamps and a fresh content
-	// hash — TL dedup will not match, appending a second AGENT_REGISTERED
-	// leaf (and, on commit, a second feed row). That is the intended benign
-	// residue, accepted exactly as on the identity lane: agent status keys
-	// on the ACTIVE row by agentId, read-side status derives from any
-	// terminal leaf, and feed consumers apply events idempotently by
-	// agentId, so the duplicate is invisible to verifiers, badges, and
-	// discovery. It is not a dedup regression.
+	// The seal round trip above is a window a commit failure or a lost
+	// race can land in: the agent then stays PENDING_DNS (or REVOKED, if
+	// a rival cancelled it) and its already-sealed AGENT_REGISTERED leaf
+	// is orphaned. A retry recomputes `now`, so its leaf carries fresh
+	// timestamps and a fresh content hash — TL dedup will not match,
+	// appending a second leaf (and, on commit, a second feed row). That
+	// is the intended benign residue, accepted exactly as on the
+	// identity lane: agent status keys on the store row by agentId,
+	// read-side status derives from any terminal leaf, and feed
+	// consumers apply events idempotently by agentId, so the residue is
+	// invisible to verifiers, badges, and discovery.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
-		if err := s.agents.Save(txCtx, reg); err != nil {
-			return err
-		}
-		if _, err := s.outbox.RecordSealed(txCtx,
-			string(event.TypeAgentRegistered), reg.AgentID,
-			sealed.SchemaVersion, sealed.Payload, sealed.LogID); err != nil {
-			return err
-		}
-		// The winner now holds the FQDN exclusively: cancel any other
-		// owner's still-pending registrations on this host, atomically with
-		// this activation (the loser is cancelled the moment the winner
-		// goes live — not left to fail later at its own verify-dns).
-		return s.cancelConflictingPendings(txCtx, reg.FQDN(), reg.OwnerID)
+		return s.commitActivation(txCtx, reg, sealed)
 	}); err != nil {
 		return nil, err
 	}
@@ -1323,6 +1321,19 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 	// canonical `eventTime` is replayed byte-for-byte from the
 	// outbox per the project's outbox-replay invariant.
 	if reg.Status == domain.StatusRevoked {
+		// Self-healing sweep: a REVOKED registration must hold no VALID
+		// identity certificate. Conflict-cancellation flips certs in the
+		// same transaction, but a loser that slipped into the window
+		// between the winner's pre-tx CA revocation and its commit — or
+		// any row from before that flip existed — would otherwise keep a
+		// live credential forever, with this early return blocking every
+		// API path to fix it. Sweeping here makes the idempotent call
+		// the repair path. CESSATION_OF_OPERATION is the canonical
+		// reason for a registration that ceased pre-activation; the
+		// caller's reason is not used, so the sweep stays deterministic.
+		if err := s.sweepRevokedAgentCerts(ctx, reg.AgentID); err != nil {
+			return nil, err
+		}
 		return &RevokeResult{
 			Registration:       reg,
 			RevokedAt:          now,
@@ -1533,6 +1544,49 @@ func (s *RegistrationService) hydrateServerCert(ctx context.Context, reg *domain
 	if all, err := s.byoc.FindByAgentID(ctx, reg.AgentID); err == nil && len(all) > 0 {
 		reg.ServerCert = all[0]
 	}
+}
+
+// sweepRevokedAgentCerts flips any still-VALID identity certificate of
+// an already-REVOKED registration to REVOKED — CA first (idempotent,
+// outside the tx), then the store rows in one transaction. No-op when
+// every cert is already terminal, which is the common case; a hit means
+// a conflict-cancellation window or a pre-flip row left a live
+// credential behind, and the idempotent revoke call is the repair path.
+func (s *RegistrationService) sweepRevokedAgentCerts(ctx context.Context, agentID string) error {
+	certs, err := s.certs.FindIdentityCertificatesByAgent(ctx, agentID)
+	if err != nil {
+		return err
+	}
+	hasValid := false
+	for _, c := range certs {
+		if c.Status == domain.CertStatusValid {
+			hasValid = true
+			break
+		}
+	}
+	if !hasValid {
+		return nil
+	}
+	if err := s.revokeIdentityCertsAtCA(ctx, certs, domain.RevocationCessationOfOperation); err != nil {
+		return err
+	}
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		for _, c := range certs {
+			if c.Status == domain.CertStatusValid {
+				revoked := c.Revoke()
+				if err := s.certs.UpdateCertificateStatus(txCtx, &revoked); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	s.logger.Info().
+		Str("agentId", agentID).
+		Msg("swept lingering VALID identity certificates on a revoked registration")
+	return nil
 }
 
 // revokeIdentityCertsAtCA revokes every still-valid identity

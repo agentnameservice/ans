@@ -158,7 +158,11 @@ func TestBuildEntry_MultiProtocol_Nested(t *testing.T) {
 	if a2a.Identifier != entry.Identifier+":a2a" {
 		t.Errorf("a2a child identifier = %q", a2a.Identifier)
 	}
-	if a2a.DisplayName != "Acme Support Agent (A2A)" {
+	// Children reuse the parent's name verbatim — a protocol suffix could
+	// push a maximum-length registered name past the published schema's
+	// 64-char displayName cap, and the :a2a/:mcp identifier + mediaType
+	// already discriminate the children.
+	if a2a.DisplayName != "Acme Support Agent" {
 		t.Errorf("a2a child displayName = %q", a2a.DisplayName)
 	}
 	if a2a.MediaType != mediaTypeA2A || a2a.URL != a2aEndpoint().MetadataURL {
@@ -404,22 +408,18 @@ func TestBuildEntry_NotActive(t *testing.T) {
 	}
 }
 
-// TestDeriveLabel pins the label rule to the ARD Finder's labelize
-// (internal/finder/project/urn.go): trim, collapse whitespace runs to
-// single hyphens, preserve case, empty in → empty out (the caller gates).
-func TestDeriveLabel(t *testing.T) {
-	tests := []struct{ displayName, want string }{
-		{"Acme Support Agent", "Acme-Support-Agent"},
-		{"demo-agent", "demo-agent"},
-		{"  spaced   out\tname ", "spaced-out-name"}, // runs collapse, edges trim
-		{"CasePreserved", "CasePreserved"},           // label case is publisher-owned
-		{"", ""},                                     // missing display name → no mintable label
-		{"   \t  ", ""},                              // whitespace-only → no mintable label
+// TestMintURN_SharedDerivation pins this package's URN seam to the shared
+// internal/ard implementation the ARD Finder also projects through: one
+// derivation, one lineage identifier per agent across both surfaces. The
+// full label semantics are pinned in internal/ard's own tests; this seam
+// test guards against the catalog ever reintroducing a local derivation.
+func TestMintURN_SharedDerivation(t *testing.T) {
+	got, ok := mintURN("AGENT.Example.com", "Acme  Support Agent")
+	if !ok || got != "urn:air:agent.example.com:agents:Acme-Support-Agent" {
+		t.Fatalf("mintURN = (%q, %v), want the shared ard derivation", got, ok)
 	}
-	for _, tc := range tests {
-		if got := deriveLabel(tc.displayName); got != tc.want {
-			t.Errorf("deriveLabel(%q) = %q, want %q", tc.displayName, got, tc.want)
-		}
+	if _, ok := mintURN("agent.example.com", "  "); ok {
+		t.Fatal("whitespace-only display name must not mint a URN")
 	}
 }
 
