@@ -217,6 +217,21 @@ func TestAgentRegistration_Cancel(t *testing.T) {
 	assert.Equal(t, StatusRevoked, pendingDNS.Status)
 }
 
+func TestAgentRegistration_CancelForHostConflict(t *testing.T) {
+	reg := newValidRegistration(t)
+	reg.ClearEvents()
+
+	// Cancels a pending registration WITHOUT raising a TL event — a
+	// pre-activation registration was never sealed (ANS-1 §4.4).
+	require.NoError(t, reg.CancelForHostConflict())
+	assert.Equal(t, StatusRevoked, reg.Status)
+	assert.Empty(t, reg.PendingEvents, "pre-activation cancellation must raise no event")
+
+	// Cannot cancel a non-pending registration.
+	reg.Status = StatusActive
+	assert.ErrorIs(t, reg.CancelForHostConflict(), ErrInvalidState)
+}
+
 func TestAgentRegistration_Fail(t *testing.T) {
 	reg := newValidRegistration(t)
 	require.NoError(t, reg.Fail())

@@ -708,20 +708,64 @@ func TestVerifyDNS_ActivatesWhenRecordsMatch(t *testing.T) {
 		t.Fatalf("status: got %q want ACTIVE", resp.Status)
 	}
 
-	// Exactly one outbox row: a single terminal AGENT_REGISTERED
-	// event emitted at the PENDING_DNS → ACTIVE transition. The V1
-	// reference and production TL both use this single-terminal
+	// Exactly one sealed event: a single terminal AGENT_REGISTERED
+	// sealed INLINE at the PENDING_DNS → ACTIVE transition
+	// (seal-before-success). Activation does not report ACTIVE until
+	// the event is durable in the TL, so it never rides the outbox.
+	// The V1 reference and production TL both use this single-terminal
 	// model — no AGENT_REGISTRATION / DOMAIN_VALIDATION intermediate
 	// events exist on either lane.
+	sealed := fx.sealer.sealedTypes()
+	if len(sealed) != 1 {
+		t.Fatalf("sealed events: got %v, want 1 (single AGENT_REGISTERED terminal)", sealed)
+	}
+	if sealed[0] != "AGENT_REGISTERED" {
+		t.Errorf("eventType: got %q, want AGENT_REGISTERED", sealed[0])
+	}
+
+	// Activation seals inline, so nothing is claimable by the outbox
+	// worker — the only row it writes is the pre-delivered feed row
+	// (sent + logId at insert), which Claim never returns.
 	rows, err := fx.outbox.Claim(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 {
-		t.Fatalf("outbox rows: got %d, want 1 (single AGENT_REGISTERED terminal)", len(rows))
+	if len(rows) != 0 {
+		t.Fatalf("claimable outbox rows: got %d, want 0 (activation seals inline)", len(rows))
 	}
-	if rows[0].EventType != "AGENT_REGISTERED" {
-		t.Errorf("eventType: got %q, want AGENT_REGISTERED", rows[0].EventType)
+}
+
+// TestVerifyDNS_SealFailure_Returns503 pins the seal-before-success
+// contract at the HTTP boundary. When the inline TL seal fails (TL
+// unreachable), verify-dns must surface 503 SERVICE_UNAVAILABLE and the
+// agent must stay PENDING_DNS — never reporting ACTIVE for an agent that
+// was never written to the log.
+func TestVerifyDNS_SealFailure_Returns503(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID := fx.registerAgent(t, "alice", "agent.example.com", "1.0.0")
+	_ = fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-acme", nil, fx.asOwner("alice"))
+
+	// Arm the sealer to fail as the tlclient would when the TL is down.
+	fx.sealer.failErr = domain.NewUnavailableError("TL_UNAVAILABLE", "tl down")
+
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/verify-dns", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("verify-dns on seal failure: got %d, want 503; body=%s", rec.Code, rec.Body)
+	}
+
+	// Fail-closed: the agent must still read as PENDING_DNS, and nothing
+	// leaked onto the outbox.
+	det := fx.request(t, http.MethodGet, "/v2/ans/agents/"+agentID, nil, fx.asOwner("alice"))
+	var detResp struct {
+		AgentStatus string `json:"agentStatus"`
+	}
+	_ = json.Unmarshal(det.Body.Bytes(), &detResp)
+	if detResp.AgentStatus != "PENDING_DNS" {
+		t.Fatalf("agent must stay PENDING_DNS after a failed seal; got %q", detResp.AgentStatus)
+	}
+	if rows, _ := fx.outbox.Claim(context.Background(), 100); len(rows) != 0 {
+		t.Errorf("activation must not enqueue to the outbox; got %d rows", len(rows))
 	}
 }
 
@@ -751,22 +795,33 @@ func TestRevoke_TransitionsToRevokedAndEmitsEvent(t *testing.T) {
 		t.Errorf("reason: got %q", resp.Reason)
 	}
 
-	// After the register → verify-acme → verify-dns → revoke walk,
-	// the outbox should carry exactly two terminal events:
-	// AGENT_REGISTERED from the ACTIVE transition and AGENT_REVOKED
-	// from this revoke. Intermediate events don't exist.
-	rows, _ := fx.outbox.Claim(context.Background(), 100)
-	sawRegistered, sawRevoked := false, false
-	for _, row := range rows {
-		switch row.EventType {
-		case "AGENT_REGISTERED":
+	// After the register → verify-acme → verify-dns → revoke walk, the
+	// two terminal events land on different rails. AGENT_REGISTERED is
+	// sealed INLINE at the ACTIVE transition (seal-before-success), so
+	// it lives in the sealer, not the outbox. AGENT_REVOKED still rides
+	// the outbox: revoke is an idempotent terminal transition whose
+	// async delivery is safe — the agent is already REVOKED locally and
+	// stays visible until the log catches up. Intermediate events don't
+	// exist on either lane.
+	sawRegistered := false
+	for _, et := range fx.sealer.sealedTypes() {
+		if et == "AGENT_REGISTERED" {
 			sawRegistered = true
-		case "AGENT_REVOKED":
-			sawRevoked = true
 		}
 	}
 	if !sawRegistered {
-		t.Error("outbox missing AGENT_REGISTERED event")
+		t.Error("sealer missing AGENT_REGISTERED event")
+	}
+
+	rows, _ := fx.outbox.Claim(context.Background(), 100)
+	sawRevoked := false
+	for _, row := range rows {
+		if row.EventType == "AGENT_REGISTERED" {
+			t.Error("AGENT_REGISTERED must be sealed inline, not enqueued to the outbox")
+		}
+		if row.EventType == "AGENT_REVOKED" {
+			sawRevoked = true
+		}
 	}
 	if !sawRevoked {
 		t.Error("outbox missing AGENT_REVOKED event")
@@ -809,7 +864,146 @@ func TestRevoke_NotOwnedReturns403(t *testing.T) {
 type handlerFixture struct {
 	router chi.Router
 	outbox *sqlite.OutboxStore
+	sealer *recordingAgentSealer        // captures AGENT_REGISTERED sealed at activation
 	svc    *service.RegistrationService // exposed for direct-handler tests
+}
+
+// ----- FQDN exclusivity (one-host-one-owner) -----
+//
+// Once a registration goes live (ACTIVE/DEPRECATED) on an FQDN, that FQDN
+// belongs to its owner alone: a different owner may neither register nor
+// activate on it until no live registration remains. Checked at every
+// progression step (register, verify-acme, verify-dns) as a fast-fail,
+// and decided authoritatively by commitActivation's in-tx re-check —
+// these tests pin the sequential contract; the mid-seal race interleavings
+// are pinned by the service-level TestVerifyDNS_Rival* tests.
+
+// registerRaw POSTs a registration and returns the recorder without
+// asserting status — for the conflict paths where 409 is the expectation.
+func (f *handlerFixture) registerRaw(t *testing.T, owner, host, version string) *httptest.ResponseRecorder {
+	t.Helper()
+	body, _ := json.Marshal(map[string]any{
+		"agentDisplayName": "Exclusivity",
+		"version":          version,
+		"agentHost":        host,
+		"endpoints": []map[string]any{
+			{"agentUrl": "https://" + host + "/mcp", "protocol": "MCP", "transports": []string{"SSE"}},
+		},
+		"identityCsrPEM": newTestCSR(t, "ans://v"+version+"."+host),
+		"serverCsrPEM":   newTestServerCSR(t, host),
+	})
+	return f.request(t, http.MethodPost, "/v2/ans/agents", bytes.NewReader(body), f.asOwner(owner))
+}
+
+func problemCode(t *testing.T, rec *httptest.ResponseRecorder) string {
+	t.Helper()
+	var p struct {
+		Code string `json:"code"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &p)
+	return p.Code
+}
+
+func TestFQDNExclusivity_DifferentOwnerRegisterRejected(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	host := "excl.example.com"
+	a := fx.registerAgent(t, "alice", host, "1.0.0")
+	fx.activateAgent(t, "alice", a)
+
+	rec := fx.registerRaw(t, "bob", host, "2.0.0")
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("bob register on alice's active host: status=%d body=%s, want 409", rec.Code, rec.Body)
+	}
+	if c := problemCode(t, rec); c != "AGENT_HOST_TAKEN" {
+		t.Errorf("code = %q, want AGENT_HOST_TAKEN", c)
+	}
+}
+
+func TestFQDNExclusivity_SameOwnerMayAddVersion(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	host := "excl-same.example.com"
+	a := fx.registerAgent(t, "alice", host, "1.0.0")
+	fx.activateAgent(t, "alice", a)
+
+	// The same owner may register another version while the first is
+	// ACTIVE (version coexistence, ANS-1 §7.1).
+	if rec := fx.registerRaw(t, "alice", host, "2.0.0"); rec.Code != http.StatusAccepted {
+		t.Fatalf("same owner adding a version: status=%d body=%s, want 202", rec.Code, rec.Body)
+	}
+}
+
+// TestFQDNExclusivity_LoserCanceledOnWinnerActivation is the scenario from
+// the requirement: A (who does not control the host) and B (who does) both
+// submit pending registrations — both allowed — and when B's registration
+// goes ACTIVE, A's pending registration is cancelled.
+func TestFQDNExclusivity_LoserCanceledOnWinnerActivation(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	host := "excl-cancel.example.com"
+
+	// Both pending → both allowed (the host is not yet live).
+	loser := fx.registerAgent(t, "alice", host, "1.0.0")
+	winner := fx.registerAgent(t, "bob", host, "2.0.0")
+
+	// B finishes registration → goes ACTIVE, taking the host.
+	fx.activateAgent(t, "bob", winner)
+
+	// A's pending registration was cancelled by B's activation.
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents/"+loser, nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice detail status=%d body=%s", rec.Code, rec.Body)
+	}
+	var detail struct {
+		AgentStatus string `json:"agentStatus"`
+	}
+	_ = json.Unmarshal(rec.Body.Bytes(), &detail)
+	if detail.AgentStatus != "REVOKED" {
+		t.Errorf("loser status = %q, want REVOKED (cancelled when winner activated)", detail.AgentStatus)
+	}
+}
+
+// TestFQDNExclusivity_LoserRejectedAtEveryLevel confirms that once the host
+// is taken, the losing registration is rejected at verify-acme AND
+// verify-dns (not only at the final activation).
+func TestFQDNExclusivity_LoserRejectedAtEveryLevel(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	host := "excl-levels.example.com"
+	loser := fx.registerAgent(t, "alice", host, "1.0.0")
+	winner := fx.registerAgent(t, "bob", host, "2.0.0")
+	fx.activateAgent(t, "bob", winner)
+
+	for _, step := range []string{"verify-acme", "verify-dns"} {
+		rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+loser+"/"+step, nil, fx.asOwner("alice"))
+		if rec.Code != http.StatusConflict {
+			t.Fatalf("loser %s: status=%d body=%s, want 409", step, rec.Code, rec.Body)
+		}
+		if c := problemCode(t, rec); c != "AGENT_HOST_TAKEN" {
+			t.Errorf("loser %s code = %q, want AGENT_HOST_TAKEN", step, c)
+		}
+	}
+}
+
+func TestFQDNExclusivity_FreedAfterRevoke(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	host := "excl-freed.example.com"
+	a := fx.registerAgent(t, "alice", host, "1.0.0")
+	fx.activateAgent(t, "alice", a)
+
+	// Alice revokes → no live registration remains on the host.
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+a+"/revoke",
+		bytes.NewReader([]byte(`{"reason":"CESSATION_OF_OPERATION","comments":"done"}`)), fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("alice revoke: status=%d body=%s", rec.Code, rec.Body)
+	}
+	// Bob may now take the freed host — and activate on it. Activating
+	// also exercises cancelConflictingPendings skipping alice's terminal
+	// (REVOKED) registration.
+	b := fx.registerAgent(t, "bob", host, "2.0.0")
+	fx.activateAgent(t, "bob", b)
 }
 
 func newHandlerFixture(t *testing.T) *handlerFixture {
@@ -856,6 +1050,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	sealer := &recordingAgentSealer{}
 	svc := service.NewRegistrationService(
 		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
 	).WithSigner(service.EventSigner{
@@ -863,7 +1058,8 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 		KeyID:      "ra-signer",
 		RaID:       "ra-test",
 	}).WithDNSVerifier(dns.NewNoopVerifier()).
-		WithServerCertificateIssuer(serverCA)
+		WithServerCertificateIssuer(serverCA).
+		WithAgentSealer(sealer)
 
 	r := chi.NewRouter()
 	regH := handler.NewRegistrationHandler(svc, zerolog.Nop())
@@ -874,6 +1070,9 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	r.Post("/v2/ans/agents", regH.Register)
 	r.Get("/v2/ans/agents", lifeH.List)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}", lifeH.Detail)
+	catH := handler.NewCatalogHandler(svc, zerolog.Nop())
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}/catalog-entry", catH.CatalogEntry)
+	r.With(readOwn).Get("/v2/ans/agents/{agentId}/ai-catalog", catH.HostCatalog)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}/certificates/identity", lifeH.GetIdentityCerts)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}/certificates/server", lifeH.GetServerCerts)
 	r.With(readOwn).Get("/v2/ans/agents/{agentId}/csrs/{csrId}/status", lifeH.GetCSRStatus)
@@ -912,7 +1111,7 @@ func newHandlerFixture(t *testing.T) *handlerFixture {
 	r.With(writeOwn).Delete("/v1/agents/{agentId}/certificates/server/renewal", v1renH.CancelServerCertRenewal)
 	r.With(writeOwn).Post("/v1/agents/{agentId}/certificates/server/renewal/verify-acme", v1renH.VerifyRenewalACME)
 
-	return &handlerFixture{router: r, outbox: outbox, svc: svc}
+	return &handlerFixture{router: r, outbox: outbox, sealer: sealer, svc: svc}
 }
 
 // asOwner wraps a request with a synthetic Identity matching the

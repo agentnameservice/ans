@@ -200,6 +200,25 @@ func run(cfgPath string) error {
 		Strs("profiles", profileIDStrings(discoveryReg.IDs())).
 		Msg("discovery registry ready")
 
+	// One TL client serves both seal-before-success lanes — agent
+	// ACTIVATION (verify-dns) and identity ops. Both seal SYNCHRONOUSLY
+	// (design §5.6.1; ANS-1 §12.3 for agents): the event is durable in the
+	// log before the operation reports success, so neither rides the
+	// outbox. A disabled TL client leaves the sealer nil and both lanes
+	// fail closed with TL_UNAVAILABLE — there is no "seal later" mode for
+	// an ACTIVE transition. (Revocation still rides the async outbox; the
+	// worker below holds its own client.)
+	//
+	// The sealer is kept as a concrete *tlclient.Client and only assigned
+	// into the interfaces when non-nil, so the services' `sealer == nil`
+	// fail-closed checks aren't defeated by a typed-nil interface.
+	var tlSealer *tlclient.Client
+	if !cfg.TLClient.Disabled {
+		tlSealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout).WithLogger(logger)
+	} else {
+		logger.Warn().Msg("TL client disabled — agent activation and identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
+	}
+
 	// Services.
 	regSvc := service.NewRegistrationService(
 		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
@@ -209,24 +228,23 @@ func run(cfgPath string) error {
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
 		WithHTTPChallengeVerifier(challenge.NewHTTPVerifier()).
-		WithServerCertificateIssuer(serverCA)
+		WithServerCertificateIssuer(serverCA).
+		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL).
+		WithLogger(logger)
+	if tlSealer != nil {
+		regSvc = regSvc.WithAgentSealer(tlSealer)
+	}
 
 	// Events feed service — projects delivered outbox rows into the
 	// public agent-events stream.
 	eventsSvc := service.NewEventsService(feedStore)
 
 	// Verified identities — the "who" behind the agents. Shares the
-	// producer signer with the registration service: one RA, one
-	// producer identity on every TL lane. Identity events seal
-	// SYNCHRONOUSLY (seal-before-success, design §5.6.1): they never
-	// ride the outbox, so the service gets the TL client directly. A
-	// disabled TL client means identity sealing operations fail
-	// closed with TL_UNAVAILABLE — there is no "seal later" mode.
+	// producer signer and the TL sealer with the registration service:
+	// one RA, one producer identity on every TL lane.
 	var identitySealer service.IdentityEventSealer
-	if !cfg.TLClient.Disabled {
-		identitySealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout)
-	} else {
-		logger.Warn().Msg("TL client disabled — identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
+	if tlSealer != nil {
+		identitySealer = tlSealer
 	}
 	identitySvc := service.NewIdentityService(
 		identityStore, identityLinks, agents, didResolver, identitySealer, leiVerifier, db,
@@ -291,6 +309,18 @@ func run(cfgPath string) error {
 	writeOwnership := ramiddleware.WriteOwnership(agents)
 
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}", lifeH.Detail)
+
+	// AI Catalog (owner-scoped, read-only). The bare CatalogEntry is the
+	// registrant's own view of how their agent appears in a catalog; it
+	// is NOT public — the crawlable surface is the population export
+	// (later slice) and the AHP-published well-known document.
+	catH := handler.NewCatalogHandler(regSvc, logger)
+	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/catalog-entry", catH.CatalogEntry)
+	// Host-complete AI Catalog document (the file the AHP publishes at
+	// /.well-known/ai-catalog.json). Owner-scoped, served as
+	// application/ai-catalog+json with ETag/304.
+	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/ai-catalog", catH.HostCatalog)
+
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/certificates/identity", lifeH.GetIdentityCerts)
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/certificates/server", lifeH.GetServerCerts)
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/csrs/{csrId}/status", lifeH.GetCSRStatus)
