@@ -14,8 +14,18 @@ func TestAgentFunction_Validate(t *testing.T) {
 		assert.NoError(t, f.Validate())
 	})
 
+	t.Run("reject long id", func(t *testing.T) {
+		err := AgentFunction{ID: strings.Repeat("x", 65), Name: "n"}.Validate()
+		assert.ErrorIs(t, err, ErrValidation)
+	})
+
 	t.Run("reject blank id", func(t *testing.T) {
 		err := AgentFunction{ID: "  ", Name: "ok"}.Validate()
+		assert.ErrorIs(t, err, ErrValidation)
+	})
+
+	t.Run("reject long name", func(t *testing.T) {
+		err := AgentFunction{ID: "id", Name: strings.Repeat("x", 65)}.Validate()
 		assert.ErrorIs(t, err, ErrValidation)
 	})
 
@@ -30,7 +40,7 @@ func TestAgentFunction_Validate(t *testing.T) {
 	})
 
 	t.Run("reject too many tags", func(t *testing.T) {
-		tags := make([]string, 21)
+		tags := make([]string, 6)
 		for i := range tags {
 			tags[i] = "t"
 		}

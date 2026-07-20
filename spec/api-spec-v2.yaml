@@ -277,13 +277,12 @@ paths:
       description: |
         Registers a new agent with the Agent Name Service.
 
-        The Registration Authority (RA) validates the agent's identity and
-        submitted information, then interacts with the CA to issue certificates
-        or validates provided (BYOC) server certificates.
+        The request MAY include a Certificate Signing Request (CSR) so that
+        an Identity certificate can be issued. Identity certificates are
+        issued by the RA.
 
-        The request MUST include an identity CSR. The request can optionally
-        include a server CSR (for RA-issued server cert) or a BYOC server
-        certificate with its chain.
+        The request must include a server CSR (for RA-issued server cert)
+        or a BYOC server certificate with its chain.
       operationId: registerAgent
       requestBody:
         description: Agent registration request
@@ -1807,7 +1806,7 @@ components:
 
     Protocol:
       type: string
-      enum: [A2A, MCP, HTTP-API]
+      enum: [A2A, MCP, HTTP_API]
 
     DiscoveryProfile:
       type: string
@@ -1890,6 +1889,14 @@ components:
         endpoints:
           type: array
           minItems: 1
+          description: >-
+            One or more protocol endpoints. Each protocol may appear at
+            most once across the array — a second endpoint with an
+            already-used protocol is rejected with 422 DUPLICATE_PROTOCOL,
+            and an exact protocol+agentUrl repeat with 422
+            DUPLICATE_ENDPOINT. (By-field uniqueness is not expressible in
+            OpenAPI/JSON Schema; enforced in
+            internal/domain/endpoint.go AgentEndpoints.Validate.)
           items:
             $ref: '#/components/schemas/AgentEndpoint'
         serverCsrPEM:
@@ -1942,6 +1949,9 @@ components:
         - agentHost
         - endpoints
         - version
+      oneOf:
+        - required: [serverCsrPEM]
+        - required: [serverCertificatePEM]
 
     AgentRevocationRequest:
       type: object
@@ -2417,6 +2427,10 @@ components:
         metaDataHash:
           type: string
           pattern: '^SHA256:[a-f0-9]{64}$'
+          description: >-
+            Optional integrity pin over the metadata descriptor.
+            Meaningless on its own: it MUST be accompanied by metaDataUrl.
+            A metaDataHash without a metaDataUrl is rejected with 422 INVALID_ENDPOINT.
         documentationUrl:
           type: string
           format: uri
@@ -2430,10 +2444,14 @@ components:
           type: array
           items:
             type: string
-            enum: [STREAMABLE-HTTP, SSE, JSON-RPC, GRPC, REST, HTTP]
+            enum: [STREAMABLE_HTTP, SSE, JSON_RPC, GRPC, REST, HTTP]
       required:
         - protocol
         - agentUrl
+      anyOf:
+        - not:
+            required: [metaDataHash]
+        - required: [metaDataUrl]
 
     AgentFunction:
       type: object

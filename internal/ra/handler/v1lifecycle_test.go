@@ -380,6 +380,24 @@ func TestV1Revoke_MissingReason_422(t *testing.T) {
 	}
 }
 
+func TestV1Revoke_CommentsTooLong_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID, _ := fx.v1RegisterAgent(t, "alice", "agent.example.com", "1.0.0")
+	revBody, _ := json.Marshal(map[string]any{
+		"reason":   "KEY_COMPROMISE",
+		"comments": strings.Repeat("a", 201),
+	})
+	rec := fx.request(t, http.MethodPost, "/v1/agents/"+agentID+"/revoke",
+		bytes.NewReader(revBody), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "COMMENTS_TOO_LONG") {
+		t.Errorf("expected COMMENTS_TOO_LONG code, got %s", rec.Body)
+	}
+}
+
 // TestV1Revoke_NotOwned_403 confirms WriteOwnership 403 on
 // not-owned revoke attempts (as opposed to read routes which 404).
 func TestV1Revoke_NotOwned_403(t *testing.T) {

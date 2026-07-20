@@ -120,6 +120,64 @@ func TestList_BadLimitReturns422(t *testing.T) {
 	}
 }
 
+func TestList_BadStatusReturns422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status=BOGUS", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestList_UnfilterableStatusReturns422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// PENDING_VALIDATION/FAILED/EXPIRED are valid AgentLifecycleStatus
+	// values but are not in AgentLifecycleStatusFilter — not filterable.
+	rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status=PENDING_VALIDATION", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestList_ValidFilterableStatusesReturn200(t *testing.T) {
+	t.Parallel()
+	// The four AgentLifecycleStatusFilter members (spec
+	// §AgentLifecycleStatusFilter, non-ALL) are each accepted by the
+	// status filter. A new caller owns nothing, so every valid filter
+	// resolves to 200 with an empty items list.
+	for _, status := range []string{"PENDING_DNS", "ACTIVE", "DEPRECATED", "REVOKED"} {
+		t.Run(status, func(t *testing.T) {
+			t.Parallel()
+			fx := newHandlerFixture(t)
+			rec := fx.request(t, http.MethodGet, "/v2/ans/agents?status="+status, nil, fx.asOwner("alice"))
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status=%s want 200, got %d body=%s", status, rec.Code, rec.Body)
+			}
+			var resp struct {
+				Items []any `json:"items"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if len(resp.Items) != 0 {
+				t.Errorf("new caller should see 0 items; got %d", len(resp.Items))
+			}
+		})
+	}
+}
+
+func TestList_MultipleValidStatusesReturn200(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	// Multiple status values combine (OR); all valid → 200.
+	rec := fx.request(t, http.MethodGet,
+		"/v2/ans/agents?status=ACTIVE&status=DEPRECATED&status=REVOKED", nil, fx.asOwner("alice"))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("want 200, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
 func TestDetail_OwnedReturns200(t *testing.T) {
 	t.Parallel()
 	fx := newHandlerFixture(t)
@@ -841,6 +899,24 @@ func TestRevoke_BadReason_422(t *testing.T) {
 		bytes.NewReader([]byte(body)), fx.asOwner("alice"))
 	if rec.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("want 422 for bad reason, got %d body=%s", rec.Code, rec.Body)
+	}
+}
+
+func TestRevoke_CommentsTooLong_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID, _ := fx.v1RegisterAgent(t, "alice", "agent.example.com", "1.0.0")
+	revBody, _ := json.Marshal(map[string]any{
+		"reason":   "KEY_COMPROMISE",
+		"comments": strings.Repeat("a", 201),
+	})
+	rec := fx.request(t, http.MethodPost, "/v2/ans/agents/"+agentID+"/revoke",
+		bytes.NewReader(revBody), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "COMMENTS_TOO_LONG") {
+		t.Errorf("expected COMMENTS_TOO_LONG code, got %s", rec.Body)
 	}
 }
 

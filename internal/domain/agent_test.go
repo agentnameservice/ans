@@ -85,12 +85,13 @@ func TestNewRegistration_Validations(t *testing.T) {
 		csr         *AgentCSR
 		code        string
 	}{
-		{"missing agent id", "", "o", validName, "", "", validEndpoints, nil, &validCSR, "MISSING_AGENT_ID"},
-		{"missing owner", "a", "", validName, "", "", validEndpoints, nil, &validCSR, "MISSING_OWNER_ID"},
-		{"missing ans name", "a", "o", AnsName{}, "", "", validEndpoints, nil, &validCSR, "MISSING_ANS_NAME"},
+		{"missing agent id", "", "o", validName, "displayName", "", validEndpoints, nil, &validCSR, "MISSING_AGENT_ID"},
+		{"missing owner", "a", "", validName, "displayName", "", validEndpoints, nil, &validCSR, "MISSING_OWNER_ID"},
+		{"missing ans name", "a", "o", AnsName{}, "displayName", "", validEndpoints, nil, &validCSR, "MISSING_ANS_NAME"},
+		{"missing display name", "a", "o", validName, "", "", validEndpoints, nil, &validCSR, "MISSING_DISPLAY_NAME"},
 		{"display name too long", "a", "o", validName, strings.Repeat("x", 65), "", validEndpoints, nil, &validCSR, "DISPLAY_NAME_TOO_LONG"},
-		{"description too long", "a", "o", validName, "", strings.Repeat("x", 151), validEndpoints, nil, &validCSR, "DESCRIPTION_TOO_LONG"},
-		{"no endpoints", "a", "o", validName, "", "", nil, nil, &validCSR, "MISSING_ENDPOINTS"},
+		{"description too long", "a", "o", validName, "displayName", strings.Repeat("x", 151), validEndpoints, nil, &validCSR, "DESCRIPTION_TOO_LONG"},
+		{"no endpoints", "a", "o", validName, "displayName", "", nil, nil, &validCSR, "MISSING_ENDPOINTS"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -109,7 +110,7 @@ func TestNewRegistration_CertFQDNMismatch(t *testing.T) {
 	ep := []AgentEndpoint{{Protocol: ProtocolMCP, AgentURL: "https://agent.example.com/mcp"}}
 	cert := &ByocServerCertificate{SubjectCommonName: "other.example.com"}
 
-	_, err := NewRegistration("a", "o", ansName, "", "", ep, cert, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "displayName", "", ep, cert, &csr, time.Now())
 	assert.ErrorIs(t, err, ErrCertificate)
 }
 

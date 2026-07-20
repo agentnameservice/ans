@@ -60,6 +60,7 @@ func TestParseTransport(t *testing.T) {
 		{"STREAMABLE-HTTP", TransportStreamableHTTP, false},
 		{"sse", TransportSSE, false},
 		{"json-rpc", TransportJSONRPC, false},
+		{"json_rpc", TransportJSONRPC, false},
 		{"JSONRPC", TransportJSONRPC, false},
 		{"GRPC", TransportGRPC, false},
 		{"REST", TransportREST, false},
