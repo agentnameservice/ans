@@ -251,10 +251,11 @@ func mapRegistrationResponse(resp *service.RegisterResponse, r *http.Request) *r
 	// Register-time next-steps reflect the deferred-cert flow: certs
 	// only issue once verify-acme proves domain control, so the only
 	// step the operator can take right now is publish a challenge
-	// artifact and call verify-acme. Production DNS records
-	// (TRUST/BADGE/DISCOVERY/TLSA) only materialize on the
-	// verify-acme 202, where they appear paired with VERIFY_DNS as
-	// the next step.
+	// artifact and call verify-acme.
+	// Production DNS records (TRUST / BADGE / DISCOVERY / TLSA)
+	// don't appear until after verify-acme issues certs — the TLSA
+	// fingerprint can't exist before the server cert does.
+	// The records surface on GET agent detail via registrationPending.dnsRecords
 	return &registrationPendingResponse{
 		AgentID:    resp.Registration.AgentID,
 		Status:     string(resp.Registration.Status),

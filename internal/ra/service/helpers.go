@@ -172,11 +172,7 @@ func agentCertExpiry(stored []*domain.StoredCertificate, byoc *domain.ByocServer
 }
 
 // metadataHashesFromEndpoints builds the per-protocol metadata-hash
-// map the AGENT_ACTIVE attestation carries. The RA validates that
-// each endpoint's declared MetadataHash matches the metadata
-// document it pointed at; by the time we reach the verify-dns
-// transition, those hashes are trustworthy and we simply echo them
-// into the attestation keyed by protocol name.
+// map the AGENT_REGISTERED attestation carries.
 //
 // If no endpoint declared a hash, we return nil — JSON omitempty
 // on MetadataHashes keeps the field out of the emitted JCS entirely.

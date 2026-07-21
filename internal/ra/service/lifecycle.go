@@ -847,7 +847,7 @@ func (m DNSMismatch) IsIncorrect() bool {
 // required records (computed by s.ComputeRequiredDNSRecords) and
 // advances the registration to ACTIVE on success.
 //
-// On success, emits an AGENT_ACTIVE event whose attestations carry
+// On success, emits an AGENT_REGISTERED event whose attestations carry
 // the production-state DNS records + identity/server cert
 // fingerprints + per-protocol metadata hashes — the shape a verifier
 // uses to audit the agent offline.
@@ -1235,7 +1235,7 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 // RevokeInput carries the caller's stated reason; the domain aggregate
 // validates it. `SchemaVersion` selects which TL lane the revocation
 // event flows to: "V1" enqueues AGENT_REVOKED to
-// /v1/internal/agents/event, "V2" (default) enqueues AGENT_REVOCATION
+// /v1/internal/agents/event, "V2" (default) enqueues AGENT_REVOKED
 // to /v2/internal/agents/event.
 type RevokeInput struct {
 	Reason        domain.RevocationReason
@@ -1247,11 +1247,11 @@ type RevokeInput struct {
 // service methods. `SchemaVersion` decides which TL lane the
 // resulting lifecycle event flows to.
 //
-// For verify-acme, V1 emits nothing to the TL — the V1 enum has no
-// intermediate DOMAIN_VALIDATION type; the V1 reference records the
-// transition in its domain-level lifecycle store only. For verify-
-// dns, V1 emits AGENT_REGISTERED on successful ACTIVE transition
-// (V2 emits AGENT_ACTIVE for the same transition).
+// verify-acme is only the domain-control gate and emits nothing to
+// the TL under the terminal-only event model — no leaf is written
+// until the agent reaches ACTIVE. verify-dns drives that ACTIVE
+// transition, which emits AGENT_REGISTERED on both lanes (only the
+// attestation shape differs between V1 and V2).
 type VerifyInput struct {
 	SchemaVersion string
 }
