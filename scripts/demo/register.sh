@@ -16,6 +16,13 @@
 #   scripts/demo/register.sh --v2 myagent.example.com 2.1.0  # specific host + version
 #   scripts/demo/register.sh --v1 --register-only            # stop after POST /register (don't activate)
 #
+# Env:
+#   ANS_DISCOVERY_PROFILES  comma-separated discoveryProfiles for the
+#                           V2 register request, e.g. "ANS_TXT" or
+#                           "ANS_DNSAID,ANS_TXT". Omitted → the server
+#                           default (ANS_DNSAID: SVCB rows per RFC
+#                           9460). V1 is always pinned to ANS_TXT.
+#
 # Exits 0 on success; agentId is echoed on the FINAL line of stdout so
 # callers can `AGENT_ID=$(register.sh --v1)` if they want.
 
@@ -121,25 +128,33 @@ else
 fi
 
 header "POST $REGISTER_PATH"
+# metaDataUrl sits at /.well-known/ so the ANS_DNSAID profile's SVCB
+# rows carry the capability locator (key65400) and well-known suffix
+# (key65409) SvcParams — the representative shape for real-DNS SVCB
+# testing. discoveryProfiles is only attached when the caller set
+# ANS_DISCOVERY_PROFILES (V2 lane; V1 ignores the field server-side).
 REG_REQ=$(jq -n \
   --arg host "$AGENT_HOST" \
   --arg version "$AGENT_VERSION" \
   --arg idCsr "$IDENTITY_CSR_PEM" \
   --arg srvCsr "$SERVER_CSR_PEM" \
-  --arg display "$DISPLAY_NAME" '
+  --arg display "$DISPLAY_NAME" \
+  --arg profiles "${ANS_DISCOVERY_PROFILES:-}" '
   {
     agentDisplayName: $display,
     agentDescription: "register.sh demo target",
     version:          $version,
     agentHost:        $host,
     endpoints: [{
-      agentUrl:   ("https://" + $host + "/mcp"),
-      protocol:   "MCP",
-      transports: ["SSE"]
+      agentUrl:    ("https://" + $host + "/mcp"),
+      metaDataUrl: ("https://" + $host + "/.well-known/mcp/server-card.json"),
+      protocol:    "MCP",
+      transports:  ["SSE"]
     }],
     identityCsrPEM: $idCsr,
     serverCsrPEM:   $srvCsr
-  }')
+  }
+  | if $profiles != "" then . + {discoveryProfiles: ($profiles | split(","))} else . end')
 REG_RESP=$(curl_json POST "$REGISTER_PATH" "$REG_REQ")
 AGENT_ID=$(printf '%s' "$REG_RESP" | jq -r '.agentId // empty')
 if [ -z "$AGENT_ID" ]; then
@@ -160,6 +175,7 @@ if [ "$REGISTER_ONLY" = "1" ]; then
   if [ -n "$TXT_NAME" ]; then
     note "to validate domain control, publish: TXT $TXT_NAME = $TXT_VALUE"
   fi
+  note "record helper: scripts/demo/dns-records.sh prints every record to publish at each stage (and --verify drives verify-dns)"
   printf "%s\n" "$AGENT_ID"
   exit 0
 fi

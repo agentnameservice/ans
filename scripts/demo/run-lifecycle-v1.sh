@@ -168,6 +168,25 @@ curl_json GET "/v1/agents/$AGENT_ID" >/dev/null
 # identity + server CSRs once the operator has proven domain control
 # via the ACME DNS-01 challenge. This is also when production DNS
 # records (TRUST/BADGE/DISCOVERY/TLSA) become computable.
+#
+# When ans-dns is bundled (start.sh --with-dns), publish the ACME
+# DNS-01 challenge TXT into the local authoritative zone first — the
+# RA's lookup verifier checks it before answering the challenge.
+# Mirrors run-lifecycle.sh; `ans-dns install` cannot do this stage
+# because the pending dnsRecords[] block is intentionally empty
+# during PENDING_VALIDATION (the challenge rides in challenges[]).
+# Falls through silently in noop mode.
+if [ -n "${ANS_DNS_ZONE:-}" ] && [ -x "$BIN/ans-dns" ]; then
+  note "publishing ACME challenge TXT into $ANS_DNS_ZONE"
+  PENDING_RESP=$(curl_json GET "/v1/agents/$AGENT_ID")
+  CH_NAME=$(printf '%s' "$PENDING_RESP" | jq -r '.registrationPending.challenges[0].dnsRecord.name // empty')
+  CH_VALUE=$(printf '%s' "$PENDING_RESP" | jq -r '.registrationPending.challenges[0].dnsRecord.value // empty')
+  [ -n "$CH_NAME" ] || fail "no ACME challenge dnsRecord in pending block"
+  [ -f "$ANS_DNS_ZONE" ] || printf '{"records":{}}' >"$ANS_DNS_ZONE"
+  jq --arg id "$AGENT_ID-acme" --arg name "$CH_NAME" --arg value "$CH_VALUE" \
+    '.records[$id] = [{name:$name, type:"TXT", value:$value, ttl:60}]' \
+    "$ANS_DNS_ZONE" >"$ANS_DNS_ZONE.tmp" && mv "$ANS_DNS_ZONE.tmp" "$ANS_DNS_ZONE"
+fi
 header "3. POST /v1/agents/$AGENT_ID/verify-acme  (→ PENDING_DNS, no V1 TL emit; issues identity + server certs)"
 curl_json POST "/v1/agents/$AGENT_ID/verify-acme" >/dev/null
 assert_2xx "verify-acme"

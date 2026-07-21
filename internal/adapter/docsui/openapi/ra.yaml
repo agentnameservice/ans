@@ -1819,8 +1819,8 @@ components:
         must publish for that profile.
 
         - ANS_DNSAID: the DNS-AID-aligned Consolidated Approach (RFC
-          9460). Opt-in while the profile is brought to full DNS-AID
-          conformance. Provisions:
+          9460), and the server default when discoveryProfiles is
+          omitted. Provisions:
             1. One SVCB row per protocol endpoint at the bare FQDN
                (ServiceMode `1 .`), carrying `alpn` (the protocol
                token: a2a / mcp / x-http), `port` (the endpoint's TLS
@@ -1846,8 +1846,8 @@ components:
                SHA-256), emitted only when a server certificate exists.
         - ANS_TXT: original `_ans` TXT shape (one row per protocol at
           `_ans.{fqdn}`), supported indefinitely for operators with
-          existing zone-edit tooling that targets `_ans.{fqdn}`, and the
-          server default when discoveryProfiles is omitted. Emits an
+          existing zone-edit tooling that targets `_ans.{fqdn}`;
+          opt-in via an explicit discoveryProfiles value. Emits an
           HTTPS RR at the bare FQDN alongside carrying only `alpn=h2`
           (an IANA-registered SvcParam — no keyNNNNN form is needed
           here; the asymmetry with ANS_DNSAID is intentional), since
@@ -1918,7 +1918,7 @@ components:
             $ref: '#/components/schemas/DiscoveryProfile'
           uniqueItems: true
           minItems: 1
-          default: ["ANS_TXT"]
+          default: ["ANS_DNSAID"]
           description: |
             Set of DNS record families the RA tells the operator to
             publish and emits in the AGENT_REGISTERED TL event's
@@ -1935,15 +1935,15 @@ components:
             shape) sends both. Order is not significant.
 
             Optional. Omitted (or an explicit empty array) normalizes to
-            the stable default ["ANS_TXT"] server-side; opt into
-            ["ANS_DNSAID"] explicitly. The `minItems`/`uniqueItems`
+            the default ["ANS_DNSAID"] server-side; opt into the legacy
+            ["ANS_TXT"] shape explicitly. The `minItems`/`uniqueItems`
             schema constraints are the canonical client contract for a
             present array — validate before sending. A non-conformant
             request (an explicit empty array, or duplicate values) is
             handled defensively rather than rejected: empty is treated
             as omitted and duplicates are ignored, but conformant
             clients never send either.
-          example: ["ANS_TXT"]
+          example: ["ANS_DNSAID"]
       required:
         - agentDisplayName
         - agentHost

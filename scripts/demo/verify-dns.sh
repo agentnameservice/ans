@@ -81,10 +81,13 @@ fi
 RSTATUS=$(printf '%s' "$RESP" | jq -r '.status // empty')
 if [ "$RSTATUS" = "ERROR" ]; then
   # 422 DnsVerificationError — required records aren't live (lookup DNS).
+  # missingRecords is a flat dnsRecord list; incorrectRecords nests the
+  # expected record under .record with the live value in .found.
   warn "required DNS records are not yet satisfied — publish these and re-run:"
   printf '%s' "$RESP" | jq -r '
     (.missingRecords[]?   | "  MISSING    \(.type) \(.name) = \(.value)"),
-    (.incorrectRecords[]? | "  INCORRECT  \(.type) \(.name) (expected \(.value))")' >&2
+    (.incorrectRecords[]? | "  INCORRECT  \(.record.type) \(.record.name) (expected \(.expected); live \(.found))")' >&2
+  note "see the full record set: scripts/demo/dns-records.sh"
   fail "verify-dns reported missing/incorrect records"
 fi
 

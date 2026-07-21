@@ -214,20 +214,26 @@ func TestComputeRequiredDNSRecords_StyleMatrix_Integration(t *testing.T) {
 			wantSVCBPort:     "port=80",
 		},
 		{
-			name:          "empty_styles_coerces_to_default_ans_txt",
-			styles:        nil,
-			protocol:      domain.ProtocolA2A,
-			agentURL:      "https://agent.example.com",
-			wantHTTPS:     true, // default is now {ANS_TXT}: HTTPS RR + _ans TXT, no SVCB
-			wantLegacyTXT: true,
+			name:             "empty_styles_coerces_to_default_ans_dnsaid",
+			styles:           nil,
+			protocol:         domain.ProtocolA2A,
+			agentURL:         "https://agent.example.com",
+			wantSVCB:         true, // default is {ANS_DNSAID}: SVCB rows, no HTTPS RR, no _ans TXT
+			wantSVCBRequired: true, // sole resolved style → SVCB carries the required signal
+			wantSVCBAlpn:     "alpn=a2a",
+			wantSVCBBap:      "key65402=a2a",
+			wantSVCBPort:     "port=443",
 		},
 		{
-			name:          "all_invalid_styles_falls_back_to_default_ans_txt",
-			styles:        []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage"), domain.DiscoveryProfile("nonsense")},
-			protocol:      domain.ProtocolA2A,
-			agentURL:      "https://agent.example.com",
-			wantHTTPS:     true, // fallback default is now {ANS_TXT}
-			wantLegacyTXT: true,
+			name:             "all_invalid_styles_falls_back_to_default_ans_dnsaid",
+			styles:           []domain.DiscoveryProfile{domain.DiscoveryProfile("garbage"), domain.DiscoveryProfile("nonsense")},
+			protocol:         domain.ProtocolA2A,
+			agentURL:         "https://agent.example.com",
+			wantSVCB:         true, // fallback default is {ANS_DNSAID}
+			wantSVCBRequired: true,
+			wantSVCBAlpn:     "alpn=a2a",
+			wantSVCBBap:      "key65402=a2a",
+			wantSVCBPort:     "port=443",
 		},
 	}
 

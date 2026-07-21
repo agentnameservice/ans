@@ -34,8 +34,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${BIN:-$ROOT/bin}"
 DATA="${DATA:-$ROOT/data/demo}"
 # Pick up per-session exports start.sh may have persisted (e.g.
-# ANS_DNS_ZONE when `--with-dns` was used). Each line is KEY=VALUE.
-if [ -f "$DATA/env" ]; then
+# ANS_DNS_ZONE when `--with-dns` was used, or the DNS verifier
+# mode/server for dns-records.sh). Each line is KEY=VALUE.
+#
+# start.sh itself sets ANS_DEMO_SKIP_ENV=1 before sourcing this file:
+# the env file is start.sh's OUTPUT (rewritten on every start), never
+# its input — sourcing a previous run's values there would silently
+# re-apply a stale DNS verifier mode to a fresh stack.
+if [ -f "$DATA/env" ] && [ "${ANS_DEMO_SKIP_ENV:-0}" != "1" ]; then
   # shellcheck disable=SC1091
   set -a; . "$DATA/env"; set +a
 fi
