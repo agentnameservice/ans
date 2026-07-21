@@ -1,0 +1,19 @@
+name: DCO merge-group shim
+
+# The org-wide DCO app (https://github.com/apps/dco) validates sign-offs on
+# pull requests but does not report on merge-queue (merge_group) commits, so
+# a required "DCO" check would stall the queue. This shim reports a passing
+# "DCO" check for merge groups only — the real validation already happened
+# on the pull request. Same pattern as onnx/onnx#5399.
+
+on:
+  merge_group:
+
+permissions: {}
+
+jobs:
+  dco:
+    name: DCO
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "DCO was validated on the pull request by the DCO app."
