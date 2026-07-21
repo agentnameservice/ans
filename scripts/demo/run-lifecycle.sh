@@ -10,19 +10,20 @@
 #   6. GET    /v2/ans/agents/{id}                               (detail, now ACTIVE)
 #   7. GET    /v2/ans/agents?status=ALL                         (list mine)
 #   8. GET    /v2/ans/agents/{id}/certificates/identity         (issued cert)
-#   9. Wait for the outbox worker to push events to the TL
+#   9. Confirm the inline-sealed AGENT_REGISTERED leaf is durable in the TL
 #  10. GET    TL /v1/agents/{id}/audit                          (history)
 #  11. GET    TL /v1/agents/{id}                                (badge)
 #  12. GET    TL /root-keys                                     (verifier PEMs)
 #  13. GET    TL /v1/agents/{id}/receipt                        (SCITT COSE)
-#  14. go test ./internal/tl/receipt -run TestSmokeVerifyDemoReceipt  (offline verify)
-#  15. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
-#  16. POST   /v2/ans/identities                                (register the WHO — a did:web verified identity)
-#  17. POST   /v2/ans/identities/{id}/verify-control            (control proof → VERIFIED, seals IDENTITY_VERIFIED)
-#  18. POST   /v2/ans/identities/{id}/links                     (link the agent — ONE IDENTITY_LINKED on the identity stream)
-#  19. GET    TL /v1/agents/{id}                                (badge now carries the computed identities[] join)
+#  14. bin/ans-verify -url TL -agent {id}                      (offline verify)
+#  15. POST   FINDER /v1/search                                 (discover via ans-finder)
+#  16. GET    TL /internal/v1/producer-keys/ra/{raId}           (admin CRUD)
+#  17. POST   /v2/ans/identities                                (register the WHO — a did:web verified identity)
+#  18. POST   /v2/ans/identities/{id}/verify-control            (control proof → VERIFIED, seals IDENTITY_VERIFIED)
+#  19. POST   /v2/ans/identities/{id}/links                     (link the agent — ONE IDENTITY_LINKED on the identity stream)
+#  20. GET    TL /v1/agents/{id}                                (badge now carries the computed identities[] join)
 #
-# Step 16-19 show the verified-identity surface in the standard
+# Step 17-20 show the verified-identity surface in the standard
 # lifecycle; scripts/demo/identity-lifecycle.sh exercises EVERY
 # identity operation (re-add, did:key, rotation, unlink, revoke,
 # receipts, history views).
@@ -161,9 +162,10 @@ REG_REQ=$(jq -n \
     version:          $version,
     agentHost:        $host,
     endpoints: [{
-      agentUrl:   ("https://" + $host + "/mcp"),
-      protocol:   "MCP",
-      transports: ["SSE"]
+      agentUrl:    ("https://" + $host + "/mcp"),
+      metaDataUrl: ("https://" + $host + "/.well-known/mcp/server-card.json"),
+      protocol:    "MCP",
+      transports:  ["SSE"]
     }],
     identityCsrPEM: $csr,
     serverCsrPEM:   $srvCsr
@@ -253,17 +255,19 @@ curl_json GET "/v2/ans/agents?status=ALL" >/dev/null
 header "8. GET /v2/ans/agents/$AGENT_ID/certificates/identity"
 curl_json GET "/v2/ans/agents/$AGENT_ID/certificates/identity" >/dev/null
 
-# ----- 9. Wait for outbox worker -----
+# ----- 9. Confirm the inline-sealed AGENT_REGISTERED leaf -----
 #
-# The single terminal AGENT_REGISTERED event fires at verify-dns
-# ACTIVE transition — matching the reference TL and production's
-# one-leaf-per-lifecycle model. The outbox worker polls on
-# cfg.tl-client.poll-interval (default 2s) and POSTs it to the TL.
-# Wait for the leaf to show up on the audit endpoint before
-# continuing, keeping the demo deterministic without "sleep enough".
-header "9. Wait for outbox worker to push the AGENT_REGISTERED event to the TL"
+# The single terminal AGENT_REGISTERED event is sealed INLINE at the
+# verify-dns ACTIVE transition (seal-before-success): verify-dns only
+# returned ACTIVE above because the TL already acknowledged the seal,
+# so — unlike revocation, which still rides the outbox worker — the
+# leaf is durable in the log by the time we get here. This poll is a
+# confirmation, not a wait: it should succeed on the first try (the
+# audit materialized view may lag the seal by a beat, so we still poll
+# to keep the demo deterministic rather than racing the projection).
+header "9. Confirm the inline-sealed AGENT_REGISTERED leaf is durable in the TL"
 poll_tl_audit "$AGENT_ID" 1 30
-ok "TL received the AGENT_REGISTERED leaf"
+ok "TL has the AGENT_REGISTERED leaf (sealed inline at activation)"
 
 # ----- 10. TL audit -----
 header "10. TL: GET /v1/agents/$AGENT_ID/audit"
@@ -322,7 +326,50 @@ else
   fail "unexpected receipt status $receipt_status; see $RECEIPT_FILE"
 fi
 
-# ----- 15. Admin producer-keys API -----
+# ----- 15. Discover via ans-finder -----
+#
+# The Finder polls the RA's events feed, projects the AGENT_REGISTERED
+# event into its FTS5 catalog, and serves it on POST /v1/search. Because
+# the event only enters the feed once the TL has acked it (which step 9
+# waited for), and the poll interval is ~2s, the entry appears within a
+# few seconds. We scope the query by the structured `publisher` filter to
+# THIS run's host so back-to-back demo runs (which all register an agent
+# named "demo-agent") don't collide — the text matches the display name,
+# the filter pins the exact registration. Then assert the projected
+# identifier + receipt attestation, closing the loop from registration
+# all the way to discovery.
+header "15. Discover via ans-finder (POST /v1/search)"
+if curl -sSf "$FINDER_URL/v1/admin/ready" >/dev/null 2>&1; then
+  SEARCH_BODY=$(jq -n --arg host "$AGENT_HOST" \
+    '{query:{text:"demo-agent", filter:{publisher:[$host]}}}')
+  MATCH=""
+  for i in $(seq 1 15); do
+    resp=$(curl -sS -X POST -H "Content-Type: application/json" \
+      --data "$SEARCH_BODY" "$FINDER_URL/v1/search" 2>/dev/null || true)
+    # Pull the result whose identifier is rooted at this run's host.
+    MATCH=$(printf '%s' "$resp" | \
+      jq -c --arg host "$AGENT_HOST" \
+      'first(.results[]? | select(.identifier | startswith("urn:air:" + $host + ":agents:")))' \
+      2>/dev/null || true)
+    if [ -n "$MATCH" ] && [ "$MATCH" != "null" ]; then
+      printf '%s' "$resp" | pretty_json >&2
+      break
+    fi
+    MATCH=""
+    sleep 1
+  done
+  if [ -z "$MATCH" ]; then
+    fail "ans-finder did not surface ${AGENT_HOST} within 15s (check $DATA/finder.log)"
+  fi
+  IDENT=$(printf '%s' "$MATCH" | jq -r '.identifier')
+  RECEIPT_URI=$(printf '%s' "$MATCH" | jq -r '.trustManifest.attestations[0].uri // "none"')
+  ok "discovered $IDENT"
+  ok "ANS-Registration receipt: $RECEIPT_URI"
+else
+  warn "ans-finder not reachable at $FINDER_URL — skipping discovery step (start it via scripts/demo/start.sh)"
+fi
+
+# ----- 16. Admin producer-keys API -----
 #
 # Stage 4 moved the producer-key trust store from YAML-only to
 # SQLite with admin CRUD. The YAML producerKeys[] section still works
@@ -333,10 +380,10 @@ fi
 #       static API key, which maps to IsAdmin=true);
 #   (b) the bootstrapped RA signer is actually in SQLite;
 #   (c) the list response is the shape admin tooling will consume.
-header "15. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
+header "16. TL: GET /internal/v1/producer-keys/ra/ans-ra-local  (admin)"
 curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
 
-# ----- 16-19. Verified identity (the WHO behind this agent) -----
+# ----- 17-20. Verified identity (the WHO behind this agent) -----
 #
 # The agent registration above is the "what": one FQDN, its
 # endpoints, its certificates. The verified identity is the "who"
@@ -344,7 +391,7 @@ curl_tl GET "/internal/v1/producer-keys/ra/ans-ra-local" >/dev/null
 # its own TL stream, and linked to the agent. Rotating or revoking
 # the identity later is ONE sealed event regardless of how many
 # agents are linked; every linked badge reflects it at read time.
-header "16. POST /v2/ans/identities  (register the WHO — did:web)"
+header "17. POST /v2/ans/identities  (register the WHO — did:web)"
 require_cmd go
 IDENTITY_DID="did:web:who-$(openssl rand -hex 4).example.com"
 IDENTITY_KEY="$DATA/identity-who.pem"
@@ -356,7 +403,7 @@ ID_INPUT=$(printf '%s' "$ID_REG" | jq -r '.challenges[0].signingInput // empty')
 echo "$IDENTITY_ID" >"$DATA/last-identity-id"
 ok "identityId=$IDENTITY_ID (PENDING_CONTROL — challenge issued)"
 
-header "17. POST /v2/ans/identities/$IDENTITY_ID/verify-control  (→ VERIFIED)"
+header "18. POST /v2/ans/identities/$IDENTITY_ID/verify-control  (→ VERIFIED)"
 ID_PROOF=$(cd "$ROOT" && go run ./scripts/demo/signproof sign \
   -key "$IDENTITY_KEY" -kid "${IDENTITY_DID}#key-1" -input "$ID_INPUT")
 curl_json POST "/v2/ans/identities/$IDENTITY_ID/verify-control" \
@@ -364,12 +411,12 @@ curl_json POST "/v2/ans/identities/$IDENTITY_ID/verify-control" \
 assert_2xx "identity verify-control"
 ok "control proven — IDENTITY_VERIFIED seals on the identity's own TL stream"
 
-header "18. POST /v2/ans/identities/$IDENTITY_ID/links  (link this agent — one call, one sealed event)"
+header "19. POST /v2/ans/identities/$IDENTITY_ID/links  (link this agent — one call, one sealed event)"
 curl_json POST "/v2/ans/identities/$IDENTITY_ID/links" \
   "$(jq -n --arg a "$AGENT_ID" '{agentIds: [$a]}')" >/dev/null
 assert_2xx "identity link"
 
-header "19. TL: GET /v1/agents/$AGENT_ID  (badge — computed identities[] join)"
+header "20. TL: GET /v1/agents/$AGENT_ID  (badge — computed identities[] join)"
 # No polling: identity ops are seal-before-success — the seals are
 # already in the log the moment the link call returned.
 assert_tl_identity_audit "$IDENTITY_ID" 2
@@ -377,6 +424,79 @@ BADGE_WITH_WHO=$(curl_tl GET "/v1/agents/$AGENT_ID")
 WHO_VALUE=$(printf '%s' "$BADGE_WITH_WHO" | jq -r '.identities[0].value // empty')
 [ "$WHO_VALUE" = "$IDENTITY_DID" ] || fail "badge identities[] join missing (got: $WHO_VALUE)"
 ok "one hop answers \"who is behind this agent\": $WHO_VALUE (VERIFIED)"
+
+# ----- 20. AI Catalog entry -----
+#
+# The catalog entry is a derived, owner-scoped view of how this agent
+# appears to an external AI Catalog / ARD registry. Its trust manifest
+# points at the SAME SCITT receipt the demo fetched at step 13 — proving
+# the catalog references a real, resolvable inclusion proof, not a
+# fabricated URL. badgeUrl + the attestation URI use the RA's configured
+# public TL base ($TL_PUBLIC_URL); in this demo that is the same host:port
+# as the TL, https scheme.
+header "20. GET /v2/ans/agents/$AGENT_ID/catalog-entry  (AI Catalog record)"
+# curl_json runs in a command-substitution subshell, so its
+# LAST_HTTP_STATUS does not reach this shell — the strict jq shape
+# assertion below is the guard: a 422/error body has no matching
+# .identifier and fails it.
+CAT_ENTRY=$(curl_json GET "/v2/ans/agents/$AGENT_ID/catalog-entry")
+# URN label = labelized display name ("demo-agent", registered in step 1) —
+# the SAME identifier the Finder surfaced in step 15, proving search and
+# the published catalog hand consumers one lineage handle.
+want_urn="urn:air:${AGENT_HOST}:agents:demo-agent"
+want_receipt="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}/receipt"
+want_badge="${TL_PUBLIC_URL}/v1/agents/${AGENT_ID}"
+printf '%s' "$CAT_ENTRY" | jq -e \
+  --arg urn "$want_urn" --arg rcpt "$want_receipt" --arg badge "$want_badge" '
+    .identifier == $urn
+    and .mediaType == "application/mcp-server-card+json"
+    and (.url | type) == "string"
+    and (has("data") | not)
+    and .trustManifest.identity == $urn
+    and .trustManifest.attestations[0].type == "ANS-Registration"
+    and .trustManifest.attestations[0].mediaType == "application/scitt-receipt+cose"
+    and .trustManifest.attestations[0].uri == $rcpt
+    and .metadata.agentHost == "'"$AGENT_HOST"'"
+    and .metadata.badgeUrl == $badge
+  ' >/dev/null || fail "catalog entry shape/URLs did not match expectations"
+ok "catalog entry well-formed; attestation URI = $want_receipt"
+# The catalog advertises the receipt at the path the demo already fetched
+# live over http at step 13 (same agentId, same path; https public base).
+ok "that receipt path is live on the TL (step 13 retrieved its COSE bytes → $RECEIPT_FILE)"
+
+# ----- 21. Host-complete AI Catalog document -----
+#
+# The per-host document is what the AHP publishes verbatim at
+# /.well-known/ai-catalog.json. It lists every ACTIVE catalog-eligible
+# agent on the host (this one). It is served as application/ai-catalog+json
+# with a strong ETag; a conditional re-fetch returns 304, so AHPs poll
+# cheaply. Uses curl directly (not curl_json) to read response headers.
+header "21. GET /v2/ans/agents/$AGENT_ID/ai-catalog  (host-complete AI Catalog document)"
+AICAT_HDR="$DATA/ai-catalog.hdr"
+AICAT_BODY="$DATA/ai-catalog.json"
+printf "${C_DIM}→ GET %s/v2/ans/agents/%s/ai-catalog${C_RESET}\n" "$RA_URL" "$AGENT_ID" >&2
+aicat_status=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
+  -D "$AICAT_HDR" -o "$AICAT_BODY" -w '%{http_code}' \
+  "$RA_URL/v2/ans/agents/$AGENT_ID/ai-catalog")
+[ "$aicat_status" = "200" ] || fail "ai-catalog: expected 200, got $aicat_status"
+pretty_json <"$AICAT_BODY" >&2
+grep -iq '^content-type:[[:space:]]*application/ai-catalog+json' "$AICAT_HDR" \
+  || fail "ai-catalog: Content-Type is not application/ai-catalog+json"
+ETAG=$(grep -i '^etag:' "$AICAT_HDR" | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r')
+[ -n "$ETAG" ] || fail "ai-catalog: no ETag header"
+jq -e --arg urn "$want_urn" --arg host "$AGENT_HOST" '
+  .specVersion == "1.0"
+  and .host.identifier == $host
+  and .host.displayName == $host
+  and ((.entries | map(.identifier) | index($urn)) != null)
+' "$AICAT_BODY" >/dev/null || fail "ai-catalog: document shape wrong or this agent's entry missing"
+ok "host-complete document lists this ACTIVE agent (ETag $ETAG)"
+# Conditional re-fetch with the ETag → 304 Not Modified (cheap AHP poll).
+aicat_304=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
+  -H "If-None-Match: $ETAG" -o /dev/null -w '%{http_code}' \
+  "$RA_URL/v2/ans/agents/$AGENT_ID/ai-catalog")
+[ "$aicat_304" = "304" ] || fail "ai-catalog: If-None-Match did not yield 304 (got $aicat_304)"
+ok "conditional GET (If-None-Match) returned 304 Not Modified"
 
 # ----- summary -----
 header "Lifecycle complete (both sides)"

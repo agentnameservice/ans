@@ -118,6 +118,9 @@ func NewRegistration(
 	if ownerID == "" {
 		return nil, NewValidationError("MISSING_OWNER_ID", "ownerId is required")
 	}
+	if displayName == "" {
+		return nil, NewValidationError("MISSING_DISPLAY_NAME", "displayName is required")
+	}
 	if ansName.IsZero() {
 		return nil, NewValidationError("MISSING_ANS_NAME", "ansName is required")
 	}
@@ -303,6 +306,25 @@ func (r *AgentRegistration) Cancel(now time.Time) error {
 	}
 	r.Status = StatusRevoked
 	r.addEvent(NewAgentRevokedEvent(r.AgentID, r.AnsName, RevocationCessationOfOperation, now))
+	return nil
+}
+
+// CancelForHostConflict cancels a still-pending registration because a
+// different owner won exclusive control of the FQDN (one-host-one-owner).
+// Unlike Cancel, it raises no event: a pre-activation registration was
+// never sealed in the Transparency Log, so its cancellation carries no TL
+// event (ANS-1 §4.4). Only PENDING registrations are cancellable; any
+// non-pending status (including an already-cancelled one) returns
+// CANNOT_CANCEL. The sole caller (cancelConflictingPendings) pre-filters
+// on IsPending(), so it never invokes this twice on the same row.
+func (r *AgentRegistration) CancelForHostConflict() error {
+	if !r.Status.IsPending() {
+		return NewInvalidStateError(
+			"CANNOT_CANCEL",
+			fmt.Sprintf("can only cancel pending registrations, current status: %s", r.Status),
+		)
+	}
+	r.Status = StatusRevoked
 	return nil
 }
 

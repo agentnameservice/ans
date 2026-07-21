@@ -1,0 +1,32 @@
+{
+  "logId": "019a7aff-7777-7b5b-b048-d0b78f4b4c5f",
+  "eventType": "AGENT_REGISTERED",
+  "createdAt": "2025-04-01T12:00:00Z",
+  "expiresAt": "2026-04-01T12:00:00Z",
+  "agentId": "aa0e8400-e29b-41d4-a716-446655440555",
+  "ansName": "ans://v1.0.0.evil.example.com",
+  "agentHost": "evil.example.com",
+  "agentDisplayName": "Safe\u001bName\u202eEVIL\u200bAgent\u0000",
+  "agentDescription": "Line one\u001b[31mred\u0000 and \u202ereversed\u2066isolated\u2069 text",
+  "version": "1.0.0\u200b",
+  "providerId": "PC_0000000003",
+  "endpoints": [
+    {
+      "agentUrl": "https://evil.example.com/mcp",
+      "metaDataUrl": "https://evil.example.com/.well-known/mcp.json",
+      "protocol": "MCP",
+      "functions": [
+        {"id": "f1", "name": "Clean\u202eTool", "tags": ["safe\u0000tag", "tag\u200b"]},
+        {"id": "f2", "name": "\u200b\u202e", "tags": ["ok"]}
+      ]
+    },
+    {
+      "agentUrl": "https://evil.example.com/a2a",
+      "metaDataUrl": "https://evil.example.com/.well-known/\u202eagent-card.json",
+      "protocol": "A2A",
+      "functions": [
+        {"id": "g1", "name": "Skill", "tags": ["x"]}
+      ]
+    }
+  ]
+}

@@ -3,8 +3,6 @@ package logstore_test
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/sha256"
 	"encoding/asn1"
 	"encoding/base64"
@@ -17,7 +15,7 @@ import (
 	"golang.org/x/mod/sumdb/note"
 
 	"github.com/godaddy/ans/internal/adapter/keymanager"
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	"github.com/godaddy/ans/internal/lognote"
 	"github.com/godaddy/ans/internal/port"
 	"github.com/godaddy/ans/internal/tl/logstore"
 )
@@ -63,31 +61,26 @@ func TestC2SPSignerNoteSignatureLineWrapsDER(t *testing.T) {
 	assertDERSignature(t, signer.PublicKey(), []byte(body), raw[4:])
 }
 
-func TestVerifyC2SPECDSAAcceptsDERAndLegacyP1363(t *testing.T) {
+// TestC2SPSignerRoundTripsThroughLognoteVerify is the smoke test that
+// the logstore signer's output is accepted by the canonical verifier in
+// internal/lognote. The exhaustive VerifyC2SPECDSA cases (DER, legacy
+// P1363, tampered body, malformed inputs) live in the lognote package
+// tests; this only proves the producer and verifier still agree.
+func TestC2SPSignerRoundTripsThroughLognoteVerify(t *testing.T) {
 	t.Parallel()
 
-	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("GenerateKey: %v", err)
-	}
+	ctx := context.Background()
+	signer := newC2SPTestSigner(ctx, t, "ans-test")
 	body := []byte("ans-test\n1\nAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=\n")
-	digest := sha256.Sum256(body)
-	der, err := ecdsa.SignASN1(rand.Reader, priv, digest[:])
-	if err != nil {
-		t.Fatalf("SignASN1: %v", err)
-	}
-	p1363, err := anscrypto.DERToP1363(der, anscrypto.CoordinateBytes(&priv.PublicKey))
-	if err != nil {
-		t.Fatalf("DERToP1363: %v", err)
-	}
 
-	if !logstore.VerifyC2SPECDSA(&priv.PublicKey, body, der) {
-		t.Fatal("DER signature did not verify")
+	sig, err := signer.Sign(body)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
 	}
-	if !logstore.VerifyC2SPECDSA(&priv.PublicKey, body, p1363) {
-		t.Fatal("legacy P1363 signature did not verify")
+	if !lognote.VerifyC2SPECDSA(signer.PublicKey(), body, sig) {
+		t.Fatal("signer output did not verify through lognote.VerifyC2SPECDSA")
 	}
-	if logstore.VerifyC2SPECDSA(&priv.PublicKey, []byte("tampered\n"), der) {
+	if lognote.VerifyC2SPECDSA(signer.PublicKey(), []byte("tampered\n"), sig) {
 		t.Fatal("signature verified against the wrong checkpoint body")
 	}
 }

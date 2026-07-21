@@ -59,6 +59,14 @@ tags:
     description: Agent certificate revocation operations
   - name: Certificate Management
     description: Certificate retrieval, CSR submission, and renewal operations
+  - name: Events
+    description: |
+      Public, unauthenticated agent-lifecycle events feed. Lives on the
+      `/v1` path (not `/v2`) because it is the production-compatible
+      ingestion contract the ANS Finder consumes; its shape is pinned to
+      the production `getAgentEvents` operation. The operation declares a
+      path-level `servers` override so the documented path resolves at
+      the host root rather than under this document's `/v2` server prefix.
   - name: Verified Identities
     description: |
       The "who" behind agents — owner-level identities (did:web,
@@ -77,6 +85,101 @@ security:
   - bearerAuth: []
 
 paths:
+  # ──────────────────────────────────────────────────────────────────
+  # Events — public agent-lifecycle feed (the Finder's ingestion source)
+  #
+  # Path-level `servers` override: this operation lives at the host
+  # ROOT (`/v1/agents/events`), not under this document's `/v2` server
+  # prefix. The override makes the rendered URL correct in Swagger UI.
+  # The shape is byte-compatible with the production `getAgentEvents`
+  # operation; the OSS RA owns a conformance test asserting that.
+  # ──────────────────────────────────────────────────────────────────
+  /v1/agents/events:
+    servers:
+      - url: http://localhost:18080
+        description: Local dev — quickstart ra-local.yaml (feed is not under /v2)
+      - url: https://api.ans.example.org
+        description: Main ANS API server
+    get:
+      tags:
+        - Events
+      summary: Retrieve ANS agent lifecycle events
+      description: |
+        Returns a paginated, strictly-ordered stream of ANS agent
+        lifecycle events (registrations and revocations). This is the
+        ingestion contract the ANS Finder polls to build its discovery
+        catalog.
+
+        **Anonymous.** This route requires no authentication (`security: []`).
+
+        **Only sealed events appear.** An event is served only after it
+        has been accepted by the Transparency Log and a `logId` assigned,
+        so an item in the feed is provably sealed in the log and its
+        receipt is resolvable from `logId`.
+
+        **Pagination.** Pass the `lastLogId` from a response as the next
+        request's `lastLogId` query parameter to fetch the following
+        page. Omit it for the first page. When the response omits
+        `lastLogId`, there are no more results.
+
+        **Retention.** Events are retained for a bounded window (default
+        30 days) and then age out. Because of this, an unknown
+        `lastLogId` and one that has aged out are indistinguishable: both
+        restart the stream from the oldest retained event rather than
+        erroring.
+
+        **providerId.** Accepted for production-shape parity. This
+        open-source RA has no provider concept, so supplying a non-empty
+        `providerId` yields an empty page.
+      operationId: getAgentEvents
+      security: []
+      parameters:
+        - name: providerId
+          in: query
+          description: |
+            Optional provider identifier. This OSS RA has no provider
+            concept; a non-empty value returns an empty page.
+          required: false
+          schema:
+            type: string
+        - name: lastLogId
+          in: query
+          description: |
+            Opaque cursor — the `lastLogId` from a previous response.
+            Omit for the first page. An unknown or aged-out cursor
+            restarts from the oldest retained event.
+          required: false
+          schema:
+            type: string
+        - name: limit
+          in: query
+          description: Number of events to return (1-200, default 100)
+          required: false
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+            default: 100
+      responses:
+        '200':
+          description: Successful operation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EventPageResponse'
+        '422':
+          description: Invalid request parameters (out-of-range or non-numeric limit)
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
   # ──────────────────────────────────────────────────────────────────
   # Management — ownership-scoped
   # ──────────────────────────────────────────────────────────────────
@@ -174,13 +277,12 @@ paths:
       description: |
         Registers a new agent with the Agent Name Service.
 
-        The Registration Authority (RA) validates the agent's identity and
-        submitted information, then interacts with the CA to issue certificates
-        or validates provided (BYOC) server certificates.
+        The request MAY include a Certificate Signing Request (CSR) so that
+        an Identity certificate can be issued. Identity certificates are
+        issued by the RA.
 
-        The request MUST include an identity CSR. The request can optionally
-        include a server CSR (for RA-issued server cert) or a BYOC server
-        certificate with its chain.
+        The request must include a server CSR (for RA-issued server cert)
+        or a BYOC server certificate with its chain.
       operationId: registerAgent
       requestBody:
         description: Agent registration request
@@ -209,11 +311,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
-          description: Agent ID or ANSName already exists
+          description: |
+            Conflict. `code` distinguishes the cause:
+            `ANS_NAME_TAKEN` (this exact versioned ANS name is already
+            registered) or `AGENT_HOST_TAKEN` (the FQDN has a live —
+            ACTIVE or DEPRECATED — registration owned by a different
+            operator; the FQDN belongs to that owner until no live
+            registration remains).
           content:
-            application/json:
+            application/problem+json:
               schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/Problem'
         '422':
           description: Invalid registration request
           content:
@@ -273,6 +381,158 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
   # ──────────────────────────────────────────────────────────────────
+  # AI Catalog (producer-generated discovery artifact)
+  # ──────────────────────────────────────────────────────────────────
+  /ans/agents/{agentId}/catalog-entry:
+    get:
+      tags:
+        - Management
+      summary: Get the agent's AI Catalog entry
+      description: |
+        Returns the agent's AI Catalog `CatalogEntry` — the producer-side
+        record an external AI Catalog / ARD registry ingests. The entry is
+        derived entirely from the registration aggregate (display name,
+        version, endpoints, Transparency-Log badge/receipt URLs); nothing is
+        sealed or fetched, and it is regenerated on lifecycle events.
+
+        **Owner-scoped, read-only.** Returns 404 if the authenticated caller
+        does not own the agent (existence is hidden). This route is the
+        registrant's own view of how their agent appears in a catalog; it is
+        not the public, crawlable surface.
+
+        **Eligibility:** an entry is produced only for an **ACTIVE**
+        registration (the entry's SCITT-receipt attestation and TL badge
+        link to Transparency-Log records that exist only once the agent is
+        sealed at activation — a pending agent has nothing to link to) that
+        is versioned and has at least one A2A or MCP endpoint whose
+        `metaDataUrl` is present and passes the emit-side URL policy
+        (absolute https, no userinfo/query/fragment, host == agentHost).
+        Otherwise the route returns 422 `NOT_CATALOG_ELIGIBLE` (the `detail`
+        names the specific gate: not active, versionless, or no eligible
+        endpoint).
+      operationId: getCatalogEntry
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: The agent's CatalogEntry
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CatalogEntry'
+        '401':
+          description: Authentication failed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Authorization failed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Agent not found or not owned by caller
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Registration is not catalog-eligible: not ACTIVE (no
+            Transparency-Log entry to link to yet), versionless, or no
+            A2A/MCP endpoint with a policy-passing metaDataUrl. `code` is
+            `NOT_CATALOG_ELIGIBLE`; `detail` names the specific gate.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  /ans/agents/{agentId}/ai-catalog:
+    get:
+      tags:
+        - Management
+      summary: Get the host-complete AI Catalog document
+      description: |
+        Returns the host-complete AI Catalog **document** for the agent's
+        host — the file an Agent Hosting Platform publishes verbatim at
+        `/.well-known/ai-catalog.json`. It contains one `CatalogEntry` for
+        every **ACTIVE**, catalog-eligible agent registered on that host
+        (deprecated and revoked registrations are pruned from the
+        well-known file; the population export keeps them, marked).
+
+        **Owner-scoped, read-only.** Returns 404 if the authenticated
+        caller does not own the agent (existence is hidden). The caller
+        proves ownership of the keying agent; the document then lists that
+        owner's ACTIVE catalog-eligible agents on the host (the body is
+        scoped to the owner, not just the route key, so a shared host never
+        discloses one owner's agents to another). This is the registrant's
+        refresh target — not a public, crawlable surface.
+
+        **Caching:** the response carries a strong `ETag` (SHA-256 of the
+        body). A conditional request with a matching `If-None-Match`
+        receives `304 Not Modified`.
+      operationId: getHostCatalog
+      parameters:
+        - $ref: '#/components/parameters/AgentIdPath'
+      responses:
+        '200':
+          description: The host-complete AI Catalog document
+          headers:
+            ETag:
+              description: Strong validator (SHA-256 of the document body)
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+          content:
+            application/ai-catalog+json:
+              schema:
+                $ref: '#/components/schemas/CatalogDocument'
+        '304':
+          description: Not modified (If-None-Match matched the current ETag)
+          headers:
+            ETag:
+              description: Strong validator (SHA-256 of the document body)
+              schema:
+                type: string
+            Cache-Control:
+              schema:
+                type: string
+        '401':
+          description: Authentication failed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '403':
+          description: Authorization failed
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '404':
+          description: Agent not found or not owned by caller
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '500':
+          description: Internal server error
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  # ──────────────────────────────────────────────────────────────────
   # Registration Validation
   # ──────────────────────────────────────────────────────────────────
   /ans/agents/{agentId}/verify-acme:
@@ -312,6 +572,15 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            `AGENT_HOST_TAKEN` — a different operator now holds this FQDN
+            live (it activated first). This registration lost the host and
+            was cancelled; it can no longer progress.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '422':
           description: Validation failed
           content:
@@ -333,12 +602,21 @@ paths:
       description: |
         Verifies that all required DNS records have been configured correctly.
         This is the final step for external domain registration.
+
+        **Seal-before-success:** activation does not report `ACTIVE` until
+        the agent's single terminal `AGENT_REGISTERED` event has been
+        sealed in the Transparency Log. The RA submits the event to the TL
+        INLINE and only then commits the ACTIVE transition; if the TL is
+        unavailable the call fails 503 `TL_UNAVAILABLE` (retryable — the
+        agent stays `PENDING_DNS` and nothing is committed). This is what
+        guarantees a catalog entry's SCITT-receipt and badge links can only
+        ever point at a TL record that actually exists.
       operationId: verifyDnsRecords
       parameters:
         - $ref: '#/components/parameters/AgentIdPath'
       responses:
         '202':
-          description: DNS verified, registration active
+          description: DNS verified and AGENT_REGISTERED sealed in the TL; registration active
           content:
             application/json:
               schema:
@@ -361,6 +639,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '409':
+          description: |
+            `AGENT_HOST_TAKEN` — a different operator activated a
+            registration on this FQDN during this registration's pending
+            window. The FQDN belongs to that owner until no live
+            registration remains, so this activation is refused.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '422':
           description: DNS records not found or incorrect
           content:
@@ -373,6 +661,16 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
+        '503':
+          description: |
+            `TL_UNAVAILABLE` — the Transparency Log could not seal the
+            `AGENT_REGISTERED` event. Retryable: the agent stays
+            `PENDING_DNS` and nothing is committed; retry verify-dns once
+            the TL is reachable.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
 
   # ──────────────────────────────────────────────────────────────────
   # Revocation
@@ -1508,7 +1806,7 @@ components:
 
     Protocol:
       type: string
-      enum: [A2A, MCP, HTTP-API]
+      enum: [A2A, MCP, HTTP_API]
 
     DiscoveryProfile:
       type: string
@@ -1591,6 +1889,14 @@ components:
         endpoints:
           type: array
           minItems: 1
+          description: >-
+            One or more protocol endpoints. Each protocol may appear at
+            most once across the array — a second endpoint with an
+            already-used protocol is rejected with 422 DUPLICATE_PROTOCOL,
+            and an exact protocol+agentUrl repeat with 422
+            DUPLICATE_ENDPOINT. (By-field uniqueness is not expressible in
+            OpenAPI/JSON Schema; enforced in
+            internal/domain/endpoint.go AgentEndpoints.Validate.)
           items:
             $ref: '#/components/schemas/AgentEndpoint'
         serverCsrPEM:
@@ -1643,6 +1949,9 @@ components:
         - agentHost
         - endpoints
         - version
+      oneOf:
+        - required: [serverCsrPEM]
+        - required: [serverCertificatePEM]
 
     AgentRevocationRequest:
       type: object
@@ -1819,6 +2128,214 @@ components:
         - ansName
         - nextSteps
 
+    # ── AI Catalog (producer-generated discovery artifact) ──────────
+    CatalogEntry:
+      type: object
+      description: |
+        One artifact's AI Catalog record, derived from a registration (AI
+        Catalog draft 2026-06-11 §4.4). A bare entry is served as
+        application/json — it is not itself a catalog document and carries no
+        `specVersion`. Exactly one of `url` or `data` is present: a
+        single-protocol entry carries `url`; a multi-protocol agent carries
+        `data` (an inline nested catalog of per-protocol children) with
+        `mediaType` `application/ai-catalog+json`.
+      properties:
+        identifier:
+          type: string
+          description: |
+            Stable, version-spanning lineage handle
+            `urn:air:{agentHost}:agents:{label}`, where `{label}` is the
+            agent's display name with whitespace runs collapsed to single
+            hyphens — the same derivation the ARD discovery service (the
+            Finder) mints from feed events, so search results and the
+            published catalog carry one identifier per agent. Never the
+            per-version agentId.
+          example: urn:air:ai-agent.acmecorp.com:agents:Support-Assistant
+        displayName:
+          type: string
+          maxLength: 64
+        description:
+          type: string
+          maxLength: 150
+        version:
+          type: string
+          example: 2.1.0
+        mediaType:
+          type: string
+          description: |
+            Artifact discriminator: `application/a2a-agent-card+json`,
+            `application/mcp-server-card+json`, or
+            `application/ai-catalog+json` for a multi-protocol nested entry.
+          example: application/a2a-agent-card+json
+        url:
+          type: string
+          format: uri
+          description: |
+            The endpoint's metaDataUrl (the protocol card location). Present
+            on a single-protocol or nested-child entry. Mutually exclusive
+            with `data`.
+        data:
+          allOf:
+            - $ref: '#/components/schemas/CatalogNested'
+          description: |
+            Inline nested catalog of per-protocol children, present only on a
+            multi-protocol outer entry. Mutually exclusive with `url`.
+        tags:
+          type: array
+          items:
+            type: string
+        updatedAt:
+          type: string
+          format: date-time
+        publisher:
+          $ref: '#/components/schemas/CatalogPublisher'
+        metadata:
+          $ref: '#/components/schemas/CatalogEntryMetadata'
+        trustManifest:
+          $ref: '#/components/schemas/CatalogTrustManifest'
+      required:
+        - identifier
+        - displayName
+        - mediaType
+
+    CatalogNested:
+      type: object
+      description: |
+        Inline nested catalog held in a multi-protocol entry's `data` (AI
+        Catalog §6.1 / IMPL §3.5).
+      properties:
+        specVersion:
+          type: string
+          example: "1.0"
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogEntry'
+      required:
+        - specVersion
+        - entries
+
+    CatalogDocument:
+      type: object
+      description: |
+        A host-complete AI Catalog document (AI Catalog §4.2), served as
+        application/ai-catalog+json. The file an AHP publishes at
+        `/.well-known/ai-catalog.json`; `entries` carries one CatalogEntry
+        per ACTIVE, catalog-eligible agent on the host (sorted by
+        identifier then version for a stable ETag).
+      properties:
+        specVersion:
+          type: string
+          example: "1.0"
+        host:
+          $ref: '#/components/schemas/CatalogHostInfo'
+        entries:
+          type: array
+          items:
+            $ref: '#/components/schemas/CatalogEntry'
+      required:
+        - specVersion
+        - entries
+
+    CatalogHostInfo:
+      type: object
+      description: |
+        Host Info object (AI Catalog §4.3) identifying the operator of a
+        catalog document. `displayName` is required within Host Info; for a
+        per-host document both fields are the agentHost.
+      properties:
+        identifier:
+          type: string
+          example: ai-agent.acmecorp.com
+        displayName:
+          type: string
+          example: ai-agent.acmecorp.com
+      required:
+        - displayName
+
+    CatalogPublisher:
+      type: object
+      description: |
+        Publishing entity (AI Catalog §4.6). DNS-anchored in this RA;
+        `identifier` and `displayName` are both the agentHost.
+      properties:
+        identifier:
+          type: string
+          example: ai-agent.acmecorp.com
+        displayName:
+          type: string
+          example: ai-agent.acmecorp.com
+        identityType:
+          type: string
+          example: dns
+      required:
+        - identifier
+        - displayName
+
+    CatalogEntryMetadata:
+      type: object
+      description: |
+        Entry-level identifiers a consumer verifies against (IMPL §5.3). No
+        `logId` — the TL is keyed by agentId, not logId.
+      properties:
+        ansName:
+          type: string
+          example: ans://v2.1.0.ai-agent.acmecorp.com
+        agentHost:
+          type: string
+          example: ai-agent.acmecorp.com
+        badgeUrl:
+          type: string
+          format: uri
+          description: |
+            TL status / card-integrity surface (`<tl>/v1/agents/{agentId}`).
+            Omitted when no TL base URL is configured.
+      required:
+        - ansName
+        - agentHost
+
+    CatalogTrustManifest:
+      type: object
+      description: |
+        Verifiable identity + trust metadata (AI Catalog §5). `identity`
+        MUST equal the containing entry's `identifier`.
+      properties:
+        identity:
+          type: string
+          example: urn:air:ai-agent.acmecorp.com:agents:ai-agent
+        attestations:
+          type: array
+          description: |
+            Present only when a TL base URL is configured. The slice-1
+            attestation is the ANS-Registration SCITT receipt.
+          items:
+            $ref: '#/components/schemas/CatalogAttestation'
+      required:
+        - identity
+
+    CatalogAttestation:
+      type: object
+      description: |
+        A verifiable claim (AI Catalog §5.4). The ANS-Registration
+        attestation points at the agent's SCITT receipt on the Transparency
+        Log; it carries no digest (the receipt proves inclusion, not entry
+        content).
+      properties:
+        type:
+          type: string
+          example: ANS-Registration
+        uri:
+          type: string
+          format: uri
+          example: https://tl.example.org/v1/agents/550e8400-e29b-41d4-a716-446655440000/receipt
+        mediaType:
+          type: string
+          example: application/scitt-receipt+cose
+      required:
+        - type
+        - uri
+        - mediaType
+
     NextStep:
       type: object
       properties:
@@ -1910,6 +2427,10 @@ components:
         metaDataHash:
           type: string
           pattern: '^SHA256:[a-f0-9]{64}$'
+          description: >-
+            Optional integrity pin over the metadata descriptor.
+            Meaningless on its own: it MUST be accompanied by metaDataUrl.
+            A metaDataHash without a metaDataUrl is rejected with 422 INVALID_ENDPOINT.
         documentationUrl:
           type: string
           format: uri
@@ -1923,10 +2444,14 @@ components:
           type: array
           items:
             type: string
-            enum: [STREAMABLE-HTTP, SSE, JSON-RPC, GRPC, REST, HTTP]
+            enum: [STREAMABLE_HTTP, SSE, JSON_RPC, GRPC, REST, HTTP]
       required:
         - protocol
         - agentUrl
+      anyOf:
+        - not:
+            required: [metaDataHash]
+        - required: [metaDataUrl]
 
     AgentFunction:
       type: object
@@ -1946,6 +2471,100 @@ components:
       required:
         - id
         - name
+
+    # ── Events feed (GET /v1/agents/events) ──────────────────────
+    # Byte-compatible with the production `getAgentEvents` response.
+    # Reuses AgentEndpoint / AgentFunction above (the feed's endpoint
+    # shape is the same minus metaDataHash, which the feed never emits).
+    EventPageResponse:
+      type: object
+      description: Paginated response containing ANS events.
+      properties:
+        items:
+          type: array
+          description: Array of event items (always present; `[]` when empty).
+          items:
+            $ref: '#/components/schemas/EventItem'
+        lastLogId:
+          type: string
+          description: |
+            The logId of the last event in this page. Pass it as the next
+            request's `lastLogId` to fetch the following page. Omitted
+            when there are no more results.
+      required:
+        - items
+
+    EventItem:
+      type: object
+      description: One ANS lifecycle event with agent details and event metadata.
+      properties:
+        logId:
+          type: string
+          description: Unique identifier for this event in the stream.
+          example: 019a7a52-e5bf-7b5b-b048-d0b78f4b4c5f
+        eventType:
+          type: string
+          description: Type of ANS event.
+          enum: [AGENT_DEPRECATED, AGENT_REGISTERED, AGENT_REVOKED, AGENT_RENEWED]
+          example: AGENT_REGISTERED
+        createdAt:
+          type: string
+          format: date-time
+          description: Timestamp when the event was created (producer time).
+          example: '2025-01-08T12:30:00Z'
+        expiresAt:
+          type: string
+          format: date-time
+          description: When the agent's registration expires (if applicable).
+          example: '2026-01-08T12:30:00Z'
+        agentId:
+          type: string
+          format: uuid
+          description: Unique identifier of the agent.
+          example: 550e8400-e29b-41d4-a716-446655440000
+        ansName:
+          type: string
+          description: Fully qualified ANS name (ans://{version}.{agentHost}).
+          example: ans://v1.0.0.myagent.example.com
+        agentHost:
+          type: string
+          maxLength: 253
+          description: The agent's hosting domain.
+          example: myagent.example.com
+        agentDisplayName:
+          type: string
+          maxLength: 64
+          description: Human-readable display name for the agent.
+          example: Sentiment Analyzer
+        agentDescription:
+          type: string
+          maxLength: 150
+          description: Description of the agent.
+          example: An agent that analyzes sentiment in text
+        version:
+          type: string
+          description: Semantic version of the agent.
+          example: 1.0.0
+        providerId:
+          type: string
+          description: |
+            Provider identifier (production field). This OSS RA never
+            emits it — the only principal id is the registrant's owner
+            id, which is not exposed.
+          example: PC_1234567890
+        endpoints:
+          type: array
+          description: Agent endpoints with protocol-specific configuration.
+          items:
+            $ref: '#/components/schemas/AgentEndpoint'
+      required:
+        - logId
+        - eventType
+        - createdAt
+        - agentId
+        - ansName
+        - agentHost
+        - version
 
     CertificateResponse:
       type: object
@@ -2137,6 +2756,72 @@ components:
       required:
         - status
         - nextStep
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 problem details — the body every RA error response
+        carries, served as `application/problem+json`. `type`, `title`,
+        and `status` are always present; `detail` is the human-readable
+        explanation specific to this occurrence, and `code` is a stable,
+        machine-readable error identifier (read `code` for programmatic
+        handling, `detail` for display).
+      properties:
+        type:
+          type: string
+          description: A URI reference identifying the problem type.
+          example: about:blank
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+          example: Validation Failed
+        status:
+          type: integer
+          description: The HTTP status code for this occurrence.
+          example: 422
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        code:
+          type: string
+          description: Stable, machine-readable error code.
+          example: INVALID_LIMIT
+      required:
+        - type
+        - title
+        - status
+
+    Problem:
+      type: object
+      description: |
+        RFC 7807 Problem Details — the actual error shape every RA failure
+        path emits, served as `application/problem+json`. Clients read
+        `code` for programmatic handling and `detail` for the
+        human-readable explanation.
+
+        (The legacy `ErrorResponse` schema below is retained only for the
+        pre-existing routes still declared against it; new routes point
+        here. Migrating the remaining declarations is tracked separately.)
+      properties:
+        type:
+          type: string
+          description: URI reference identifying the problem type.
+        title:
+          type: string
+          description: Short, human-readable summary of the problem type.
+        status:
+          type: integer
+          description: HTTP status code.
+        detail:
+          type: string
+          description: Human-readable explanation specific to this occurrence.
+        code:
+          type: string
+          description: Stable, machine-readable error code for programmatic handling.
+      required:
+        - title
+        - status
+        - code
 
     ErrorResponse:
       type: object

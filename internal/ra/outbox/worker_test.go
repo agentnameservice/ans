@@ -303,6 +303,88 @@ func TestWorker_RoutesBySchemaVersion(t *testing.T) {
 	}
 }
 
+// TestWorker_PersistsLogIDFromTLResponse confirms the worker forwards
+// the logId the TL returned on append into MarkSent, so the
+// agent-events feed can serve it as a cursor. Regression guard against
+// dropping res.LogID (the bug this PR fixes).
+func TestWorker_PersistsLogIDFromTLResponse(t *testing.T) {
+	t.Parallel()
+	db, err := sqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := sqlite.NewOutboxStore(db)
+
+	id := enqueuePayload(t, store, "raid", time.Now())
+
+	sender := newFakeSender(func(_ []byte, _ string) (*tlclient.AppendResult, error) {
+		return &tlclient.AppendResult{LogID: "tl-log-42", LeafIndex: 7}, nil
+	})
+	w := outbox.NewWorker(store, sender, zerolog.Nop(), outbox.Options{
+		BatchSize:    10,
+		PollInterval: 20 * time.Millisecond,
+		MaxBackoff:   time.Second,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = w.Run(ctx) }()
+	defer cancel()
+
+	waitUntil(t, 2*time.Second, func() bool { return sender.callCount() >= 1 })
+
+	waitUntil(t, 2*time.Second, func() bool {
+		var logID string
+		if qErr := db.DBX().GetContext(context.Background(), &logID,
+			`SELECT COALESCE(log_id, '') FROM outbox_events WHERE id = ?`, id); qErr != nil {
+			return false
+		}
+		return logID == "tl-log-42"
+	})
+}
+
+// TestWorker_EmptyLogID_KeepsRowPending confirms that when the TL
+// accepts an event but returns no logId, the worker does NOT mark the
+// row sent (an empty logId would slip past the feed gate and surface
+// `"logId":""`). The row stays pending for retry.
+func TestWorker_EmptyLogID_KeepsRowPending(t *testing.T) {
+	t.Parallel()
+	db, err := sqlite.Open(context.Background(), ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	store := sqlite.NewOutboxStore(db)
+
+	id := enqueuePayload(t, store, "raid", time.Now())
+
+	var calls atomic.Int32
+	sender := newFakeSender(func(_ []byte, _ string) (*tlclient.AppendResult, error) {
+		calls.Add(1)
+		return &tlclient.AppendResult{LogID: "", LeafIndex: 3}, nil // accepted, no logId
+	})
+	w := outbox.NewWorker(store, sender, zerolog.Nop(), outbox.Options{
+		BatchSize:    10,
+		PollInterval: 20 * time.Millisecond,
+		MaxBackoff:   30 * time.Millisecond,
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = w.Run(ctx) }()
+	defer cancel()
+
+	waitUntil(t, 2*time.Second, func() bool { return calls.Load() >= 1 })
+	// The row never gets a non-empty log_id and is never marked sent.
+	waitUntil(t, 2*time.Second, func() bool {
+		var logID string
+		var sentAt *int64
+		row := db.DBX().QueryRowContext(context.Background(),
+			`SELECT COALESCE(log_id, ''), sent_at_ms FROM outbox_events WHERE id = ?`, id)
+		if scanErr := row.Scan(&logID, &sentAt); scanErr != nil {
+			return false
+		}
+		return logID == "" && sentAt == nil
+	})
+}
+
 // enqueueVersioned is a variant of enqueuePayload that lets the
 // caller pick the schema version stamped on the outbox row. Used by
 // the dual-lane routing test only — the other tests use

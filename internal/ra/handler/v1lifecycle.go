@@ -2,12 +2,18 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/ra/service"
+)
+
+const (
+	maxCommentsLength = 200
 )
 
 // V1LifecycleHandler groups the V1 post-registration transitions:
@@ -18,12 +24,13 @@ import (
 // (or the revoke equivalent) on the service call so state
 // transitions enqueue V1 envelopes to `/v1/internal/agents/event`.
 type V1LifecycleHandler struct {
+	responder
 	svc *service.RegistrationService
 }
 
 // NewV1LifecycleHandler constructs a V1LifecycleHandler.
-func NewV1LifecycleHandler(svc *service.RegistrationService) *V1LifecycleHandler {
-	return &V1LifecycleHandler{svc: svc}
+func NewV1LifecycleHandler(svc *service.RegistrationService, logger zerolog.Logger) *V1LifecycleHandler {
+	return &V1LifecycleHandler{responder: newResponder(logger), svc: svc}
 }
 
 // v1AgentStatusResponse is the V1 shape returned from verify-acme /
@@ -89,7 +96,7 @@ func (h *V1LifecycleHandler) VerifyACME(w http.ResponseWriter, r *http.Request) 
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyACME(r.Context(), agentID, service.VerifyInput{SchemaVersion: "V1"})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, v1AgentStatusResponse{
@@ -112,7 +119,7 @@ func (h *V1LifecycleHandler) VerifyDNS(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyDNS(r.Context(), agentID, service.VerifyInput{SchemaVersion: "V1"})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	if len(res.DNSMismatches) > 0 {
@@ -141,11 +148,17 @@ func (h *V1LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KiB
 	var req v1RevocationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
 		return
 	}
 	if req.Reason == "" {
-		WriteError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		h.writeError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		return
+	}
+
+	if len(req.Comments) > maxCommentsLength {
+		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
+			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
 	}
 
@@ -156,7 +169,7 @@ func (h *V1LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		SchemaVersion: "V1",
 	})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 

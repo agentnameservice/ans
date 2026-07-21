@@ -79,6 +79,51 @@ func (s *OutboxStore) Enqueue(
 	return id, nil
 }
 
+// RecordSealed inserts an outbox row that is ALREADY delivered: both
+// sent_at_ms and log_id are set at insert time, so the row is never
+// visible to Claim (which selects `sent_at_ms IS NULL`) and the worker
+// never re-sends it. It exists for events sealed INLINE
+// (seal-before-success — agent activation): the TL has already acked the
+// append and returned logId, but the agent-events feed is a read model
+// over delivered outbox rows (`sent_at_ms IS NOT NULL AND log_id IS NOT
+// NULL`, migration 006), so without this row an inline-sealed event
+// would never surface on GET /v1/agents/events and the Finder would
+// never discover the agent. Called inside the activation transaction so
+// feed visibility commits atomically with the ACTIVE status.
+func (s *OutboxStore) RecordSealed(
+	ctx context.Context,
+	eventType, agentID, schemaVersion string,
+	payload []byte,
+	logID string,
+) (int64, error) {
+	if len(payload) == 0 {
+		return 0, errors.New("sqlite/outbox: payload is empty")
+	}
+	if logID == "" {
+		return 0, errors.New("sqlite/outbox: logID is empty — a sealed row must carry the TL ack's logId")
+	}
+	switch schemaVersion {
+	case "V1", "V2":
+	default:
+		return 0, fmt.Errorf("sqlite/outbox: invalid schemaVersion %q (want V1 or V2)", schemaVersion)
+	}
+	const q = `
+        INSERT INTO outbox_events(event_type, agent_id, schema_version, payload_json,
+            next_attempt_at_ms, created_at_ms, sent_at_ms, log_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+	now := time.Now().UnixMilli()
+	res, err := s.db.extx(ctx).ExecContext(ctx, q, eventType, agentID, schemaVersion, string(payload),
+		now, now, now, logID)
+	if err != nil {
+		return 0, mapSQLErr(err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
+
 // Claim returns up to batchSize pending outbox events whose
 // next_attempt_at_ms has passed. Callers process each event and then
 // call MarkSent or MarkFailed. There is no explicit lease — we rely on
@@ -118,11 +163,19 @@ func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, 
 	return out, rows.Err()
 }
 
-// MarkSent records that the event was successfully delivered.
-func (s *OutboxStore) MarkSent(ctx context.Context, id int64) error {
+// MarkSent records that the event was successfully delivered, writing
+// the TL-assigned logId and the send timestamp in a single UPDATE so a
+// row never appears delivered without its logId. The agent-events feed
+// gates on both columns being non-NULL, so this atomicity is what makes
+// "row is in the feed" imply "row has a resolvable receipt".
+//
+// logID is the value the TL echoed in its ingest response
+// (AppendResult.LogID). It is also echoed on idempotent duplicate
+// retries, so a re-delivered row records the same logId.
+func (s *OutboxStore) MarkSent(ctx context.Context, id int64, logID string) error {
 	_, err := s.db.db.ExecContext(ctx,
-		`UPDATE outbox_events SET sent_at_ms = ? WHERE id = ?`,
-		time.Now().UnixMilli(), id)
+		`UPDATE outbox_events SET sent_at_ms = ?, log_id = ? WHERE id = ?`,
+		time.Now().UnixMilli(), logID, id)
 	return mapSQLErr(err)
 }
 

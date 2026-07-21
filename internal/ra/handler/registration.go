@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/rs/zerolog"
+
 	"github.com/godaddy/ans/internal/adapter/auth"
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/ra/service"
@@ -12,12 +14,13 @@ import (
 // RegistrationHandler wires HTTP routes for POST /v2/ans/agents and
 // the related verify-* endpoints.
 type RegistrationHandler struct {
+	responder
 	svc *service.RegistrationService
 }
 
 // NewRegistrationHandler constructs a RegistrationHandler.
-func NewRegistrationHandler(svc *service.RegistrationService) *RegistrationHandler {
-	return &RegistrationHandler{svc: svc}
+func NewRegistrationHandler(svc *service.RegistrationService, logger zerolog.Logger) *RegistrationHandler {
+	return &RegistrationHandler{responder: newResponder(logger), svc: svc}
 }
 
 // registrationRequest is the V2 POST /v2/ans/agents body as JSON.
@@ -127,32 +130,32 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	var req registrationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
 		return
 	}
 
 	// Extract identity from context.
 	id, ok := auth.IdentityFromContext(r.Context())
 	if !ok {
-		WriteError(w, domain.NewUnauthorizedError("NO_IDENTITY", "authentication required"))
+		h.writeError(w, domain.NewUnauthorizedError("NO_IDENTITY", "authentication required"))
 		return
 	}
 
 	// Parse version + host into an AnsName.
 	semver, err := domain.ParseSemVer(req.Version)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	ansName, err := domain.NewAnsName(semver, req.AgentHost)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
 	eps, err := mapEndpointsFromDTO(req.Endpoints)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
@@ -169,7 +172,7 @@ func (h *RegistrationHandler) Register(w http.ResponseWriter, r *http.Request) {
 		DiscoveryProfiles:         toDomainDiscoveryProfiles(req.DiscoveryProfiles),
 	})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 

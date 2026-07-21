@@ -9,8 +9,10 @@ import (
 )
 
 const (
-	maxFunctionTags = 20
-	maxTagLength    = 20
+	maxFunctionTags       = 5
+	maxTagLength          = 20
+	maxFunctionIDLength   = 64
+	maxFunctionNameLength = 64
 	// maxMetadataURLLength bounds the operator-supplied metadataUrl. It
 	// is emitted verbatim as the DNSAID `cap` SvcParam and embedded in the
 	// signed TL attestation, so an unbounded value would bloat the
@@ -29,12 +31,26 @@ type AgentFunction struct {
 
 // Validate checks that the function has valid fields.
 func (f AgentFunction) Validate() error {
+	if len(f.ID) > maxFunctionIDLength {
+		return NewValidationError(
+			"INVALID_FUNCTION",
+			fmt.Sprintf("function id length %d exceeds %d characters", len(f.ID), maxFunctionIDLength),
+		)
+	}
 	if strings.TrimSpace(f.ID) == "" {
 		return NewValidationError("INVALID_FUNCTION", "function id cannot be blank")
+	}
+
+	if len(f.Name) > maxFunctionNameLength {
+		return NewValidationError(
+			"INVALID_FUNCTION",
+			fmt.Sprintf("function name length %d exceeds %d characters", len(f.Name), maxFunctionNameLength),
+		)
 	}
 	if strings.TrimSpace(f.Name) == "" {
 		return NewValidationError("INVALID_FUNCTION", "function name cannot be blank")
 	}
+
 	for _, tag := range f.Tags {
 		if len(tag) > maxTagLength {
 			return NewValidationError(

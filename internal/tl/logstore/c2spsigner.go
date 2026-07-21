@@ -101,30 +101,5 @@ func (s *C2SPECDSASigner) Sign(msg []byte) ([]byte, error) {
 	return rawSig, nil
 }
 
-// VerifyC2SPECDSA verifies an ASN.1 DER ECDSA signature over
-// SHA-256 of the given checkpoint body. Used by the checkpoint-read
-// path to set `valid` on C2SP signature entries.
-//
-// Legacy local-dev checkpoints were emitted as IEEE P1363 r||s
-// signatures, so verification accepts that form as a compatibility
-// fallback. New checkpoint signatures should be DER.
-func VerifyC2SPECDSA(pub *ecdsa.PublicKey, body, sig []byte) bool {
-	if pub == nil || pub.Curve == nil || len(sig) == 0 {
-		return false
-	}
-	digest := sha256.Sum256(body)
-	if ecdsa.VerifyASN1(pub, digest[:], sig) {
-		return true
-	}
-	if len(sig) != 2*anscrypto.CoordinateBytes(pub) {
-		return false
-	}
-	r, s, err := anscrypto.P1363ToScalars(sig)
-	if err != nil {
-		return false
-	}
-	return ecdsa.Verify(pub, digest[:], r, s)
-}
-
 // Compile-time check that C2SPECDSASigner satisfies note.Signer.
 var _ note.Signer = (*C2SPECDSASigner)(nil)

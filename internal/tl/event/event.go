@@ -38,6 +38,7 @@ import (
 	"time"
 
 	anscrypto "github.com/godaddy/ans/internal/crypto"
+	"github.com/godaddy/ans/internal/domain"
 )
 
 // SchemaVersion pins the envelope version. "V2" because our V2 RA
@@ -278,6 +279,9 @@ func (ev *Event) Validate() error {
 	}
 	if _, err := time.Parse(time.RFC3339, ev.Timestamp); err != nil {
 		return fmt.Errorf("event: timestamp must be RFC3339: %w", err)
+	}
+	if ev.RevocationReasonCode != "" && !domain.RevocationReason(ev.RevocationReasonCode).IsValid() {
+		return fmt.Errorf("event: invalid revocationReasonCode %q", ev.RevocationReasonCode)
 	}
 	return nil
 }

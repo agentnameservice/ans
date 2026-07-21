@@ -1,21 +1,19 @@
 package service
 
 import (
-	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
 	"math"
 	"strings"
 	"time"
 
 	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
 	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/tl/logstore"
+	"github.com/godaddy/ans/internal/lognote"
 )
 
 // CheckpointService wraps the checkpoint store to produce the shapes
@@ -194,41 +192,71 @@ func (s *CheckpointService) viewFromRecord(rec *sqlitetl.CheckpointRecord) *Chec
 	if raw, err := hex.DecodeString(rec.TreeHashHex); err == nil {
 		cv.RootHashBase64 = base64.StdEncoding.EncodeToString(raw)
 	}
-	cv.CheckpointText, cv.Signatures = splitNoteBody(rec.CheckpointRaw, rec.Origin)
+	cv.CheckpointText, cv.Signatures = checkpointSignatureViews(rec.CheckpointRaw, rec.Origin)
 	s.enrichSignatures(cv.CheckpointText, cv.Signatures)
 	return cv
 }
+
+// checkpointSignatureViews splits a stored checkpoint note into its
+// body text and a CheckpointSignatureView per signature line, using the
+// canonical parser in internal/lognote. The signer name falls back to
+// the note origin when the line carried none; the key hash is the
+// production "0x"-prefixed 8-char hex form; the type is the lowercase
+// "c2sp"/"jws" label. No cryptographic verification happens here —
+// enrichSignatures fills in Valid afterward.
+func checkpointSignatureViews(raw, origin string) (string, []CheckpointSignatureView) {
+	body, sigs, found := lognote.SplitNote([]byte(raw))
+	if !found {
+		return raw, nil
+	}
+	if len(sigs) == 0 {
+		return string(body), nil
+	}
+	views := make([]CheckpointSignatureView, 0, len(sigs))
+	for _, sig := range sigs {
+		name := sig.Name
+		if name == "" {
+			name = origin
+		}
+		keyHash := ""
+		if kh := sig.KeyHashHex(); kh != "" {
+			keyHash = "0x" + kh
+		}
+		views = append(views, CheckpointSignatureView{
+			SignerName:    name,
+			SignatureType: sig.Classify().String(),
+			Algorithm:     algES256,
+			KeyHash:       keyHash,
+			RawSignature:  sig.Raw,
+		})
+	}
+	return string(body), views
+}
+
+// algES256 is the only algorithm we (or the reference) ever emit on a
+// checkpoint signature line. The signature classification labels
+// themselves live in internal/lognote (SigType.String()).
+const algES256 = "ES256"
 
 // enrichSignatures fills in the per-signature verification state and
 // (for JWS signatures) the decoded header + payload + timestamp.
 // Runs per-checkpoint, not per-request-per-signature, so the cost is
 // amortized at page-render time.
 //
-// For the primary (sumdb-note) signer: verify the signature block
-// against the configured ECDSA verifier over the checkpoint body.
-//
-// Signature classification labels — match the reference TL wire and
-// the production /v1/log/checkpoint response. Lowercase by design.
-const (
-	sigTypeC2SP = "c2sp"
-	sigTypeJWS  = "jws"
-
-	// algES256 is the only algorithm we (or the reference) ever emit
-	// on a checkpoint signature line. Hardcoded here so callers don't
-	// need to thread it through classifySumdbSig.
-	algES256 = "ES256"
-)
-
-// For the additional JWS signer: the base64 payload decodes into a
-// compact JWS ("header.payload.signature"), which we decode for
-// client consumption and re-verify against the configured ECDSA key.
+// For the primary (sumdb-note) signer it verifies the signature block
+// against the configured ECDSA verifier over the checkpoint body; for
+// the additional JWS signer it decodes the compact JWS and verifies
+// that. The switch keys off the lognote signature-type labels; the
+// default arm leaves any future type un-enriched (Valid stays false)
+// rather than misverifying it.
 func (s *CheckpointService) enrichSignatures(body string, sigs []CheckpointSignatureView) {
 	for i := range sigs {
 		switch sigs[i].SignatureType {
-		case sigTypeJWS:
+		case lognote.SigTypeJWS.String():
 			s.enrichJWSSignature(&sigs[i])
-		case sigTypeC2SP:
+		case lognote.SigTypeC2SP.String():
 			s.enrichC2SPSignature(body, &sigs[i])
+		default:
 		}
 	}
 }
@@ -237,8 +265,8 @@ func (s *CheckpointService) enrichSignatures(body string, sigs []CheckpointSigna
 // configured signing key. The signature line's base64 body is
 // `<keyhash:4><ecdsa-der-sig>` for current checkpoints; legacy local
 // dev checkpoints may still carry P1363 bytes. We hand the signature
-// bytes to logstore.VerifyC2SPECDSA which re-hashes the checkpoint
-// body and handles both encodings.
+// bytes to lognote.VerifyC2SPECDSA which re-hashes the checkpoint body
+// and handles both encodings.
 func (s *CheckpointService) enrichC2SPSignature(body string, sv *CheckpointSignatureView) {
 	if s.signingKey == nil {
 		return
@@ -247,7 +275,7 @@ func (s *CheckpointService) enrichC2SPSignature(body string, sv *CheckpointSigna
 	if err != nil || len(raw) < 4 {
 		return
 	}
-	sv.Valid = logstore.VerifyC2SPECDSA(s.signingKey, []byte(body), raw[4:])
+	sv.Valid = lognote.VerifyC2SPECDSA(s.signingKey, []byte(body), raw[4:])
 }
 
 // enrichJWSSignature decodes the additional-signer's compact JWS —
@@ -308,103 +336,4 @@ func treeHeight(size uint64) int {
 		return 0
 	}
 	return int(math.Ceil(math.Log2(float64(size))))
-}
-
-// splitNoteBody separates the note's data section from its signature
-// lines. sumdb-note format: header line(s), empty line, one or more
-// `— <name> <base64>` signature lines. We surface:
-//
-//   - checkpointText: the body up to (and including) the blank line,
-//     so a verifier can re-hash it.
-//   - signatures: one entry per signature line parsed into
-//     {signerName, rawSignature}.
-//
-// This doesn't re-verify anything — it just decomposes the stored
-// text into fields the REST response wants. Consumers that need
-// cryptographic verification should use the ECDSA verifier served
-// from /root-keys.
-func splitNoteBody(raw, origin string) (string, []CheckpointSignatureView) {
-	// The sumdb-note separator per golang.org/x/mod/sumdb/note is
-	// the LITERAL string "\n\n" — first blank line ends the body.
-	sepIdx := strings.Index(raw, "\n\n")
-	if sepIdx < 0 {
-		return raw, nil
-	}
-	text := raw[:sepIdx+1] // include trailing newline of last body line
-	sigBlock := raw[sepIdx+2:]
-
-	var sigs []CheckpointSignatureView
-	for _, line := range strings.Split(strings.TrimRight(sigBlock, "\n"), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		// Format per note package: "\u2014 <name> <base64-sig>\n"
-		// The Unicode em-dash is U+2014. strings.HasPrefix against it
-		// keeps the parser tight without importing the note package.
-		const prefix = "\u2014 "
-		if !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		rest := line[len(prefix):]
-		// rest = "<name> <base64>"
-		space := strings.LastIndex(rest, " ")
-		if space < 0 {
-			continue
-		}
-		sigs = append(sigs, CheckpointSignatureView{
-			SignerName:    rest[:space],
-			SignatureType: classifySumdbSig(rest[space+1:]),
-			Algorithm:     algES256,
-			KeyHash:       keyhashFromSumdbSig(rest[space+1:]),
-			RawSignature:  rest[space+1:],
-		})
-	}
-	// If we never parsed a signer name, fall back to the origin.
-	for i := range sigs {
-		if sigs[i].SignerName == "" {
-			sigs[i].SignerName = origin
-		}
-	}
-	return text, sigs
-}
-
-// keyhashFromSumdbSig extracts the 4-byte keyhash prefix from a
-// sumdb-note signature's base64 blob. The note package prefixes
-// every signature with the same 4 bytes advertised in the verifier
-// line, so verifiers can match the signature back to the key that
-// produced it (O(1) kid lookup, same idea as our COSE receipts).
-//
-// Returns the `0x`-prefixed 8-char hex form, matching the reference
-// TL's production wire format, or "" on any decode error.
-func keyhashFromSumdbSig(b64 string) string {
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(raw) < 4 {
-		return ""
-	}
-	return fmt.Sprintf("0x%08x", binary.BigEndian.Uint32(raw[:4]))
-}
-
-// classifySumdbSig distinguishes the primary C2SP ECDSA signature
-// from the JWS additional-signer signature. Both share the sumdb-note
-// `— origin base64` line framing.
-//
-// Detection: after the 4-byte keyhash prefix, a JWS starts with the
-// base64 of `{"alg":` — which in URL-safe base64 is `eyJhbGciOi`.
-// The primary C2SP signature is ASN.1 DER ECDSA, so that JWS prefix
-// will not appear. Misclassification risk is ~1 in 2^80.
-//
-// Labels match the reference TL production wire: lowercase
-// "c2sp" / "jws".
-func classifySumdbSig(b64 string) string {
-	raw, err := base64.StdEncoding.DecodeString(b64)
-	if err != nil || len(raw) < 4+10 {
-		return sigTypeC2SP
-	}
-	body := raw[4:] // skip keyhash prefix
-	// `{"alg":` base64url = "eyJhbGciOi"
-	if bytes.HasPrefix(body, []byte("eyJhbGciOi")) {
-		return sigTypeJWS
-	}
-	return sigTypeC2SP
 }

@@ -186,7 +186,28 @@ func (w *Worker) process(ctx context.Context, ev *sqlite.OutboxEvent) {
 		return
 	}
 
-	if markErr := w.store.MarkSent(ctx, ev.ID); markErr != nil {
+	if res.LogID == "" {
+		// The TL accepted the event but returned no logId. A
+		// compliant ans-tl always echoes one (including on duplicate
+		// retries), but an older or reference-shaped TL can answer 201
+		// with the logId field omitted. Persisting an empty logId
+		// would defeat the feed gate (`log_id IS NOT NULL` would still
+		// pass on ""), surface `"logId":""` to consumers — which fails
+		// their EventItem.Validate() — and, if that row is last on a
+		// page, reset the client cursor to the stream head. Treat it as
+		// a delivery anomaly: leave the row pending (NOT marked sent)
+		// and retry with backoff. The TL dedupes on content hash, so a
+		// later retry against a fixed TL records the real logId without
+		// duplicating the leaf.
+		log.Error().
+			Uint64("leafIndex", res.LeafIndex).
+			Bool("duplicate", res.Duplicate).
+			Msg("TL accepted event but returned empty logId; row kept pending for retry")
+		w.markFailed(ctx, ev, "TL returned empty logId")
+		return
+	}
+
+	if markErr := w.store.MarkSent(ctx, ev.ID, res.LogID); markErr != nil {
 		// Rare: the TL accepted the event but we couldn't update
 		// the outbox row. Next tick will re-send, and the TL will
 		// reply 200 OK (duplicate) since event_hash dedups. Still

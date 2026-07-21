@@ -3,10 +3,12 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/rs/zerolog"
 
 	"github.com/godaddy/ans/internal/domain"
 	"github.com/godaddy/ans/internal/port"
@@ -17,6 +19,7 @@ import (
 // (reads) and verify-acme/verify-dns/revoke (writes). All agent-scoped
 // routes assume the ownership middleware has already run.
 type LifecycleHandler struct {
+	responder
 	svc *service.RegistrationService
 	// identities, when set, decorates agent detail responses with the
 	// computed identities[] view (design §5.4) — the verified
@@ -26,8 +29,8 @@ type LifecycleHandler struct {
 }
 
 // NewLifecycleHandler constructs a LifecycleHandler.
-func NewLifecycleHandler(svc *service.RegistrationService) *LifecycleHandler {
-	return &LifecycleHandler{svc: svc}
+func NewLifecycleHandler(svc *service.RegistrationService, logger zerolog.Logger) *LifecycleHandler {
+	return &LifecycleHandler{responder: newResponder(logger), svc: svc}
 }
 
 // WithIdentityViews attaches the identity service used to compute the
@@ -44,7 +47,7 @@ func (h *LifecycleHandler) WithIdentityViews(identities *service.IdentityService
 func (h *LifecycleHandler) List(w http.ResponseWriter, r *http.Request) {
 	id, ok := identityFromRequest(r)
 	if !ok {
-		WriteError(w, domain.NewUnauthorizedError("NO_IDENTITY", "authentication required"))
+		h.writeError(w, domain.NewUnauthorizedError("NO_IDENTITY", "authentication required"))
 		return
 	}
 
@@ -62,7 +65,14 @@ func (h *LifecycleHandler) List(w http.ResponseWriter, r *http.Request) {
 				filter.Statuses = nil
 				break
 			}
-			filter.Statuses = append(filter.Statuses, domain.RegistrationStatus(s))
+			switch domain.RegistrationStatus(s) {
+			case domain.StatusPendingDNS, domain.StatusActive, domain.StatusDeprecated, domain.StatusRevoked:
+				filter.Statuses = append(filter.Statuses, domain.RegistrationStatus(s))
+			default:
+				WriteError(w, domain.NewValidationError("INVALID_STATUS",
+					"status must be one of PENDING_DNS, ACTIVE, DEPRECATED, REVOKED, ALL"))
+				return
+			}
 		}
 	} else {
 		filter.Statuses = []domain.RegistrationStatus{domain.StatusActive}
@@ -72,7 +82,7 @@ func (h *LifecycleHandler) List(w http.ResponseWriter, r *http.Request) {
 	if lv := q.Get("limit"); lv != "" {
 		n, err := strconv.Atoi(lv)
 		if err != nil || n < 1 || n > 100 {
-			WriteError(w, domain.NewValidationError(
+			h.writeError(w, domain.NewValidationError(
 				"INVALID_LIMIT", "limit must be between 1 and 100",
 			))
 			return
@@ -84,7 +94,7 @@ func (h *LifecycleHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	res, err := h.svc.List(r.Context(), id.Subject, filter)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mapListResponse(res))
@@ -100,7 +110,7 @@ func (h *LifecycleHandler) Detail(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.GetByAgentID(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	details := mapAgentDetails(res, r, h.svc)
@@ -122,7 +132,7 @@ func (h *LifecycleHandler) GetIdentityCerts(w http.ResponseWriter, r *http.Reque
 	agentID := chi.URLParam(r, "agentId")
 	certs, err := h.svc.IdentityCertificates(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	out := make([]certificateResponse, 0, len(certs))
@@ -142,7 +152,7 @@ func (h *LifecycleHandler) GetServerCerts(w http.ResponseWriter, r *http.Request
 	agentID := chi.URLParam(r, "agentId")
 	certs, err := h.svc.ServerCertificates(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	out := make([]certificateResponse, 0, len(certs))
@@ -192,16 +202,16 @@ func (h *LifecycleHandler) submitCSR(
 	r.Body = http.MaxBytesReader(w, r.Body, 32*1024)
 	var req csrSubmissionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
 		return
 	}
 	if req.CsrPEM == "" {
-		WriteError(w, domain.NewValidationError("MISSING_CSR_PEM", "csrPEM is required"))
+		h.writeError(w, domain.NewValidationError("MISSING_CSR_PEM", "csrPEM is required"))
 		return
 	}
 	csrID, err := submit(r.Context(), agentID, req.CsrPEM)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, csrSubmissionResponse{
@@ -221,7 +231,7 @@ func (h *LifecycleHandler) GetCSRStatus(w http.ResponseWriter, r *http.Request) 
 	csrID := chi.URLParam(r, "csrId")
 	csr, err := h.svc.GetCSRStatus(r.Context(), agentID, csrID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mapCSRStatus(csr))
@@ -239,7 +249,7 @@ func (h *LifecycleHandler) SubmitServerCertRenewal(w http.ResponseWriter, r *htt
 	r.Body = http.MaxBytesReader(w, r.Body, 256*1024) // CSR+chain can be several KB
 	var req serverCertRenewalRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid JSON body: "+err.Error()))
 		return
 	}
 	res, err := h.svc.SubmitServerCertRenewal(r.Context(), agentID, service.SubmitRenewalInput{
@@ -248,7 +258,7 @@ func (h *LifecycleHandler) SubmitServerCertRenewal(w http.ResponseWriter, r *htt
 		ServerCertificateChainPEM: req.ServerCertificateChainPEM,
 	})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, mapRenewalSubmission(agentID, res))
@@ -264,7 +274,7 @@ func (h *LifecycleHandler) GetServerCertRenewal(w http.ResponseWriter, r *http.R
 	agentID := chi.URLParam(r, "agentId")
 	ren, err := h.svc.GetServerCertRenewal(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, mapRenewalStatus(agentID, ren))
@@ -278,7 +288,7 @@ func (h *LifecycleHandler) GetServerCertRenewal(w http.ResponseWriter, r *http.R
 func (h *LifecycleHandler) CancelServerCertRenewal(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	if err := h.svc.CancelServerCertRenewal(r.Context(), agentID); err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -294,7 +304,7 @@ func (h *LifecycleHandler) VerifyRenewalACME(w http.ResponseWriter, r *http.Requ
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyRenewalACME(r.Context(), agentID)
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	status := http.StatusAccepted
@@ -315,7 +325,7 @@ func (h *LifecycleHandler) VerifyACME(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyACME(r.Context(), agentID, service.VerifyInput{})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusAccepted, agentStatus{
@@ -336,7 +346,7 @@ func (h *LifecycleHandler) VerifyDNS(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
 	res, err := h.svc.VerifyDNS(r.Context(), agentID, service.VerifyInput{})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 
@@ -370,11 +380,18 @@ func (h *LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 
 	var req revocationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		WriteError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
+		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
 		return
 	}
+
 	if req.Reason == "" {
-		WriteError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		h.writeError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		return
+	}
+
+	if len(req.Comments) > maxCommentsLength {
+		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
+			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
 	}
 
@@ -384,7 +401,7 @@ func (h *LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		Comments: req.Comments,
 	})
 	if err != nil {
-		WriteError(w, err)
+		h.writeError(w, err)
 		return
 	}
 

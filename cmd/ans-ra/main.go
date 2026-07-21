@@ -99,6 +99,7 @@ func run(cfgPath string) error {
 	byoc := sqlite.NewByocCertificateStore(db)
 	renewals := sqlite.NewRenewalStore(db)
 	outbox := sqlite.NewOutboxStore(db)
+	feedStore := sqlite.NewFeedStore(db, cfg.EventsFeed.Retention)
 	identityStore := sqlite.NewIdentityStore(db)
 	identityLinks := sqlite.NewIdentityLinkStore(db)
 
@@ -199,6 +200,25 @@ func run(cfgPath string) error {
 		Strs("profiles", profileIDStrings(discoveryReg.IDs())).
 		Msg("discovery registry ready")
 
+	// One TL client serves both seal-before-success lanes — agent
+	// ACTIVATION (verify-dns) and identity ops. Both seal SYNCHRONOUSLY
+	// (design §5.6.1; ANS-1 §12.3 for agents): the event is durable in the
+	// log before the operation reports success, so neither rides the
+	// outbox. A disabled TL client leaves the sealer nil and both lanes
+	// fail closed with TL_UNAVAILABLE — there is no "seal later" mode for
+	// an ACTIVE transition. (Revocation still rides the async outbox; the
+	// worker below holds its own client.)
+	//
+	// The sealer is kept as a concrete *tlclient.Client and only assigned
+	// into the interfaces when non-nil, so the services' `sealer == nil`
+	// fail-closed checks aren't defeated by a typed-nil interface.
+	var tlSealer *tlclient.Client
+	if !cfg.TLClient.Disabled {
+		tlSealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout).WithLogger(logger)
+	} else {
+		logger.Warn().Msg("TL client disabled — agent activation and identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
+	}
+
 	// Services.
 	regSvc := service.NewRegistrationService(
 		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
@@ -208,20 +228,23 @@ func run(cfgPath string) error {
 		RaID:       cfg.Signer.RaID,
 	}).WithDNSVerifier(dnsVerifier).
 		WithHTTPChallengeVerifier(challenge.NewHTTPVerifier()).
-		WithServerCertificateIssuer(serverCA)
+		WithServerCertificateIssuer(serverCA).
+		WithTLPublicBaseURL(cfg.TLClient.PublicBaseURL).
+		WithLogger(logger)
+	if tlSealer != nil {
+		regSvc = regSvc.WithAgentSealer(tlSealer)
+	}
+
+	// Events feed service — projects delivered outbox rows into the
+	// public agent-events stream.
+	eventsSvc := service.NewEventsService(feedStore)
 
 	// Verified identities — the "who" behind the agents. Shares the
-	// producer signer with the registration service: one RA, one
-	// producer identity on every TL lane. Identity events seal
-	// SYNCHRONOUSLY (seal-before-success, design §5.6.1): they never
-	// ride the outbox, so the service gets the TL client directly. A
-	// disabled TL client means identity sealing operations fail
-	// closed with TL_UNAVAILABLE — there is no "seal later" mode.
+	// producer signer and the TL sealer with the registration service:
+	// one RA, one producer identity on every TL lane.
 	var identitySealer service.IdentityEventSealer
-	if !cfg.TLClient.Disabled {
-		identitySealer = tlclient.New(cfg.TLClient.BaseURL, cfg.TLClient.APIKey, cfg.TLClient.Timeout)
-	} else {
-		logger.Warn().Msg("TL client disabled — identity verify/revoke/link operations will fail with TL_UNAVAILABLE (seal-before-success)")
+	if tlSealer != nil {
+		identitySealer = tlSealer
 	}
 	identitySvc := service.NewIdentityService(
 		identityStore, identityLinks, agents, didResolver, identitySealer, leiVerifier, db,
@@ -244,6 +267,17 @@ func run(cfgPath string) error {
 	// of whether a proxy set them), and nothing in this service reads
 	// RemoteAddr — no request logger, no rate limiter, no IP audit.
 	r.Use(middleware.Timeout(30 * time.Second))
+	// Stop browsers/proxies from MIME-sniffing responses away from
+	// their declared Content-Type. Cheap defense-in-depth; matters most
+	// on the anonymous /v1/agents/events feed, which serves
+	// attacker-influenceable JSON (agent-supplied display names, URLs)
+	// to unauthenticated clients.
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			next.ServeHTTP(w, req)
+		})
+	})
 	r.Use(middleware.AllowContentType("application/json"))
 	r.Use(authProvider.Middleware())
 
@@ -259,7 +293,7 @@ func run(cfgPath string) error {
 
 	// Registration (no ownership middleware — POST creates a new agent
 	// and the caller must be able to register their own).
-	regH := handler.NewRegistrationHandler(regSvc)
+	regH := handler.NewRegistrationHandler(regSvc, logger)
 	r.Post("/v2/ans/agents", regH.Register)
 
 	// Agent-scoped routes — ownership middleware gates every one. The
@@ -268,13 +302,25 @@ func run(cfgPath string) error {
 	// routes (GET) 404 on not-owned to hide existence; write routes
 	// (POST) 403 so authenticated operators understand it's an
 	// authorization failure (spec §26, §370).
-	lifeH := handler.NewLifecycleHandler(regSvc).WithIdentityViews(identitySvc)
+	lifeH := handler.NewLifecycleHandler(regSvc, logger).WithIdentityViews(identitySvc)
 	r.Get("/v2/ans/agents", lifeH.List)
 
 	readOwnership := ramiddleware.ReadOwnership(agents)
 	writeOwnership := ramiddleware.WriteOwnership(agents)
 
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}", lifeH.Detail)
+
+	// AI Catalog (owner-scoped, read-only). The bare CatalogEntry is the
+	// registrant's own view of how their agent appears in a catalog; it
+	// is NOT public — the crawlable surface is the population export
+	// (later slice) and the AHP-published well-known document.
+	catH := handler.NewCatalogHandler(regSvc, logger)
+	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/catalog-entry", catH.CatalogEntry)
+	// Host-complete AI Catalog document (the file the AHP publishes at
+	// /.well-known/ai-catalog.json). Owner-scoped, served as
+	// application/ai-catalog+json with ETag/304.
+	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/ai-catalog", catH.HostCatalog)
+
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/certificates/identity", lifeH.GetIdentityCerts)
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/certificates/server", lifeH.GetServerCerts)
 	r.With(readOwnership).Get("/v2/ans/agents/{agentId}/csrs/{csrId}/status", lifeH.GetCSRStatus)
@@ -310,21 +356,34 @@ func run(cfgPath string) error {
 	// spec. Shares the same RegistrationService as the V2 routes;
 	// only the DTO marshalling + TL-emit schema version differ. See
 	// `internal/ra/handler/v1registration.go` and siblings.
-	v1regH := handler.NewV1RegistrationHandler(regSvc)
+	v1regH := handler.NewV1RegistrationHandler(regSvc, logger)
 	r.Post("/v1/agents/register", v1regH.Register)
 	r.With(readOwnership).Get("/v1/agents/{agentId}", v1regH.Detail)
 
 	// V1 lifecycle (verify-acme, verify-dns, revoke). V1 TL emits
 	// AGENT_REGISTERED on successful verify-dns and AGENT_REVOKED on
 	// revoke — the two terminal leaves V1 agents ever receive.
-	v1lifeH := handler.NewV1LifecycleHandler(regSvc)
+	v1lifeH := handler.NewV1LifecycleHandler(regSvc, logger)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/verify-acme", v1lifeH.VerifyACME)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/verify-dns", v1lifeH.VerifyDNS)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/revoke", v1lifeH.Revoke)
 
+	// Public agent-events feed. Anonymous via an EXACT-path exemption
+	// in buildAuth (WithAnonymousExactPath("/v1/agents/events")). The
+	// exemption matches only this exact path — not children, and not
+	// same-prefix siblings — because chi backtracks
+	// /v1/agents/events/<x> onto the authenticated
+	// /v1/agents/{agentId}/<x> routes (agentId="events"); a prefix
+	// exemption would silently disable auth for those write siblings.
+	// chi prefers the static `events` segment over the {agentId}
+	// wildcard, so the GET below does not clash with
+	// /v1/agents/{agentId}.
+	v1eventsH := handler.NewV1EventsHandler(eventsSvc, logger)
+	r.Get("/v1/agents/events", v1eventsH.List)
+
 	// V1 certificate operations. DTOs reuse V2 types (reference spec
 	// shares the schemas); only the URL prefix differs.
-	v1certH := handler.NewV1CertificatesHandler(regSvc)
+	v1certH := handler.NewV1CertificatesHandler(regSvc, logger)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/certificates/identity", v1certH.GetIdentityCerts)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/certificates/server", v1certH.GetServerCerts)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/csrs/{csrId}/status", v1certH.GetCSRStatus)
@@ -332,7 +391,7 @@ func run(cfgPath string) error {
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/certificates/server", v1certH.SubmitServerCSR)
 
 	// V1 server-cert renewal routes.
-	v1renH := handler.NewV1RenewalHandler(regSvc)
+	v1renH := handler.NewV1RenewalHandler(regSvc, logger)
 	r.With(writeOwnership).Post("/v1/agents/{agentId}/certificates/server/renewal", v1renH.SubmitServerCertRenewal)
 	r.With(readOwnership).Get("/v1/agents/{agentId}/certificates/server/renewal", v1renH.GetServerCertRenewal)
 	r.With(writeOwnership).Delete("/v1/agents/{agentId}/certificates/server/renewal", v1renH.CancelServerCertRenewal)
@@ -459,6 +518,12 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithAnonymousPath("/v2/admin/health"),
 			auth.WithAnonymousPath("/v2/admin/ready"),
 			auth.WithAnonymousPath("/docs"),
+			// Public agent-events feed. EXACT match — a subtree
+			// exemption here would also exempt /v1/agents/events/revoke,
+			// which chi backtracks onto the authenticated
+			// /v1/agents/{agentId}/revoke route (agentId="events"),
+			// silently disabling auth for an existing write sibling.
+			auth.WithAnonymousExactPath("/v1/agents/events"),
 		), nil
 	case "oidc":
 		return auth.NewOIDCProvider(
@@ -469,6 +534,10 @@ func buildAuth(ctx context.Context, cfg *config.RAConfig) (providerWithAnonymous
 			auth.WithOIDCAnonymousPath("/v2/admin/health"),
 			auth.WithOIDCAnonymousPath("/v2/admin/ready"),
 			auth.WithOIDCAnonymousPath("/docs"),
+			// Public agent-events feed. EXACT match — see the static
+			// provider's WithAnonymousExactPath above for the
+			// chi-backtracking rationale.
+			auth.WithOIDCAnonymousExactPath("/v1/agents/events"),
 			// Empty AdminGroups means no OIDC user is admin —
 			// preserves prior behaviour for operators who haven't
 			// opted in. Spreading nil/empty into a variadic is the

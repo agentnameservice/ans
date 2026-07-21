@@ -1,0 +1,22 @@
+{
+  "logId": "019a7aee-6666-7b5b-b048-d0b78f4b4c5f",
+  "eventType": "AGENT_REGISTERED",
+  "createdAt": "2025-02-21T08:00:00Z",
+  "expiresAt": "2026-02-21T08:00:00Z",
+  "agentId": "990e8400-e29b-41d4-a716-446655440444",
+  "ansName": "ans://v1.0.0.nameless.example.com",
+  "agentHost": "nameless.example.com",
+  "agentDescription": "Has endpoints but no display name, so no URN label mints",
+  "version": "1.0.0",
+  "providerId": "PC_0000000002",
+  "endpoints": [
+    {
+      "agentUrl": "https://nameless.example.com/mcp",
+      "metaDataUrl": "https://nameless.example.com/.well-known/mcp.json",
+      "protocol": "MCP",
+      "functions": [
+        {"id": "do_thing", "name": "Do Thing", "tags": ["misc"]}
+      ]
+    }
+  ]
+}
