@@ -25,9 +25,10 @@ import (
 //
 // V2 normalization:
 //   - Field absent (nil slice) → defaults to DefaultDiscoveryProfiles()
-//     ({ANS_TXT}). The spec doesn't list discoveryProfiles in
-//     `required`, so omission is legal and the server picks the stable
-//     ANS_TXT default; operators opt into ANS_DNSAID explicitly.
+//     ({ANS_DNSAID}). The spec doesn't list discoveryProfiles in
+//     `required`, so omission is legal and the server picks the DNS-AID
+//     SVCB default; operators with legacy `_ans` zone-edit tooling opt
+//     into ANS_TXT explicitly.
 //   - Field present but empty (`"discoveryProfiles": []`) → also
 //     normalizes to DefaultDiscoveryProfiles(), same as omission. The
 //     spec's `minItems: 1` is the canonical client contract; the server

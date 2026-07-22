@@ -14,6 +14,13 @@
 #   scripts/demo/start.sh --with-dns     # bundled ans-dns + lookup verifier
 #   scripts/demo/start.sh --with-acme    # Let's Encrypt STAGING issues server certs
 #
+#   ANS_DNS_TYPE=lookup ANS_DNS_SERVER=1.1.1.1:53 \
+#     scripts/demo/start.sh              # lookup verifier against real public
+#                                        # DNS — register with a domain you
+#                                        # control, publish the records that
+#                                        # scripts/demo/dns-records.sh prints,
+#                                        # then dns-records.sh --verify
+#
 # --with-acme swaps the server certificate issuer from the demo's
 # self-signed CA to a real RFC 8555 provider (Let's Encrypt staging
 # by default). Registrations then relay the provider's real
@@ -35,6 +42,10 @@
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# The env hand-off file ($DATA/env) is this script's output — never
+# its input. Skip common.sh's sourcing of it so a previous run's DNS
+# verifier mode can't silently re-apply to this run.
+ANS_DEMO_SKIP_ENV=1
 # shellcheck source=common.sh
 source "$SCRIPT_DIR/common.sh"
 
@@ -62,7 +73,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h|--help)
-      sed -n '2,35p' "$0"
+      sed -n '2,42p' "$0"
       exit 0
       ;;
     *) fail "unknown arg: $1" ;;
@@ -127,15 +138,25 @@ else
     fail "this data dir was last run with the '$PRIOR_ISSUER' server issuer but you requested '$CURRENT_ISSUER'; re-run without --keep to start fresh (in-flight orders can't move between issuers)"
   fi
 fi
-# Record the issuer mode for the --keep guard above on the next run.
-echo "$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)" >"$DATA/issuer-mode"
-
-# Refuse to start if the ports already have something on them.
+# Refuse to start if the ports already have something on them. This
+# guard must run before ANY state writes below: a refused start must
+# change nothing, or re-running start.sh against a live stack would
+# clobber the env hand-off file and issuer-mode marker the RUNNING
+# stack's scripts still depend on.
 for url in "$RA_URL/v2/admin/health" "$TL_URL/v2/admin/health" "$FINDER_URL/v1/admin/health"; do
   if curl -sSf "$url" >/dev/null 2>&1; then
     fail "something is already running at $url (run scripts/demo/stop.sh first)"
   fi
 done
+
+# Record the issuer mode for the --keep guard above on the next run.
+echo "$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)" >"$DATA/issuer-mode"
+
+# Reset the per-run env hand-off file. common.sh sources it in every
+# demo script, so whatever this run appends below (ans-dns zone path,
+# DNS verifier mode/server) is what downstream scripts see — stale
+# values from a previous run must not leak into this one.
+: >"$DATA/env"
 
 # ----- RA config -----
 header "Compose RA config"
@@ -243,6 +264,18 @@ log:
 YAML
 ok "wrote $DATA/demo-ra.yaml"
 
+# Persist the DNS verifier mode for downstream scripts: dns-records.sh
+# reads these (via common.sh's env-file sourcing) to point its dig
+# hints at the same server the RA's lookup verifier queries and to
+# tell the operator whether --verify means anything (noop accepts any
+# state).
+if [ "${ANS_DNS_TYPE:-noop}" != "noop" ]; then
+  echo "ANS_DNS_TYPE=$ANS_DNS_TYPE" >>"$DATA/env"
+  if [ -n "${ANS_DNS_SERVER:-}" ]; then
+    echo "ANS_DNS_SERVER=$ANS_DNS_SERVER" >>"$DATA/env"
+  fi
+fi
+
 # ----- start ans-dns (optional, --with-dns) -----
 if [ "$WITH_DNS" -eq 1 ]; then
   header "Start ans-dns"
@@ -256,7 +289,7 @@ if [ "$WITH_DNS" -eq 1 ]; then
   echo "$DNS_PID" >"$DATA/ans-dns.pid"
   # Persist the zone path so run-lifecycle.sh (a separate process)
   # picks it up via common.sh's env-file sourcing.
-  echo "ANS_DNS_ZONE=$ANS_DNS_ZONE" >"$DATA/env"
+  echo "ANS_DNS_ZONE=$ANS_DNS_ZONE" >>"$DATA/env"
   note "logs → $DATA/ans-dns.log (zone=$ANS_DNS_ZONE, addr=127.0.0.1:15353)"
   sleep 1
   ok "ans-dns ready (pid $DNS_PID)"

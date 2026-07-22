@@ -38,13 +38,16 @@ const (
 )
 
 // DefaultDiscoveryProfiles is the set applied when the registration
-// request omits discoveryProfiles entirely. Pinned to {ANS_TXT} — the
-// stable, widely-deployed family — while the DNS-AID profile is brought
-// to conformance; operators opt into ANS_DNSAID explicitly. This also
-// matches the V1 lane, which is always pinned to ANS_TXT. Returned as a
-// fresh slice so callers can mutate without affecting the canonical set.
+// request omits discoveryProfiles entirely. Pinned to {ANS_DNSAID} —
+// the DNS-AID-aligned SVCB family is the forward default now that the
+// profile is at conformance; operators with zone-edit tooling that
+// still targets `_ans.{fqdn}` opt into ANS_TXT explicitly (or publish
+// the union during a §4.4.2 transition). The V1 lane is unaffected:
+// it never consults this default and stays pinned to ANS_TXT in
+// applyDiscoveryProfiles. Returned as a fresh slice so callers can
+// mutate without affecting the canonical set.
 func DefaultDiscoveryProfiles() []DiscoveryProfile {
-	return []DiscoveryProfile{DiscoveryProfileANSTXT}
+	return []DiscoveryProfile{DiscoveryProfileANSDNSAID}
 }
 
 // IsValid reports whether s is one of the defined profiles. Empty
