@@ -90,7 +90,7 @@ type RegisterRequest struct {
 	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// in dnsRecordsProvisioned and tells the operator to publish.
 	// Each element is one of domain.ValidDiscoveryProfiles(); typical
-	// values are {ANS_TXT} (default), {ANS_DNSAID}, or the
+	// values are {ANS_DNSAID} (default), {ANS_TXT}, or the
 	// {ANS_DNSAID, ANS_TXT} transition union. Empty/nil normalizes to
 	// domain.DefaultDiscoveryProfiles(); any invalid element surfaces
 	// as INVALID_DISCOVERY_PROFILE before the aggregate is created.

@@ -44,9 +44,9 @@ type registrationRequest struct {
 
 	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// for this registration. Each element is one of "ANS_DNSAID" or
-	// "ANS_TXT". Typical values: ["ANS_TXT"] (default), ["ANS_DNSAID"],
+	// "ANS_TXT". Typical values: ["ANS_DNSAID"] (default), ["ANS_TXT"],
 	// or ["ANS_DNSAID", "ANS_TXT"] (transition union).
-	// Empty/missing → ["ANS_TXT"]. Any invalid element rejected
+	// Empty/missing → ["ANS_DNSAID"]. Any invalid element rejected
 	// with 422 INVALID_DISCOVERY_PROFILE. See ANS_SPEC.md §4.4.2.
 	DiscoveryProfiles []string `json:"discoveryProfiles,omitempty"`
 }
