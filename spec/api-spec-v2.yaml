@@ -1935,7 +1935,7 @@ components:
             shape) sends both. Order is not significant.
 
             Optional. Omitted (or an explicit empty array) normalizes to
-            the default ["ANS_DNSAID"] server-side; opt into the legacy
+            the default ["ANS_DNSAID"] server-side; opt into the
             ["ANS_TXT"] shape explicitly. The `minItems`/`uniqueItems`
             schema constraints are the canonical client contract for a
             present array — validate before sending. A non-conformant
@@ -1943,6 +1943,14 @@ components:
             handled defensively rather than rejected: empty is treated
             as omitted and duplicates are ignored, but conformant
             clients never send either.
+
+            Required-signal semantics (§4.4.2 transition rule): when
+            ANS_DNSAID is the sole resolved profile, its SVCB rows are
+            returned required: true and verify-dns enforces their
+            presence; when ANS_TXT is also requested, the `_ans` TXT
+            rows carry the required signal and SVCB rows are returned
+            required: false — union registrations do not have SVCB
+            presence enforced until ANS_TXT is dropped.
           example: ["ANS_DNSAID"]
       required:
         - agentDisplayName
@@ -2396,6 +2404,15 @@ components:
         required:
           type: boolean
           default: true
+          description: >-
+            Whether verify-dns enforces this record's presence before
+            activating the agent. false marks best-effort records the
+            operator may be unable to publish (the HTTPS RR on a
+            CNAME-fronted apex, TLSA without a DNSSEC-signed zone) and
+            SVCB rows in a discovery-profile union — per the §4.4.2
+            transition rule the `_ans` TXT rows carry the required
+            signal when ANS_TXT is co-requested, so SVCB is only
+            enforced for sole-ANS_DNSAID registrations.
       required:
         - name
         - type

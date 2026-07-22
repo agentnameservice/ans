@@ -138,6 +138,17 @@ else
     fail "this data dir was last run with the '$PRIOR_ISSUER' server issuer but you requested '$CURRENT_ISSUER'; re-run without --keep to start fresh (in-flight orders can't move between issuers)"
   fi
 fi
+# Refuse to start if the ports already have something on them. This
+# guard must run before ANY state writes below: a refused start must
+# change nothing, or re-running start.sh against a live stack would
+# clobber the env hand-off file and issuer-mode marker the RUNNING
+# stack's scripts still depend on.
+for url in "$RA_URL/v2/admin/health" "$TL_URL/v2/admin/health" "$FINDER_URL/v1/admin/health"; do
+  if curl -sSf "$url" >/dev/null 2>&1; then
+    fail "something is already running at $url (run scripts/demo/stop.sh first)"
+  fi
+done
+
 # Record the issuer mode for the --keep guard above on the next run.
 echo "$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)" >"$DATA/issuer-mode"
 
@@ -146,13 +157,6 @@ echo "$([ "$WITH_ACME" -eq 1 ] && echo acme || echo self)" >"$DATA/issuer-mode"
 # DNS verifier mode/server) is what downstream scripts see — stale
 # values from a previous run must not leak into this one.
 : >"$DATA/env"
-
-# Refuse to start if the ports already have something on them.
-for url in "$RA_URL/v2/admin/health" "$TL_URL/v2/admin/health" "$FINDER_URL/v1/admin/health"; do
-  if curl -sSf "$url" >/dev/null 2>&1; then
-    fail "something is already running at $url (run scripts/demo/stop.sh first)"
-  fi
-done
 
 # ----- RA config -----
 header "Compose RA config"

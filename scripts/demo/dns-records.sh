@@ -105,9 +105,14 @@ resolve_by_name() {
   [ "$LANE" = "v2" ] || fail "name resolution needs the V2 list endpoint; pass a UUID with --v1"
 
   note "resolving $input via GET $AGENT_BASE?agentHost=$host&status=ALL"
-  local list matches count
+  local list matches count err_code
   list=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
     "$RA_URL$AGENT_BASE?agentHost=$host&status=ALL")
+  # RFC 7807 problem documents carry `code`; surface the real API
+  # error (bad key, 500) instead of misreporting it as "no
+  # registration found".
+  err_code=$(printf '%s' "$list" | jq -r '.code // empty')
+  [ -z "$err_code" ] || fail "agent list failed ($err_code): $(printf '%s' "$list" | jq -r '.detail // empty')"
   matches=$(printf '%s' "$list" | jq -c --arg v "$ver" \
     '[.items[]? | select($v == "" or .version == $v)]')
   count=$(printf '%s' "$matches" | jq 'length')
@@ -192,7 +197,7 @@ case "$FLOW" in
     if [ "$LANE" = "v2" ]; then
       note "then: scripts/demo/acme-verify.sh   (issues certs → PENDING_DNS; re-run this script for the production records)"
     else
-      note "then: curl -X POST $RA_URL$AGENT_BASE/$AGENT/verify-acme   (→ PENDING_DNS; re-run this script for the production records)"
+      note "then: curl -X POST -H \"Authorization: Bearer $RA_API_KEY\" $RA_URL$AGENT_BASE/$AGENT/verify-acme   (→ PENDING_DNS; re-run this script for the production records)"
     fi
     [ "$VERIFY" = "1" ] && fail "--verify applies to PENDING_DNS agents; this one still needs verify-acme"
     exit 0
@@ -252,11 +257,13 @@ fi
 RSTATUS=$(printf '%s' "$RESP" | jq -r '.status // empty')
 if [ "$RSTATUS" = "ERROR" ]; then
   warn "required records are not yet live — publish/fix these and re-run:"
-  # missingRecords is a flat dnsRecord list; incorrectRecords nests the
-  # expected record under .record with the live value in .found.
+  # missingRecords is a flat dnsRecord list on both lanes. For
+  # incorrectRecords the lanes differ: V2 nests the expected record
+  # under .record (with the live value in .found); V1 is flat
+  # ({name, type, expected, found}) — the // fallbacks render both.
   printf '%s' "$RESP" | jq -r '
     (.missingRecords[]?   | "  MISSING    \(.type) \(.name) = \(.value)"),
-    (.incorrectRecords[]? | "  INCORRECT  \(.record.type) \(.record.name) (expected \(.expected); live \(.found))")' >&2
+    (.incorrectRecords[]? | "  INCORRECT  \(.record.type // .type) \(.record.name // .name) (expected \(.expected); live \(.found))")' >&2
   fail "verify-dns reported missing/incorrect records"
 fi
 
