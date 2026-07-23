@@ -9,7 +9,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // OIDCProvider validates OAuth2 / OpenID Connect Bearer tokens using

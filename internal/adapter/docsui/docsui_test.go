@@ -13,7 +13,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/godaddy/ans/internal/adapter/docsui"
+	"github.com/agentnameservice/ans/internal/adapter/docsui"
 )
 
 // TestMount_ServesBothRoutes verifies the Mount helper wires both

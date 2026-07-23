@@ -6,9 +6,9 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // RegistrationHandler wires HTTP routes for POST /v2/ans/agents and

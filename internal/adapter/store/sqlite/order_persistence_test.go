@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // seedOrderAgent saves a minimal registration carrying the given

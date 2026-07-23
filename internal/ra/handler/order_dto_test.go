@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 func orderedReg(t *testing.T, state domain.OrderState) *domain.AgentRegistration {

@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/adapter/store/sqlitefinder"
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlitefinder"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // newStore opens an in-memory store for one test and closes it on

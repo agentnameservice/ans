@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // CertificateStore implements port.CertificateStore.

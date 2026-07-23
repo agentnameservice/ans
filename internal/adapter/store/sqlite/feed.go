@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // FeedStore serves the agent-events feed read model: delivered,

@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 func TestBadgeRecord(t *testing.T) {

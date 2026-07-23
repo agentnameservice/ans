@@ -9,11 +9,11 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/store/sqlitefinder"
-	"github.com/godaddy/ans/internal/finder/feed"
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/poller"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlitefinder"
+	"github.com/agentnameservice/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/poller"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // fakeClient serves a scripted sequence of feed pages. Each call to

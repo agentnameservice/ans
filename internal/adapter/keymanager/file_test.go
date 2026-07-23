@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // newKM returns a FileKeyManager rooted in a fresh temp directory.

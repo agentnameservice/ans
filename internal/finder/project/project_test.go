@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/godaddy/ans/internal/finder/feed"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // defaultOpts is the projection config used by golden and most table

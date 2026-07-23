@@ -12,7 +12,7 @@ import (
 	"github.com/transparency-dev/tessera/storage/posix"
 	"golang.org/x/mod/sumdb/note"
 
-	"github.com/godaddy/ans/internal/tl/event"
+	"github.com/agentnameservice/ans/internal/tl/event"
 )
 
 // Config configures the Tessera-backed log.

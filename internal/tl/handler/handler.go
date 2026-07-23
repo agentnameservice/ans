@@ -40,8 +40,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/tl/service"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/service"
 )
 
 // Handlers groups the TL HTTP handlers.

@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 func TestTXTProfile_ID(t *testing.T) {

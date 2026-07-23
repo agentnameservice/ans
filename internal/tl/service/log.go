@@ -17,13 +17,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/transparency-dev/tessera"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/tl/event"
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
-	"github.com/godaddy/ans/internal/tl/logstore"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
+	"github.com/agentnameservice/ans/internal/tl/logstore"
 )
 
 // LogService wires the Tessera appender to the SQLite index and owns

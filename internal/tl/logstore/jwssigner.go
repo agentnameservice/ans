@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // JWSCheckpointSigner appends a standard-JWS signature line to every

@@ -21,8 +21,8 @@ import (
 	"github.com/transparency-dev/tessera/api"
 	"github.com/transparency-dev/tessera/api/layout"
 
-	"github.com/godaddy/ans/internal/lognote"
-	"github.com/godaddy/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/lognote"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // maxResponseBytes caps any single HTTP body the walker is willing

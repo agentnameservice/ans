@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	"github.com/godaddy/ans/internal/tl/producerkey"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 )
 
 // freezeAt returns a Clock pinned to the given time — makes validity

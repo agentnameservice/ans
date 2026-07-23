@@ -3,7 +3,7 @@ package service
 import (
 	"github.com/rs/zerolog/log"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // ComputeRequiredDNSRecords returns the DNS records the operator must

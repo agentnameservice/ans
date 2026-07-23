@@ -44,7 +44,7 @@ both together (full registry).
 
 ```bash
 # Prereqs: Go 1.26+, openssl, curl, jq
-git clone https://github.com/godaddy/ans
+git clone https://github.com/agentnameservice/ans
 cd ans
 make build                        # builds bin/ans-ra, bin/ans-tl, bin/ans-verify, bin/ans-dns
 scripts/demo/start.sh             # starts both daemons against ./data/demo

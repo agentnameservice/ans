@@ -46,7 +46,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 func main() {

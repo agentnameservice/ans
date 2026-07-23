@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/godaddy/ans/internal/adapter/store/sqlitefinder"
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlitefinder"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 func TestOpen_FileBackedAndReopen(t *testing.T) {

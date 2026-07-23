@@ -10,8 +10,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // renewalChallengeWindow is how long the operator has to publish a

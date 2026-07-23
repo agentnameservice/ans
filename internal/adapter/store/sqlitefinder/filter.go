@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/godaddy/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/index"
 )
 
 // The supported filter/facet field paths are defined once on the index

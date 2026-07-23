@@ -17,9 +17,9 @@ import (
 	"sync"
 	"time"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // randomToken returns a base64url-encoded 32-byte crypto/rand token —

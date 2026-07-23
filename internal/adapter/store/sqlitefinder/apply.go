@@ -8,8 +8,8 @@ import (
 
 	"github.com/jmoiron/sqlx"
 
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // Apply writes a page of projected entries into the index inside one

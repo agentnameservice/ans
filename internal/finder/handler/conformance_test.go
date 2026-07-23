@@ -7,8 +7,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
-	"github.com/godaddy/ans/internal/adapter/docsui"
-	"github.com/godaddy/ans/internal/finder/handler"
+	"github.com/agentnameservice/ans/internal/adapter/docsui"
+	"github.com/agentnameservice/ans/internal/finder/handler"
 )
 
 // TestConformance_ResponseFieldsMatchSpec drives real requests through

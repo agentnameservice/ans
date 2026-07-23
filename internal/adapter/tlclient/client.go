@@ -36,7 +36,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // AppendResult is the parsed success response from the TL's ingest

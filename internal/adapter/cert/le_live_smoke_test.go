@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // TestLive_LetsEncryptStaging_CreateOrder talks to REAL Let's Encrypt

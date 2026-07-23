@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/finder/poller"
+	"github.com/agentnameservice/ans/internal/finder/poller"
 )
 
 func TestNewHTTPFeedClient_URLPolicy(t *testing.T) {

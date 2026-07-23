@@ -18,7 +18,7 @@ import (
 	"sync"
 	"testing"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 func TestProviderMatches(t *testing.T) {

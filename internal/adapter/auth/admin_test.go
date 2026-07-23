@@ -6,8 +6,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // downstream is a no-op handler that writes 204 so tests can

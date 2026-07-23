@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // CursorPage is a generic cursor-paginated result set.

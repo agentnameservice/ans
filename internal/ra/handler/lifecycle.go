@@ -9,9 +9,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // LifecycleHandler groups the non-register routes: list/detail/certs

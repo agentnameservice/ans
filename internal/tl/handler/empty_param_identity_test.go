@@ -9,7 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/godaddy/ans/internal/tl/handler"
+	"github.com/agentnameservice/ans/internal/tl/handler"
 )
 
 func TestIdentityRoutes_EmptyParams(t *testing.T) {

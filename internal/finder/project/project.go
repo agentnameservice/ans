@@ -6,7 +6,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/godaddy/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/feed"
 )
 
 // Media types the Finder emits per protocol (ARDS §3.3, §4.2). HTTP-API

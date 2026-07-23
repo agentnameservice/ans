@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // applyDiscoveryProfiles resolves the set of DNS record families the

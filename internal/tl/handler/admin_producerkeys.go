@@ -9,8 +9,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/tl/producerkey"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 )
 
 // AdminHandlers holds the admin-route HTTP handlers for the TL.

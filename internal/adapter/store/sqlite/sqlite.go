@@ -24,7 +24,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite" // driver
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 //go:embed migrations/*.sql

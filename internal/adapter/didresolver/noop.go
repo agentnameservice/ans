@@ -14,7 +14,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // Noop is the quickstart resolver. It never dials anywhere: the DID

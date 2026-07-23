@@ -48,10 +48,10 @@ import (
 	"fmt"
 	"strings"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
 )
 
 // ProofSubmission carries the kind-specific proof material from the

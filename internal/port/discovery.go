@@ -1,7 +1,7 @@
 package port
 
 import (
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // ProfileEmitter is one named DNS discovery family the RA can emit for an

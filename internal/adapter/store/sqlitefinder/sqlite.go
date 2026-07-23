@@ -31,7 +31,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "modernc.org/sqlite" // driver
 
-	"github.com/godaddy/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/index"
 )
 
 //go:embed migrations/*.sql

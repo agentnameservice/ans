@@ -10,7 +10,7 @@ import (
 	"encoding/json"
 	"testing"
 
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
 )
 
 // buildIdentityEnvelope assembles a signed-shaped identity envelope.

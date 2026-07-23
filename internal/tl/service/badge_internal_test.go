@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
 )
 
 func TestStatusFromRecord_TerminalEventTypes(t *testing.T) {

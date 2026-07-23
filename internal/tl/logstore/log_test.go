@@ -11,10 +11,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/godaddy/ans/internal/adapter/keymanager"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/tl/event"
-	"github.com/godaddy/ans/internal/tl/logstore"
+	"github.com/agentnameservice/ans/internal/adapter/keymanager"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	"github.com/agentnameservice/ans/internal/tl/logstore"
 )
 
 // TestLog_AppendAndCheckpoint exercises the full Tessera integration:

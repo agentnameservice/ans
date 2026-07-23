@@ -8,14 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/adapter/cert"
-	"github.com/godaddy/ans/internal/adapter/cert/acmetest"
-	"github.com/godaddy/ans/internal/adapter/dns"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/ra/service"
-	event "github.com/godaddy/ans/internal/tl/event"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
+	"github.com/agentnameservice/ans/internal/adapter/cert"
+	"github.com/agentnameservice/ans/internal/adapter/cert/acmetest"
+	"github.com/agentnameservice/ans/internal/adapter/dns"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/ra/service"
+	event "github.com/agentnameservice/ans/internal/tl/event"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // errStrayFinalize is returned by refOnlyIssuer when handed an empty
