@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.2.0](https://github.com/agentnameservice/ans/compare/v0.1.6...v0.2.0) (2026-07-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* **module:** importers must switch from github.com/godaddy/ans to github.com/agentnameservice/ans; the old import path no longer resolves against this repository.
+
+### Features
+
+* **finder:** make the publisher host free-text searchable ([#94](https://github.com/agentnameservice/ans/issues/94)) ([d8ed4bb](https://github.com/agentnameservice/ans/commit/d8ed4bb6b105863710a07dfce9ceb1c3145de486))
+* **ra:** AI Catalog generation, FQDN exclusivity, and seal-before-success activation ([#47](https://github.com/agentnameservice/ans/issues/47)) ([daf5ba1](https://github.com/agentnameservice/ans/commit/daf5ba12d0f5e49a130d193e842d1ee4aa906892))
+* **ra:** default discovery profiles to ANS_DNSAID; real-DNS demo tooling ([#89](https://github.com/agentnameservice/ans/issues/89)) ([79fb0b9](https://github.com/agentnameservice/ans/commit/79fb0b960c218622853c7c5e288a47d5dcf1ea11))
+* **ra:** Implement ARD-compliant discovery service and event feed ([#46](https://github.com/agentnameservice/ans/issues/46)) ([9dbc5c1](https://github.com/agentnameservice/ans/commit/9dbc5c17185baed158f286ff0584c59807104da4))
+
+
+### Bug Fixes
+
+* **module:** move module path to github.com/agentnameservice/ans ([#93](https://github.com/agentnameservice/ans/issues/93)) ([93e5bf9](https://github.com/agentnameservice/ans/commit/93e5bf91ec3bbe643ed380ad3bb3376466bdbbe6))
+* **ra:** emit v-prefixed ANSName version segment in TXT version= values ([#71](https://github.com/agentnameservice/ans/issues/71)) ([facb1ba](https://github.com/agentnameservice/ans/commit/facb1ba0894339e3889790ef51fff254048a3878)), closes [#69](https://github.com/agentnameservice/ans/issues/69)
+* **ra:** seal the gate-verified ACME method into domainValidation ([#75](https://github.com/agentnameservice/ans/issues/75)) ([99152ec](https://github.com/agentnameservice/ans/commit/99152ecaef64d18c09a3cbe42391f342e35d8812)), closes [#61](https://github.com/agentnameservice/ans/issues/61)
+* **release:** let GoReleaser infer the GitHub owner/name ([#67](https://github.com/agentnameservice/ans/issues/67)) ([e51993f](https://github.com/agentnameservice/ans/commit/e51993f781067202db7334fa4fb55e8b35e4e235))
+* **tl:** generate logId as UUIDv7 as documented ([#72](https://github.com/agentnameservice/ans/issues/72)) ([996586d](https://github.com/agentnameservice/ans/commit/996586df8af6dbafe9b90b8f873e488002cbe9c1))
+* **tl:** read V1 cert-attestation arrays in status-token builder ([#54](https://github.com/agentnameservice/ans/issues/54)) ([974ca94](https://github.com/agentnameservice/ans/commit/974ca9470dcf6e239250ea6c43cd44970c03c53d))
+
+
+### Documentation
+
+* adopt DCO and AI-disclosure contribution policy ([#84](https://github.com/agentnameservice/ans/issues/84)) ([f1daf35](https://github.com/agentnameservice/ans/commit/f1daf35473141cd328891167609d396ef869368a))
+* fix stale comments ([#87](https://github.com/agentnameservice/ans/issues/87)) ([9383881](https://github.com/agentnameservice/ans/commit/938388112a4e35007d9b5612f364258587dc8bd3))
+
 ## [0.1.6](https://github.com/agentnameservice/ans/compare/v0.1.5...v0.1.6) (2026-06-26)
 
 
