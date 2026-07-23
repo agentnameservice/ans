@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -148,8 +149,9 @@ func (s *Store) migrate(ctx context.Context) error {
 // AppliedMigrations lists the migration files Open applied to this
 // database, in application order. Empty means the schema was already
 // current. Callers log this at startup so schema upgrades are
-// diagnosable from logs alone.
-func (s *Store) AppliedMigrations() []string { return s.appliedMigrations }
+// diagnosable from logs alone. The returned slice is a copy — mutating
+// it cannot corrupt the store's record.
+func (s *Store) AppliedMigrations() []string { return slices.Clone(s.appliedMigrations) }
 
 // loadAppliedMigrations reads the schema_migrations table into a set.
 // Factored out so rows.Close lives on a defer and rows.Err is checked
