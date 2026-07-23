@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // EventPageResponse is one page of the agent-events feed.

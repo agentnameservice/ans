@@ -14,8 +14,8 @@ package registry
 import (
 	"fmt"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // Registry composes port.ProfileEmitter implementations by ID. Immutable

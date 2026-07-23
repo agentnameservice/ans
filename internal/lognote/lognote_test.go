@@ -13,8 +13,8 @@ import (
 	"math/big"
 	"testing"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/lognote"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/lognote"
 )
 
 // ----- Signature.KeyHash / KeyHashHex (keyhash hex layering) -----

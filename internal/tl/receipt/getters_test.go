@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/adapter/keymanager"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/adapter/keymanager"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // TestKeyManagerGenerator_KeyIDAndPublicKey covers the trivial

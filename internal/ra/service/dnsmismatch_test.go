@@ -3,7 +3,7 @@ package service_test
 import (
 	"testing"
 
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // TestDNSMismatch_Classification pins the wire-code → predicate mapping

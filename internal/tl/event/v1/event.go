@@ -32,7 +32,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // SchemaVersion pins the envelope label for V1 events. Producer +

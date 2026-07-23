@@ -8,9 +8,9 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
 )
 
 // leiVerifier is the lei (vLEI) controlVerifier — the per-kind gate

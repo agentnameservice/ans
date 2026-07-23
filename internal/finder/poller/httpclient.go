@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/feed"
 )
 
 // eventsPath is the feed route the Finder consumes (production contract

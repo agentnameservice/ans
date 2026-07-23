@@ -3,7 +3,7 @@ package catalog
 import (
 	"sort"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // Document is a catalog document (AI Catalog §4.2): the file an Agent

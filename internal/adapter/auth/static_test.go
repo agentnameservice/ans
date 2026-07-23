@@ -7,7 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
 )
 
 // StaticProvider must accept both:

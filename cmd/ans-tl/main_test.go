@@ -6,7 +6,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/godaddy/ans/internal/config"
+	"github.com/agentnameservice/ans/internal/config"
 )
 
 // TestBuildAuth_PublicReadAnonymousPaths pins the TL's anonymous-path

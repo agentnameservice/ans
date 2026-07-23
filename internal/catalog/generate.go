@@ -4,8 +4,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/ard"
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ard"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // Options configures CatalogEntry generation.

@@ -11,10 +11,10 @@ import (
 	"errors"
 	"testing"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/tl/producerkey"
-	"github.com/godaddy/ans/internal/tl/service"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
+	"github.com/agentnameservice/ans/internal/tl/service"
 )
 
 func TestProducerSigVerifier_HappyPath(t *testing.T) {

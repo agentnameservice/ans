@@ -33,7 +33,7 @@ import (
 	"fmt"
 	"os"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 func main() {

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/godaddy/ans/internal/tl/event"
+	"github.com/agentnameservice/ans/internal/tl/event"
 )
 
 // Test data: a hand-constructed envelope whose canonical JSON bytes

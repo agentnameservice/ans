@@ -1,6 +1,6 @@
 package project
 
-import "github.com/godaddy/ans/internal/ard"
+import "github.com/agentnameservice/ans/internal/ard"
 
 // mintURN builds the ARD discovery identifier for an Active entry
 // (ARDS §4.2.1): urn:air:<agentHost>:agents:<label>.

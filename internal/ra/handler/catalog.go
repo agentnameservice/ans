@@ -11,9 +11,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/catalog"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/catalog"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // catalogDocumentMediaType is the AI Catalog document content type. A

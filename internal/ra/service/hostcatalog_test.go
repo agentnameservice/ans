@@ -13,8 +13,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // fakeHostAgentStore implements port.AgentStore but only FindAllByAgentHost;

@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // TestLookupVerifier_TLSA_Mismatch covers the "mismatch records

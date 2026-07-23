@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // feedRowSpec describes one outbox row to seed for a feed test.

@@ -12,10 +12,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	rahandler "github.com/godaddy/ans/internal/ra/handler"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	rahandler "github.com/agentnameservice/ans/internal/ra/handler"
 )
 
 // contextKey is a distinct type so we never collide with other

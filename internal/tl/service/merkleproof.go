@@ -9,8 +9,8 @@ import (
 
 	"github.com/transparency-dev/tessera/client"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	"github.com/godaddy/ans/internal/tl/logstore"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	"github.com/agentnameservice/ans/internal/tl/logstore"
 )
 
 // MerkleProof is the JSON-friendly inclusion proof returned by the

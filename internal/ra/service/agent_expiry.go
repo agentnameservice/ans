@@ -7,7 +7,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // ExpireAgentsOnce transitions lapsed PENDING_VALIDATION registrations

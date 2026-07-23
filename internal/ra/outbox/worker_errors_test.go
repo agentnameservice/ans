@@ -9,8 +9,8 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/tlclient"
-	"github.com/godaddy/ans/internal/ra/outbox"
+	"github.com/agentnameservice/ans/internal/adapter/tlclient"
+	"github.com/agentnameservice/ans/internal/ra/outbox"
 )
 
 // TestWorker_GenericError covers the third arm of the error switch in

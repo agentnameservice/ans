@@ -1,9 +1,9 @@
 package service
 
 import (
-	"github.com/godaddy/ans/internal/adapter/discovery/ans"
-	"github.com/godaddy/ans/internal/adapter/discovery/registry"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/adapter/discovery/ans"
+	"github.com/agentnameservice/ans/internal/adapter/discovery/registry"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // NewDefaultProfileRegistry returns a registry pre-wired with the

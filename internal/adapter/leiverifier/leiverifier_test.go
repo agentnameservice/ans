@@ -17,7 +17,7 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // leafACDC is a minimal single-credential CESR export whose leaf carries

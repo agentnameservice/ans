@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"testing"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 // mustURL panics on parse error, acceptable for test fixtures.

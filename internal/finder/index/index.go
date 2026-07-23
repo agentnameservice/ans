@@ -20,7 +20,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // Catalog is the port the Finder's poller, search handler, and explore

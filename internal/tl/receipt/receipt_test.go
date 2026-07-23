@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // Golden fixture: the deterministic leaf hash for a fixed event

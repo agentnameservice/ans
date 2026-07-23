@@ -13,11 +13,11 @@ import (
 	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/tl/event"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // OutboxEnqueuer is the subset of the SQLite OutboxStore the

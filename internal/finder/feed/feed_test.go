@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/godaddy/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/feed"
 )
 
 // validItem returns an EventItem that passes Validate. Tests mutate a

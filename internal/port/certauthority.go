@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // ValidatedCert is the result of successfully parsing and validating

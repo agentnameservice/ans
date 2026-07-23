@@ -3,10 +3,10 @@ package handler
 import (
 	"net/http"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // ----- List DTOs (matches V2 spec AgentListResponse §900) -----

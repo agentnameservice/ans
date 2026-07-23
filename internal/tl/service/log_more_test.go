@@ -9,7 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/godaddy/ans/internal/tl/service"
+	"github.com/agentnameservice/ans/internal/tl/service"
 )
 
 // TestLogService_GettersAndOverrides covers the trivial accessor +

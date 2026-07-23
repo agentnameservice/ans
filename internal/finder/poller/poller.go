@@ -18,9 +18,9 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/finder/feed"
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // FeedClient fetches one page of the agent-events feed. The poller

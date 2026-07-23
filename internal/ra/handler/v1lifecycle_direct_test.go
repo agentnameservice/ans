@@ -18,10 +18,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	authpkg "github.com/godaddy/ans/internal/adapter/auth"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/ra/handler"
+	authpkg "github.com/agentnameservice/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/ra/handler"
 )
 
 // directReq builds an *http.Request with a chi route context whose

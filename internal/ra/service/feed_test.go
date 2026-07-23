@@ -7,10 +7,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/finder/feed"
-	"github.com/godaddy/ans/internal/port"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/port"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // fakeReader is a stub port.FeedReader for service-layer tests.

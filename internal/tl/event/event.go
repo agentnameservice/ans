@@ -37,8 +37,8 @@ import (
 	"fmt"
 	"time"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // SchemaVersion pins the envelope version. "V2" because our V2 RA

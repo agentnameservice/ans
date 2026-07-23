@@ -22,7 +22,7 @@ import (
 	"strconv"
 	"strings"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 // keyHashLen is the C2SP signature blob's 4-byte keyhash prefix. The

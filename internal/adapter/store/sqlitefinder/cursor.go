@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/godaddy/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/index"
 )
 
 // Cursor returns the persisted feed position and last-successful-poll

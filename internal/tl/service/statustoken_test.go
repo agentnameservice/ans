@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"testing"
 
-	"github.com/godaddy/ans/internal/tl/event"
-	receiptpkg "github.com/godaddy/ans/internal/tl/receipt"
-	"github.com/godaddy/ans/internal/tl/service"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	receiptpkg "github.com/agentnameservice/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/tl/service"
 )
 
 // TestStatusTokenService_ForAgent_WithAttestations drives the full

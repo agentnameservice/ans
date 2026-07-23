@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // SelfCA implements port.IdentityCertificateAuthority with an in-process

@@ -13,10 +13,10 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/store/sqlitefinder"
-	"github.com/godaddy/ans/internal/finder/handler"
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlitefinder"
+	"github.com/agentnameservice/ans/internal/finder/handler"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 var silent = zerolog.Nop()

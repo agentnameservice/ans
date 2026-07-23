@@ -12,7 +12,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 func TestStatusForCause_AllArms(t *testing.T) {

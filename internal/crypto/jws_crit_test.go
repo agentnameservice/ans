@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 // TestDecodeStandardJWS_RejectsCrit pins RFC 7515 §4.1.11: this

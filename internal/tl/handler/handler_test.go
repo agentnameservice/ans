@@ -23,17 +23,17 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/godaddy/ans/internal/adapter/keymanager"
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/tl/event"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
-	"github.com/godaddy/ans/internal/tl/handler"
-	"github.com/godaddy/ans/internal/tl/logstore"
-	"github.com/godaddy/ans/internal/tl/producerkey"
-	receiptpkg "github.com/godaddy/ans/internal/tl/receipt"
-	"github.com/godaddy/ans/internal/tl/service"
+	"github.com/agentnameservice/ans/internal/adapter/keymanager"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
+	"github.com/agentnameservice/ans/internal/tl/handler"
+	"github.com/agentnameservice/ans/internal/tl/logstore"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
+	receiptpkg "github.com/agentnameservice/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/tl/service"
 )
 
 // TestAppendEvent is the full RA → TL ingest smoke test. If this

@@ -3,7 +3,7 @@ package index_test
 import (
 	"testing"
 
-	"github.com/godaddy/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/index"
 )
 
 func TestSupportedField(t *testing.T) {

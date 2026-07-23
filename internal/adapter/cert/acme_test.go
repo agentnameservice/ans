@@ -17,9 +17,9 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/crypto/acme"
 
-	"github.com/godaddy/ans/internal/adapter/cert/acmetest"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/adapter/cert/acmetest"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 func newFakeACME(t *testing.T) *acmetest.Server {

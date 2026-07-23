@@ -17,8 +17,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	"github.com/godaddy/ans/internal/tl/handler"
-	"github.com/godaddy/ans/internal/tl/producerkey"
+	"github.com/agentnameservice/ans/internal/tl/handler"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 )
 
 // emptyParamReq builds a request with a chi route context whose

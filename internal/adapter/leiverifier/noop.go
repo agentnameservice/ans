@@ -17,8 +17,8 @@ package leiverifier
 import (
 	"context"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // Noop is the quickstart vLEI verifier. It never dials anywhere.

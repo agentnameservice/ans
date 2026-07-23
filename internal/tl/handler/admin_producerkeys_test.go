@@ -16,8 +16,8 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	"github.com/godaddy/ans/internal/tl/handler"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	"github.com/agentnameservice/ans/internal/tl/handler"
 )
 
 // adminRouter wires just the admin handlers against a fresh :memory:

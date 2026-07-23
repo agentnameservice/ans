@@ -14,7 +14,7 @@ import (
 	"modernc.org/sqlite"
 	sqlitelib "modernc.org/sqlite/lib"
 
-	"github.com/godaddy/ans/internal/tl/producerkey"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 )
 
 // ProducerKeyStore is a SQLite-backed producer-key trust store.

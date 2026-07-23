@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // EndpointStore implements port.EndpointStore.

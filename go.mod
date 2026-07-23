@@ -1,4 +1,4 @@
-module github.com/godaddy/ans
+module github.com/agentnameservice/ans
 
 go 1.26
 

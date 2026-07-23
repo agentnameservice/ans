@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/godaddy/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // TestSmokeVerifyDemoReceipt is a manual-invocation smoke test that

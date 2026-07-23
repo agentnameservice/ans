@@ -4,10 +4,10 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/tl/event"
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // envelopeCodec bundles the three per-schema-version steps of the

@@ -12,8 +12,8 @@ import (
 
 	"github.com/fxamacker/cbor/v2"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // Status tokens are short-lived COSE_Sign1 assertions of an agent's

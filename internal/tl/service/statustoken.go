@@ -6,9 +6,9 @@ import (
 	"errors"
 	"fmt"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	"github.com/godaddy/ans/internal/tl/event"
-	"github.com/godaddy/ans/internal/tl/receipt"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // ErrStatusTokenNotIssued is returned when a status token is requested

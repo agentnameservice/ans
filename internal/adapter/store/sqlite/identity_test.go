@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 var identityNow = time.Date(2026, 6, 10, 15, 0, 0, 0, time.UTC)

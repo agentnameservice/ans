@@ -4,7 +4,7 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // RevocationStore implements port.RevocationStore.

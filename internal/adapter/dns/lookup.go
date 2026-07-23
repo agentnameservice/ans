@@ -11,8 +11,8 @@ import (
 
 	"github.com/miekg/dns"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // LookupVerifier performs real DNS queries via miekg/dns so we can
