@@ -6,7 +6,7 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/godaddy/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/index"
 )
 
 // Federation modes (spec Federation enum). auto/none both merge a

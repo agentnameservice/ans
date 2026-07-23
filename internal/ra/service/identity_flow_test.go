@@ -7,11 +7,11 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/cert"
-	"github.com/godaddy/ans/internal/adapter/dns"
-	"github.com/godaddy/ans/internal/adapter/store/sqlite"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/adapter/cert"
+	"github.com/agentnameservice/ans/internal/adapter/dns"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlite"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // selfCAOf unwraps the fixture's identity CA so tests can assert

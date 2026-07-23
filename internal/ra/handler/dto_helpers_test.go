@@ -9,8 +9,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 func TestDNSMissingFrom_FiltersMissingOnly(t *testing.T) {

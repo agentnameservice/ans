@@ -5,7 +5,7 @@ import (
 	"net/url"
 	"sort"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // TLSARecord returns the TLSA cert-binding records every ANS-family

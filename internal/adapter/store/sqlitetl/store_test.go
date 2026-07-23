@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // newDB opens an in-memory sqlite_tl DB for tests.

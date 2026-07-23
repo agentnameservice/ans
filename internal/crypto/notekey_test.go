@@ -15,7 +15,7 @@ import (
 	"strings"
 	"testing"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 func TestPublicKeyToVerificationLine_FormatAndRoundTrip(t *testing.T) {

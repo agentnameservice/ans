@@ -3,8 +3,8 @@ package handler
 import (
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // This file holds the DTO ↔ domain mappers for the server-cert

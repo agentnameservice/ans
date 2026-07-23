@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/tl/receipt"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // TestStatusToken_RoundTrip is the canonical end-to-end test for

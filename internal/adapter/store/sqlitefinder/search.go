@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // matchedRow is one candidate entry pulled from the index before

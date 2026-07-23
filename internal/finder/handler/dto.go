@@ -10,7 +10,7 @@ import (
 	"math"
 	"sort"
 
-	"github.com/godaddy/ans/internal/finder/project"
+	"github.com/agentnameservice/ans/internal/finder/project"
 )
 
 // ── Request DTOs (spec/api-spec-finder-v1.yaml) ──────────────────────

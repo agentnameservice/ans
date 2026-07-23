@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/adapter/tlclient"
+	"github.com/agentnameservice/ans/internal/adapter/tlclient"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 func TestAppend_Created(t *testing.T) {

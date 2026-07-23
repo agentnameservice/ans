@@ -15,7 +15,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // JWS algorithm identifiers we support. Matches the reference

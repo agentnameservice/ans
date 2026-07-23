@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // asDomainErr is a small helper to unwrap a *domain.Error from an

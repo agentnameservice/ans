@@ -13,9 +13,9 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/finder/feed"
-	"github.com/godaddy/ans/internal/finder/index"
-	"github.com/godaddy/ans/internal/finder/poller"
+	"github.com/agentnameservice/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/poller"
 )
 
 // syncBuffer is a goroutine-safe bytes.Buffer for capturing log output

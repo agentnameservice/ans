@@ -5,8 +5,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/tl/service"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/service"
 )
 
 // DTO + helpers for the checkpoint routes live in their own file to

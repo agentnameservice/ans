@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/lognote"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/lognote"
 )
 
 // CheckpointService wraps the checkpoint store to produce the shapes

@@ -11,8 +11,8 @@ import (
 	"encoding/json"
 	"testing"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	v1event "github.com/godaddy/ans/internal/tl/event/v1"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	v1event "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // envelopeJSON wraps an `attestations` payload in the minimum

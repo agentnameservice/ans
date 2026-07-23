@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	"github.com/godaddy/ans/internal/tl/receipt"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 // decodeStdBase64 is a tiny convenience around StdEncoding.DecodeString

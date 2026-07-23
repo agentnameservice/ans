@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/tl/producerkey"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 )
 
 // Error codes surfaced by the producer-signature verifier. They mirror

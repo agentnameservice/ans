@@ -9,7 +9,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 type identityCtxKey struct{}

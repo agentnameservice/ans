@@ -5,7 +5,7 @@ import (
 	"net/http"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // TestStatusAndTitleForCause pins the sentinel→HTTP mapping table,

@@ -3,7 +3,7 @@ package project
 import (
 	"testing"
 
-	"github.com/godaddy/ans/internal/finder/feed"
+	"github.com/agentnameservice/ans/internal/finder/feed"
 )
 
 // White-box tests for unexported helpers whose defensive branches are

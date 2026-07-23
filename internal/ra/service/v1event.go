@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/domain"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // V1 events coexist with V2 events on the RA→TL path: the outbox row

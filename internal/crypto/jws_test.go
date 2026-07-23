@@ -18,7 +18,7 @@ import (
 
 	jose "github.com/go-jose/go-jose/v4"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 // TestSignVerifyRoundTrip_ES256 proves sign-then-verify works with our

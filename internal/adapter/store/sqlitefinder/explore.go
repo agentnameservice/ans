@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/godaddy/ans/internal/finder/index"
+	"github.com/agentnameservice/ans/internal/finder/index"
 )
 
 // Explore aggregates the Active, unexpired matched set into facet

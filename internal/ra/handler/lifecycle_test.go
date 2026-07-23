@@ -12,17 +12,17 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
-	"github.com/godaddy/ans/internal/adapter/cert"
-	"github.com/godaddy/ans/internal/adapter/dns"
-	"github.com/godaddy/ans/internal/adapter/eventbus"
-	"github.com/godaddy/ans/internal/adapter/keymanager"
-	"github.com/godaddy/ans/internal/adapter/store/sqlite"
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/ra/handler"
-	ramiddleware "github.com/godaddy/ans/internal/ra/middleware"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/adapter/cert"
+	"github.com/agentnameservice/ans/internal/adapter/dns"
+	"github.com/agentnameservice/ans/internal/adapter/eventbus"
+	"github.com/agentnameservice/ans/internal/adapter/keymanager"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlite"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/ra/handler"
+	ramiddleware "github.com/agentnameservice/ans/internal/ra/middleware"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // End-to-end integration tests for Stage 2: list / detail / identity-

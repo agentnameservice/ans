@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // RenewalStore implements port.RenewalStore.

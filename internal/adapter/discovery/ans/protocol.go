@@ -20,7 +20,7 @@ import (
 	"net/url"
 	"strings"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // protocolToANSValue maps a protocol enum to the wire token used inside

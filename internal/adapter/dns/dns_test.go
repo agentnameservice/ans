@@ -10,7 +10,7 @@ import (
 
 	miekg "github.com/miekg/dns"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // ----- NoopVerifier -----

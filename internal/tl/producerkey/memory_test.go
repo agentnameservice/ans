@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/godaddy/ans/internal/tl/producerkey"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 )
 
 func TestMemoryStore_AddGet(t *testing.T) {

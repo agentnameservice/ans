@@ -12,8 +12,8 @@ import (
 
 	"golang.org/x/mod/sumdb/note"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // C2SPECDSASigner is a note.Signer that produces a C2SP-compliant

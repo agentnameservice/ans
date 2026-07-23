@@ -17,8 +17,8 @@ import (
 	"github.com/rs/zerolog"
 	"golang.org/x/net/publicsuffix"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // Web is the production did:web resolver: an HTTPS GET of the DID

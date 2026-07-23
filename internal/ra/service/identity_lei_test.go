@@ -15,10 +15,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/ra/service"
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/ra/service"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
 )
 
 // the LEI the lei tests register; a valid 20-char LEI so the kind infers.

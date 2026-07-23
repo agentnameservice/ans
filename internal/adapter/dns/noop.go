@@ -5,8 +5,8 @@ package dns
 import (
 	"context"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // NoopVerifier always reports all records as verified. Intended for the

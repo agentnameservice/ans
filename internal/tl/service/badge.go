@@ -6,7 +6,7 @@ import (
 	"errors"
 	"time"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
 )
 
 // BadgeStatus is the real-time lifecycle label surfaced on the badge

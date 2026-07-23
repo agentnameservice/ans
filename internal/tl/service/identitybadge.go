@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 
-	sqlitetl "github.com/godaddy/ans/internal/adapter/store/sqlitetl"
-	"github.com/godaddy/ans/internal/domain"
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // Identity badge statuses. Identities have a two-state read-time

@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/godaddy/ans/internal/tl/event"
+	"github.com/agentnameservice/ans/internal/tl/event"
 )
 
 // EventRecord is the stored event row returned to services.

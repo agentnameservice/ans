@@ -6,10 +6,10 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/godaddy/ans/internal/domain"
-	"github.com/godaddy/ans/internal/ra/service"
-	event "github.com/godaddy/ans/internal/tl/event"
-	eventv1 "github.com/godaddy/ans/internal/tl/event/v1"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/ra/service"
+	event "github.com/agentnameservice/ans/internal/tl/event"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // TestVerifyACME_NoIdentityCSR_ReachesActiveNoCert covers the optional

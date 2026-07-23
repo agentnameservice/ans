@@ -5,9 +5,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/godaddy/ans/internal/adapter/keymanager"
-	"github.com/godaddy/ans/internal/port"
-	"github.com/godaddy/ans/internal/tl/logstore"
+	"github.com/agentnameservice/ans/internal/adapter/keymanager"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/logstore"
 )
 
 // realSigner builds a real C2SPECDSASigner — used by the Open

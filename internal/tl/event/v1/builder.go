@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 // BuildEnvelope is the single chokepoint for V1 envelope construction

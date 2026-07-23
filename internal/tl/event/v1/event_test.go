@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	v1 "github.com/godaddy/ans/internal/tl/event/v1"
+	v1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // V1 golden fixtures are pinned independently of V2 because the V1

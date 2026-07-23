@@ -3,7 +3,7 @@ package port
 import (
 	"context"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // RecordVerification is the result of checking a single DNS record.

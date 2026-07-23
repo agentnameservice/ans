@@ -25,7 +25,7 @@ import (
 	"fmt"
 	"time"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 )
 
 // SchemaVersion pins the envelope version. Identity events are part

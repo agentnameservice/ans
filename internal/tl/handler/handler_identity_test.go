@@ -12,8 +12,8 @@ import (
 	"testing"
 	"time"
 
-	identityevent "github.com/godaddy/ans/internal/tl/event/identity"
-	receiptpkg "github.com/godaddy/ans/internal/tl/receipt"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
+	receiptpkg "github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
 const testIdentityID = "01HXKQTESTIDENTITY0000000A"

@@ -7,7 +7,7 @@ package event_test
 import (
 	"testing"
 
-	"github.com/godaddy/ans/internal/tl/event"
+	"github.com/agentnameservice/ans/internal/tl/event"
 )
 
 // nilInnerEnvelope returns an Envelope whose Payload is nil — the

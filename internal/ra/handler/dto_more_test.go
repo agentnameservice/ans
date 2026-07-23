@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/godaddy/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // mustReq builds a minimal *http.Request for the schemeOf tests

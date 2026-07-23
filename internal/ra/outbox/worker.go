@@ -33,9 +33,9 @@ import (
 
 	"github.com/rs/zerolog"
 
-	"github.com/godaddy/ans/internal/adapter/store/sqlite"
-	"github.com/godaddy/ans/internal/adapter/tlclient"
-	"github.com/godaddy/ans/internal/ra/service"
+	"github.com/agentnameservice/ans/internal/adapter/store/sqlite"
+	"github.com/agentnameservice/ans/internal/adapter/tlclient"
+	"github.com/agentnameservice/ans/internal/ra/service"
 )
 
 // Options configures the Worker.

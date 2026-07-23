@@ -7,8 +7,8 @@ import (
 	"fmt"
 	"time"
 
-	anscrypto "github.com/godaddy/ans/internal/crypto"
-	"github.com/godaddy/ans/internal/port"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
 )
 
 // X509Validator implements port.CertificateValidator using Go crypto/x509.

@@ -14,7 +14,7 @@ import (
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
 
-	"github.com/godaddy/ans/internal/adapter/auth"
+	"github.com/agentnameservice/ans/internal/adapter/auth"
 )
 
 // oidcMock spins up an httptest server that serves the two OIDC
