@@ -106,6 +106,26 @@ paths:
         set when it satisfies the relevance criteria for `text` AND every
         constraint in `filter`.
 
+        **Text matching contract (this registry).** ARDS leaves text
+        relevance criteria registry-defined; this Finder matches as
+        follows. `query.text` splits on whitespace into terms, and every
+        term must match the entry across its searchable fields —
+        `displayName`, `description`, `capabilities`, `tags`, and the
+        publisher host. Matching is case- and diacritic-insensitive but
+        exact-token: no stemming and no prefix expansion, so "translate"
+        does not match "translator". Prefer content keywords — filler
+        words must also match and usually exclude everything. A term
+        containing separators (dots, hyphens) matches as a **phrase**:
+        its sub-tokens adjacent and in order within one field. So
+        `translator.example.com` matches that publisher host, and
+        "translator" alone matches too, but `translator.com` does not —
+        separate the words with spaces (`translator example`) to match
+        them independently. FTS query operators in the input (AND, OR,
+        `*`, quotes, …) are treated as literal text, never as syntax.
+        Results are currently ordered by bm25 relevance; the ranking
+        algorithm is informational, not part of this contract, and may
+        improve without notice.
+
         **Why POST.** The query carries a free-text string plus a
         structured `filter` whose keys are dot-separated field paths
         (ARDS §7.1); this does not fit a query string. The body shape is
@@ -174,7 +194,8 @@ paths:
         returns an aggregation over the matched set rather than ranked
         entries (ARDS §7.3). Explore lets a client introspect the
         registry — for example, "which media types are available?" —
-        narrowed by the same `text` and `filter` as search.
+        narrowed by the same `text` and `filter` as search. `query.text`
+        follows the search operation's **text matching contract**.
 
         For explore, `query.text` and `query.filter` are **both
         optional**; when both are absent, the aggregation covers the
@@ -267,10 +288,13 @@ components:
         text:
           type: string
           description: |
-            Natural-language description of the need (ARDS §7.1). Narrows
-            the result set by semantic relevance. Required for search,
-            optional for explore.
-          example: find me a flight booking agent
+            Free-text keyword terms describing the need (ARDS §7.1).
+            Narrows the result set by relevance under the **text matching
+            contract** documented on the search operation (exact-token,
+            all terms must match) — prefer content keywords over filler
+            words. Applies identically to search and explore. Required
+            for search, optional for explore.
+          example: flight booking
         filter:
           $ref: '#/components/schemas/Filter'
 
@@ -397,8 +421,10 @@ components:
               minimum: 0
               maximum: 100
               description: |
-                Semantic relevance ranking (0–100) computed by the
-                registry (ARDS §7.2). It is **strictly an informational
+                Relevance score (0–100) computed by the registry
+                (ARDS §7.2), normalized **within this result set** — the
+                best match scores 100 — so scores are not comparable
+                across queries. It is **strictly an informational
                 relevance metric** and MUST NOT be interpreted by
                 orchestrators as a cryptographic trust, compliance, or
                 safety rating. Trust evaluation is decoupled and handled

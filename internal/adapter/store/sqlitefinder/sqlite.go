@@ -41,6 +41,13 @@ var migrationsFS embed.FS
 // satisfies index.Catalog.
 type Store struct {
 	db *sqlx.DB
+
+	// appliedMigrations records the migration files Open applied to
+	// THIS database (empty when the schema was already current). The
+	// store has no logger by convention; the caller reads this via
+	// AppliedMigrations and logs it, so an in-place upgrade — which
+	// can rewrite the whole FTS index — is visible in the logs.
+	appliedMigrations []string
 }
 
 // compile-time assertion that Store implements the index port.
@@ -133,9 +140,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("sqlitefinder: commit %s: %w", f, err)
 		}
+		s.appliedMigrations = append(s.appliedMigrations, f)
 	}
 	return nil
 }
+
+// AppliedMigrations lists the migration files Open applied to this
+// database, in application order. Empty means the schema was already
+// current. Callers log this at startup so schema upgrades are
+// diagnosable from logs alone.
+func (s *Store) AppliedMigrations() []string { return s.appliedMigrations }
 
 // loadAppliedMigrations reads the schema_migrations table into a set.
 // Factored out so rows.Close lives on a defer and rows.Err is checked

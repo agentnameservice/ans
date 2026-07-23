@@ -119,13 +119,24 @@ if [ "$LANE" = "v1" ]; then
   REGISTER_PATH="/v1/agents/register"
   AGENT_BASE="/v1/agents"
   LAST_AGENT_FILE="$DATA/last-agent-id-v1"
-  DISPLAY_NAME="v1-demo-agent"
 else
   REGISTER_PATH="/v2/ans/agents"
   AGENT_BASE="/v2/ans/agents"
   LAST_AGENT_FILE="$DATA/last-agent-id"
-  DISPLAY_NAME="v2-demo-agent"
 fi
+
+# Host-derived display text. Searchability does not require this — the
+# Finder indexes the publisher host itself, so "translator" finds
+# translator.example.com whatever the display name says. This is
+# presentation: search results and lifecycle output should show a name
+# recognizably tied to what the user registered, not a fixed
+# "demo-agent" string. Truncated to stay inside the RA's field limits
+# (displayName 64, description 150) for long-but-legal DNS labels.
+HOST_LABEL="${AGENT_HOST%%.*}"
+HOST_LABEL="${HOST_LABEL:0:40}"
+DISPLAY_NAME="$HOST_LABEL $LANE demo agent"
+DESCRIPTION="Demo agent for $AGENT_HOST, registered by scripts/demo/register.sh on the $LANE lane."
+DESCRIPTION="${DESCRIPTION:0:150}"
 
 header "POST $REGISTER_PATH"
 # metaDataUrl sits at /.well-known/ so the ANS_DNSAID profile's SVCB
@@ -139,10 +150,11 @@ REG_REQ=$(jq -n \
   --arg idCsr "$IDENTITY_CSR_PEM" \
   --arg srvCsr "$SERVER_CSR_PEM" \
   --arg display "$DISPLAY_NAME" \
+  --arg desc "$DESCRIPTION" \
   --arg profiles "${ANS_DISCOVERY_PROFILES:-}" '
   {
     agentDisplayName: $display,
-    agentDescription: "register.sh demo target",
+    agentDescription: $desc,
     version:          $version,
     agentHost:        $host,
     endpoints: [{
