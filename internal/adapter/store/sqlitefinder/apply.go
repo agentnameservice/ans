@@ -233,6 +233,7 @@ func insertActiveRow(ctx context.Context, tx *sqlx.Tx, pe project.ProjectedEntry
 		return fmt.Errorf("sqlitefinder: marshal entry: %w", err)
 	}
 
+	publisher := publisherFromURN(pe.Entry.Identifier)
 	res, err := tx.ExecContext(ctx, `
         INSERT INTO finder_entries (
             ans_name, type, url, identifier, publisher, agent_id, log_id,
@@ -240,7 +241,7 @@ func insertActiveRow(ctx context.Context, tx *sqlx.Tx, pe project.ProjectedEntry
             lifecycle, created_at, expires_at, entry_json
         ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		pe.AnsName, pe.Entry.Type, pe.Entry.URL, pe.Entry.Identifier,
-		publisherFromURN(pe.Entry.Identifier), pe.AgentID, pe.LogID,
+		publisher, pe.AgentID, pe.LogID,
 		pe.Entry.DisplayName, pe.Entry.Description, pe.Entry.Version, pe.Entry.UpdatedAt,
 		string(project.LifecycleActive), pe.CreatedAt, pe.ExpiresAt, string(entryJSON),
 	)
@@ -261,7 +262,7 @@ func insertActiveRow(ctx context.Context, tx *sqlx.Tx, pe project.ProjectedEntry
 	if err := insertSideValues(ctx, tx, "finder_entry_attestation_types", rowid, attestationTypes(pe.Entry)); err != nil {
 		return err
 	}
-	return insertFTS(ctx, tx, rowid, pe.Entry)
+	return insertFTS(ctx, tx, rowid, pe.Entry, publisher)
 }
 
 // applyTombstone suppresses every ACTIVE row for the tombstone's ansName
@@ -395,13 +396,16 @@ func insertSideValues(ctx context.Context, tx *sqlx.Tx, table string, rowid int6
 }
 
 // insertFTS writes the FTS row for an entry, flattening capabilities and
-// tags into space-joined text columns the tokenizer can index.
-func insertFTS(ctx context.Context, tx *sqlx.Tx, rowid int64, e project.Entry) error {
+// tags into space-joined text columns the tokenizer can index. publisher
+// is the URN <publisher> segment (the agent's host); indexing it lets
+// free-text queries match host words — unicode61 splits on ".", so
+// translator.example.com matches the token "translator".
+func insertFTS(ctx context.Context, tx *sqlx.Tx, rowid int64, e project.Entry, publisher string) error {
 	if _, err := tx.ExecContext(ctx, `
-        INSERT INTO finder_entries_fts (rowid, display_name, description, capabilities_text, tags_text)
-        VALUES (?,?,?,?,?)`,
+        INSERT INTO finder_entries_fts (rowid, display_name, description, capabilities_text, tags_text, publisher)
+        VALUES (?,?,?,?,?,?)`,
 		rowid, e.DisplayName, e.Description,
-		strings.Join(e.Capabilities, " "), strings.Join(e.Tags, " ")); err != nil {
+		strings.Join(e.Capabilities, " "), strings.Join(e.Tags, " "), publisher); err != nil {
 		return fmt.Errorf("sqlitefinder: insert fts: %w", err)
 	}
 	return nil

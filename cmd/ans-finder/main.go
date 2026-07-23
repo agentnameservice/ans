@@ -116,6 +116,12 @@ func run(cfgPath string) error {
 			logger.Warn().Err(err).Msg("index close")
 		}
 	}()
+	// Surface schema upgrades: a migration can rewrite the whole FTS
+	// index between "starting" and "listening", so an operator must be
+	// able to confirm from logs alone that it ran.
+	if applied := store.AppliedMigrations(); len(applied) > 0 {
+		logger.Info().Strs("migrations", applied).Msg("applied index migrations")
+	}
 
 	// Feed client + poller.
 	feedClient, err := poller.NewHTTPFeedClient(cfg.Feed.BaseURL, cfg.Feed.AllowHTTP, cfg.Feed.Timeout)
