@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
 
@@ -64,7 +65,14 @@ func (h *LifecycleHandler) List(w http.ResponseWriter, r *http.Request) {
 				filter.Statuses = nil
 				break
 			}
-			filter.Statuses = append(filter.Statuses, domain.RegistrationStatus(s))
+			switch domain.RegistrationStatus(s) {
+			case domain.StatusPendingDNS, domain.StatusActive, domain.StatusDeprecated, domain.StatusRevoked:
+				filter.Statuses = append(filter.Statuses, domain.RegistrationStatus(s))
+			default:
+				WriteError(w, domain.NewValidationError("INVALID_STATUS",
+					"status must be one of PENDING_DNS, ACTIVE, DEPRECATED, REVOKED, ALL"))
+				return
+			}
 		}
 	} else {
 		filter.Statuses = []domain.RegistrationStatus{domain.StatusActive}
@@ -375,8 +383,15 @@ func (h *LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 		h.writeError(w, domain.NewValidationError("BAD_JSON", "invalid request body: "+err.Error()))
 		return
 	}
+
 	if req.Reason == "" {
 		h.writeError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		return
+	}
+
+	if len(req.Comments) > maxCommentsLength {
+		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
+			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
 	}
 

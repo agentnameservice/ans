@@ -85,28 +85,31 @@ func TestV1VerifyDNS_EmitsAgentRegistered(t *testing.T) {
 		t.Errorf("status: got %q, want ACTIVE", resp.Status)
 	}
 
-	// Outbox must contain EXACTLY ONE AGENT_REGISTERED V1 row — the
-	// one emitted at verify-dns ACTIVE transition. Earlier steps
-	// (register + verify-acme) must not have emitted, because V1
-	// emits only on terminal transitions.
-	rows, err := fx.outbox.Claim(context.Background(), 100)
-	if err != nil {
-		t.Fatal(err)
-	}
+	// AGENT_REGISTERED seals INLINE at the verify-dns ACTIVE transition
+	// (seal-before-success), stamped schema_version=V1 — never handed to
+	// the outbox WORKER. Earlier steps (register + verify-acme) must not
+	// have sealed anything, because V1 emits only on terminal
+	// transitions. Claim must return nothing: the only outbox row this
+	// lifecycle writes is the pre-delivered feed row recorded at
+	// activation (sent + logId at insert), which is invisible to Claim.
 	var registered int
-	for _, row := range rows {
-		if row.AgentID != agentID {
-			continue
+	for _, s := range fx.sealer.sealed() {
+		if s.SchemaVersion != "V1" {
+			t.Errorf("V1 agent sealed event schema_version=%q, want V1", s.SchemaVersion)
 		}
-		if row.SchemaVersion != "V1" {
-			t.Errorf("V1 agent row schema_version=%q, want V1", row.SchemaVersion)
-		}
-		if row.EventType == "AGENT_REGISTERED" {
+		if s.EventType == "AGENT_REGISTERED" {
 			registered++
 		}
 	}
 	if registered != 1 {
-		t.Errorf("V1 lifecycle must emit exactly one AGENT_REGISTERED leaf; got %d", registered)
+		t.Errorf("V1 lifecycle must seal exactly one AGENT_REGISTERED leaf; got %d", registered)
+	}
+	rows, err := fx.outbox.Claim(context.Background(), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("activation seals inline; nothing must be claimable by the worker, got %d rows", len(rows))
 	}
 }
 
@@ -133,27 +136,19 @@ func TestV1VerifyDNS_EmitsFullAttestations(t *testing.T) {
 		t.Fatalf("verify-dns: %d %s", ack.Code, ack.Body)
 	}
 
-	// Pull the emitted event from the outbox and drill into its
-	// attestation block.
-	rows, err := fx.outbox.Claim(context.Background(), 100)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var payloadJSON []byte
-	for _, row := range rows {
-		if row.AgentID == agentID && row.EventType == "AGENT_REGISTERED" {
-			payloadJSON = row.PayloadJSON
+	// AGENT_REGISTERED seals inline at activation; pull the sealed V1
+	// event and drill into its attestation block. The sealer records
+	// the JCS-canonical inner-event bytes the RA signed — the same
+	// bytes posted to the TL — so there is no {innerEventCanonical,
+	// producerSignature} outbox wrapper to unwrap here.
+	var innerCanonical []byte
+	for _, s := range fx.sealer.sealed() {
+		if s.SchemaVersion == "V1" && s.EventType == "AGENT_REGISTERED" {
+			innerCanonical = s.InnerCanonical
 		}
 	}
-	if len(payloadJSON) == 0 {
-		t.Fatal("no AGENT_REGISTERED outbox row found")
-	}
-	// Payload wrapper: {innerEventCanonical, producerSignature}.
-	var payload struct {
-		InnerEventCanonical json.RawMessage `json:"innerEventCanonical"`
-	}
-	if err := json.Unmarshal(payloadJSON, &payload); err != nil {
-		t.Fatalf("unmarshal payload: %v", err)
+	if len(innerCanonical) == 0 {
+		t.Fatal("no AGENT_REGISTERED sealed event found")
 	}
 	var inner struct {
 		EventType    string `json:"eventType"`
@@ -171,7 +166,7 @@ func TestV1VerifyDNS_EmitsFullAttestations(t *testing.T) {
 			} `json:"validIdentityCerts"`
 		} `json:"attestations"`
 	}
-	if err := json.Unmarshal(payload.InnerEventCanonical, &inner); err != nil {
+	if err := json.Unmarshal(innerCanonical, &inner); err != nil {
 		t.Fatalf("unmarshal inner event: %v", err)
 	}
 
@@ -382,6 +377,24 @@ func TestV1Revoke_MissingReason_422(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), "MISSING_REASON") {
 		t.Errorf("expected MISSING_REASON code, got %s", rec.Body)
+	}
+}
+
+func TestV1Revoke_CommentsTooLong_422(t *testing.T) {
+	t.Parallel()
+	fx := newHandlerFixture(t)
+	agentID, _ := fx.v1RegisterAgent(t, "alice", "agent.example.com", "1.0.0")
+	revBody, _ := json.Marshal(map[string]any{
+		"reason":   "KEY_COMPROMISE",
+		"comments": strings.Repeat("a", 201),
+	})
+	rec := fx.request(t, http.MethodPost, "/v1/agents/"+agentID+"/revoke",
+		bytes.NewReader(revBody), fx.asOwner("alice"))
+	if rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("want 422, got %d body=%s", rec.Code, rec.Body)
+	}
+	if !strings.Contains(rec.Body.String(), "COMMENTS_TOO_LONG") {
+		t.Errorf("expected COMMENTS_TOO_LONG code, got %s", rec.Body)
 	}
 }
 

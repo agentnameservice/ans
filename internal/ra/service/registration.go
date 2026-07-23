@@ -6,15 +6,18 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 
 	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
 	"github.com/agentnameservice/ans/internal/tl/event"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // OutboxEnqueuer is the subset of the SQLite OutboxStore the
@@ -33,6 +36,13 @@ import (
 // would leak SQL details into the port.
 type OutboxEnqueuer interface {
 	Enqueue(ctx context.Context, eventType, agentID, schemaVersion string, payload []byte, earliestAttempt time.Time) (int64, error)
+	// RecordSealed inserts a row that is already delivered (sent + logId
+	// set at insert), invisible to the worker's Claim. Used by the inline
+	// activation seal so the sealed AGENT_REGISTERED still surfaces on the
+	// agent-events feed — a read model over delivered outbox rows — even
+	// though it never rides the worker. Runs inside the activation
+	// transaction via the context-threaded tx.
+	RecordSealed(ctx context.Context, eventType, agentID, schemaVersion string, payload []byte, logID string) (int64, error)
 }
 
 // RegisterRequest is the command input for RegisterAgent. It is the
@@ -80,7 +90,7 @@ type RegisterRequest struct {
 	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// in dnsRecordsProvisioned and tells the operator to publish.
 	// Each element is one of domain.ValidDiscoveryProfiles(); typical
-	// values are {ANS_TXT} (default), {ANS_DNSAID}, or the
+	// values are {ANS_DNSAID} (default), {ANS_TXT}, or the
 	// {ANS_DNSAID, ANS_TXT} transition union. Empty/nil normalizes to
 	// domain.DefaultDiscoveryProfiles(); any invalid element surfaces
 	// as INVALID_DISCOVERY_PROFILE before the aggregate is created.
@@ -155,12 +165,50 @@ type RegistrationService struct {
 	// when nil, HTTP-01 challenges simply never verify and the gate
 	// relies on DNS-01. Production configs wire the default adapter.
 	httpChallenge port.HTTPChallengeVerifier
+	// tlPublicBaseURL is the externally-reachable Transparency Log URL
+	// (e.g. "https://tl.example.org") consumed by the AI Catalog surface:
+	// catalog entries embed the agent's TL badge URL and SCITT-receipt
+	// attestation URI built from it. DNS-record emission no longer reads
+	// it — the discovery-profile registry carries its own copy.
+	tlPublicBaseURL string
+	// agentSealer submits the AGENT_REGISTERED event to the TL inline at
+	// activation and returns only on the TL's acknowledgment —
+	// seal-before-success (ANS-1 §12.3: the RA MUST NOT activate without a
+	// sealed event). When nil, activation fails closed with TL_UNAVAILABLE;
+	// there is no "seal later" mode for the ACTIVE transition. (Revocation
+	// still rides the outbox.)
+	agentSealer AgentEventSealer
+	// sealTimeout bounds the inline activation seal round trip. Fixed at
+	// defaultSealTimeout (the identity lane's 5s budget) by design — agent
+	// activation shares that lane's timeout posture, so there is no
+	// per-instance setter; it stays well under the HTTP router timeout.
+	sealTimeout time.Duration
 	// signer is the KeyManager + keyID + raID tuple used to sign
 	// outbox events. When nil, events are still persisted but without
 	// a signature — this is only valid for tests; production configs
 	// must wire a real signer.
 	signer *EventSigner
+	// logger records the activation seal round trip and conflict
+	// cancellations — the state transitions CLAUDE.md requires at INFO
+	// and the failures on-call greps for. Defaults to zerolog.Nop();
+	// production wires WithLogger.
+	logger zerolog.Logger
 	clock  func() time.Time
+}
+
+// AgentEventSealer submits one producer-signed agent event to the TL's
+// V1/V2 ingest lane and returns only after the TL acknowledges the seal.
+// It is the agent-lane analogue of IdentityEventSealer: used to seal
+// AGENT_REGISTERED inline at activation so an agent is reported ACTIVE
+// only once its leaf is durable in the Transparency Log. On success it
+// returns the TL-assigned logId from the ack, which the activation
+// persists on a pre-delivered outbox row so the sealed event is visible
+// to the agent-events feed. A failed seal is a failed activation —
+// nothing is committed and the agent stays PENDING_DNS for the operator
+// to retry. Implementations map failures to domain error kinds
+// (ErrUnavailable for transient).
+type AgentEventSealer interface {
+	SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) (logID string, err error)
 }
 
 // EventSigner bundles the dependencies the RA needs to produce a
@@ -213,8 +261,41 @@ func NewRegistrationService(
 		outbox:            outbox,
 		uow:               uow,
 		discoveryRegistry: discoveryRegistry,
+		logger:            zerolog.Nop(),
 		clock:             time.Now,
+		sealTimeout:       defaultSealTimeout,
 	}
+}
+
+// WithAgentSealer attaches the synchronous TL sealer used to seal
+// AGENT_REGISTERED at activation (verify-dns) before the agent is reported
+// ACTIVE — seal-before-success (ANS-1 §12.3). Production builds must call
+// this; without it activation fails closed with TL_UNAVAILABLE.
+func (s *RegistrationService) WithAgentSealer(sealer AgentEventSealer) *RegistrationService {
+	s.agentSealer = sealer
+	return s
+}
+
+// WithLogger attaches the structured logger for the activation seal
+// round trip and conflict cancellations, tagged with the component per
+// repo convention. Mirrors IdentityService.WithLogger.
+func (s *RegistrationService) WithLogger(logger zerolog.Logger) *RegistrationService {
+	s.logger = logger.With().Str("component", "registration-service").Logger()
+	return s
+}
+
+// WithTLPublicBaseURL sets the externally-reachable TL base URL the AI
+// Catalog surface embeds in badge URLs and SCITT-receipt attestation URIs.
+// DNS-record emission does not read this — the discovery-profile registry
+// carries its own copy of the URL.
+func (s *RegistrationService) WithTLPublicBaseURL(publicBaseURL string) *RegistrationService {
+	s.tlPublicBaseURL = publicBaseURL
+	return s
+}
+
+// TLPublicBaseURL returns the configured public TL base URL.
+func (s *RegistrationService) TLPublicBaseURL() string {
+	return s.tlPublicBaseURL
 }
 
 // WithSigner attaches a KeyManager-backed event signer. Production
@@ -262,22 +343,20 @@ func (s *RegistrationService) WithDNSVerifier(v port.DNSVerifier) *RegistrationS
 //  5. Issue the identity certificate and store it.
 //  6. Persist the registration aggregate in a single transaction
 //     together with its endpoints, CSR, and BYOC cert.
-//  7. Enqueue an AgentRegistered event in the outbox (same transaction).
-//  8. Publish domain events in-process for local handlers.
-//  9. Return the registration + required DNS records + CA chain.
+//  7. Publish domain events in-process for local handlers (after commit).
+//  8. Return the registration + required DNS records + CA chain.
+//
+// Registration emits NO Transparency-Log event: it creates a PENDING
+// aggregate that has not proven domain control yet. The single terminal
+// AGENT_REGISTERED leaf is sealed INLINE at activation (verify-dns,
+// seal-before-success) — never enqueued here.
 func (s *RegistrationService) RegisterAgent(ctx context.Context, req RegisterRequest) (*RegisterResponse, error) {
 	now := s.clock()
 
-	// Uniqueness check before heavy work.
-	exists, err := s.agents.ExistsByAnsName(ctx, req.AnsName)
-	if err != nil {
+	// Conflict preflight before heavy cert work: exact-name uniqueness
+	// and FQDN exclusivity (one-host-one-owner).
+	if err := s.preflightRegistrationConflicts(ctx, req.AnsName, req.OwnerID); err != nil {
 		return nil, err
-	}
-	if exists {
-		return nil, domain.NewConflictError(
-			"ANS_NAME_TAKEN",
-			fmt.Sprintf("ANS name %q is already registered", req.AnsName),
-		)
 	}
 
 	// Validate identity CSR shape (optional) BEFORE the server-cert
@@ -480,6 +559,351 @@ func (s *RegistrationService) resolveServerCertInput(
 	}
 	srvCSR := domain.NewServerCSR(uuid.NewString(), req.ServerCsrPEM, now)
 	return serverCertInput{serverCSR: &srvCSR, order: order}, nil
+}
+
+// preflightRegistrationConflicts rejects a registration that collides with
+// an existing one before any certificate work: the exact versioned ANS
+// name is already registered (ANS_NAME_TAKEN), or the FQDN is held live by
+// a different owner (AGENT_HOST_TAKEN — the one-host-one-owner rule). The
+// host rule is checked at every progression step (register, verify-acme,
+// verify-dns) via ensureHostNotTakenByOther as a cheap fast-fail; the
+// AUTHORITATIVE decision is commitActivation's in-tx re-check, which
+// under the store's single writer deterministically aborts whichever
+// racer commits second (and refuses to resurrect a row a rival
+// conflict-cancelled mid-seal). A racer that loses after sealing leaves
+// an orphaned AGENT_REGISTERED leaf — the same benign residue the
+// seal/commit crash window accepts. A pre-seal host claim (cf. the
+// identity lane's nonce claim) would avoid spending that seal at all and
+// can land as a later optimization; correctness does not depend on it.
+func (s *RegistrationService) preflightRegistrationConflicts(ctx context.Context, ansName domain.AnsName, ownerID string) error {
+	exists, err := s.agents.ExistsByAnsName(ctx, ansName)
+	if err != nil {
+		return err
+	}
+	if exists {
+		return domain.NewConflictError(
+			"ANS_NAME_TAKEN",
+			fmt.Sprintf("ANS name %q is already registered", ansName),
+		)
+	}
+	held, err := s.hostHeldByAnotherOwner(ctx, ansName.FQDN(), ownerID, "")
+	if err != nil {
+		return err
+	}
+	if held {
+		return errHostTaken(ansName.FQDN())
+	}
+	return nil
+}
+
+// holdsHostExclusivity reports whether a registration in status st holds
+// its FQDN exclusively for its owner. A registration that has gone ACTIVE
+// and not yet reached a terminal state still operates on the host —
+// outright ACTIVE, or DEPRECATED (superseded but still resolving during a
+// version migration, ANS-1 §7.1) — so a different owner may not register
+// or activate on that host while any such registration exists. Pending and
+// terminal states (REVOKED / EXPIRED / FAILED) do not hold the host.
+func holdsHostExclusivity(st domain.RegistrationStatus) bool {
+	return st == domain.StatusActive || st == domain.StatusDeprecated
+}
+
+// hostHeldByAnotherOwner reports whether agentHost carries an
+// exclusivity-holding registration (holdsHostExclusivity) owned by an
+// operator other than ownerID, ignoring the registration identified by
+// exceptAgentID ("" ignores none). It enforces the rule that once a
+// registration goes live on an FQDN, that FQDN belongs to its owner alone
+// until no live registration remains.
+func (s *RegistrationService) hostHeldByAnotherOwner(ctx context.Context, agentHost, ownerID, exceptAgentID string) (bool, error) {
+	regs, err := s.agents.FindAllByAgentHost(ctx, agentHost)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range regs {
+		if r.AgentID == exceptAgentID {
+			continue
+		}
+		if r.OwnerID != ownerID && holdsHostExclusivity(r.Status) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// ensureHostNotTakenByOther rejects an operation that would advance reg
+// toward ACTIVE when a different owner already holds the FQDN live. Called
+// at every progression step (register, verify-acme, verify-dns) so a
+// registration that has lost the host is rejected at every level, not only
+// at the final activation.
+func (s *RegistrationService) ensureHostNotTakenByOther(ctx context.Context, reg *domain.AgentRegistration) error {
+	held, err := s.hostHeldByAnotherOwner(ctx, reg.FQDN(), reg.OwnerID, reg.AgentID)
+	if err != nil {
+		return err
+	}
+	if held {
+		return errHostTaken(reg.FQDN())
+	}
+	return nil
+}
+
+// revokeConflictLoserCertsAtCA performs the CA-side identity-certificate
+// revocation for the registrations activation is about to conflict-cancel
+// (still-pending, other-owner rows on the winner's host). It runs BEFORE
+// the activation transaction, exactly like cancelPending's ordering: CA
+// revocation is an external side effect that cannot roll back, and the
+// port contract makes it idempotent, so a crash between here and the
+// commit heals on retry. The authoritative loser set is re-read inside
+// the transaction; a loser that appears only in the tiny window between
+// this read and the commit keeps its certs until Revoke's self-healing
+// sweep, which repairs exactly that state.
+func (s *RegistrationService) revokeConflictLoserCertsAtCA(ctx context.Context, agentHost, winnerOwnerID string) error {
+	regs, err := s.agents.FindAllByAgentHost(ctx, agentHost)
+	if err != nil {
+		return err
+	}
+	for _, r := range regs {
+		if r.OwnerID == winnerOwnerID || !r.Status.IsPending() {
+			continue
+		}
+		certs, err := s.certs.FindIdentityCertificatesByAgent(ctx, r.AgentID)
+		if err != nil {
+			return err
+		}
+		if err := s.revokeIdentityCertsAtCA(ctx, certs, domain.RevocationCessationOfOperation); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// commitActivation is the transactional commit phase of verify-dns,
+// entered only after the AGENT_REGISTERED leaf is sealed. Under the
+// store's single writer it is the authoritative exclusivity decision —
+// the pre-seal ensureHostNotTakenByOther check is a cheap fast-fail, but
+// a rival can commit during the seal round trip, so everything is
+// re-decided here on in-tx reads:
+//
+//   - Own-row guard: the registration must still be PENDING_DNS. If a
+//     rival's activation conflict-cancelled it mid-seal, saving the stale
+//     in-memory ACTIVE aggregate would silently resurrect a REVOKED row —
+//     abort with AGENT_HOST_TAKEN instead.
+//   - Rival guard: any other owner's row now holding the host
+//     (ACTIVE/DEPRECATED) means this activation lost the race — abort
+//     with AGENT_HOST_TAKEN. Without this, both racers would commit
+//     ACTIVE and every later call would 409 each owner against the
+//     other: the host wedged for both with no API path out.
+//   - Losers: every still-pending other-owner registration is
+//     conflict-cancelled (no TL event, ANS-1 §4.4 — never sealed) and its
+//     VALID identity certificates are flipped REVOKED alongside (the CA
+//     side already ran pre-tx; see revokeConflictLoserCertsAtCA).
+//
+// An aborted loser has already sealed its own AGENT_REGISTERED leaf;
+// that orphan is the same benign residue the seal/commit crash window
+// accepts — the agent it names never reports ACTIVE, and read-side
+// status keys on the store row.
+func (s *RegistrationService) commitActivation(txCtx context.Context, reg *domain.AgentRegistration, sealed *sealedActivation) error {
+	current, err := s.agents.FindByAgentID(txCtx, reg.AgentID)
+	if err != nil {
+		return err
+	}
+	if current.Status != domain.StatusPendingDNS {
+		return errHostTaken(reg.FQDN())
+	}
+
+	rows, err := s.agents.FindAllByAgentHost(txCtx, reg.FQDN())
+	if err != nil {
+		return err
+	}
+	for _, r := range rows {
+		if r.AgentID == reg.AgentID || r.OwnerID == reg.OwnerID {
+			continue
+		}
+		if holdsHostExclusivity(r.Status) {
+			return errHostTaken(reg.FQDN())
+		}
+		if !r.Status.IsPending() {
+			continue
+		}
+		if err := r.CancelForHostConflict(); err != nil {
+			return err
+		}
+		if err := s.agents.Save(txCtx, r); err != nil {
+			return err
+		}
+		certs, err := s.certs.FindIdentityCertificatesByAgent(txCtx, r.AgentID)
+		if err != nil {
+			return err
+		}
+		for _, c := range certs {
+			if c.Status == domain.CertStatusValid {
+				revoked := c.Revoke()
+				if err := s.certs.UpdateCertificateStatus(txCtx, &revoked); err != nil {
+					return err
+				}
+			}
+		}
+		// A state transition on ANOTHER owner's resource — the first
+		// thing support needs when that owner asks why their pending
+		// registration turned REVOKED.
+		s.logger.Info().
+			Str("loserAgentId", r.AgentID).
+			Str("winnerAgentId", reg.AgentID).
+			Str("fqdn", reg.FQDN()).
+			Msg("pending registration conflict-cancelled by rival activation")
+	}
+
+	if err := s.agents.Save(txCtx, reg); err != nil {
+		return err
+	}
+	if _, err := s.outbox.RecordSealed(txCtx,
+		string(event.TypeAgentRegistered), reg.AgentID,
+		sealed.SchemaVersion, sealed.Payload, sealed.LogID); err != nil {
+		return err
+	}
+	return nil
+}
+
+// errHostTaken is the 409 returned when an FQDN is held by another owner.
+// "Live" mirrors holdsHostExclusivity: an ACTIVE registration or a
+// DEPRECATED one (superseded but still resolving) both hold the host, so
+// the message must not suggest that deprecating an agent frees the FQDN.
+func errHostTaken(agentHost string) error {
+	return domain.NewConflictError(
+		"AGENT_HOST_TAKEN",
+		fmt.Sprintf("agentHost %q has a live (ACTIVE or DEPRECATED) registration owned by another operator; "+
+			"it cannot be used until no live registration remains", agentHost),
+	)
+}
+
+// signCanonical produces the producer's detached JWS over the canonical
+// inner-event bytes. Returns "" when no signer is configured (tests only).
+func (s *RegistrationService) signCanonical(ctx context.Context, innerCanonical []byte, now time.Time) (string, error) {
+	if s.signer == nil {
+		return "", nil
+	}
+	return anscrypto.SignDetachedJWS(
+		ctx, s.signer.KeyManager, s.signer.KeyID,
+		anscrypto.JWSProtectedHeader{Typ: "JWT", Timestamp: now.Unix(), RAID: s.signer.RaID},
+		innerCanonical,
+	)
+}
+
+// sealedActivation is what a successful inline activation seal leaves
+// behind for the commit phase: the lane tag, the exact OutboxPayload
+// bytes the TL verified (canonical inner event + producer signature),
+// and the TL-assigned logId from the ack. VerifyDNS persists these on a
+// pre-delivered outbox row inside the activation transaction so the
+// sealed event surfaces on the agent-events feed (the ARD Finder's
+// ingest source) atomically with the ACTIVE commit.
+type sealedActivation struct {
+	SchemaVersion string
+	Payload       []byte
+	LogID         string
+}
+
+// sealActivationEvent builds the AGENT_REGISTERED event for the lane,
+// signs it once, and submits it to the TL inline, returning only on the
+// seal acknowledgment — seal-before-success for activation (ANS-1 §12.3,
+// mirroring the identity lane). A failed seal is a failed activation:
+// nothing is committed and the agent stays PENDING_DNS for the operator to
+// retry. A nil sealer fails closed with TL_UNAVAILABLE — there is no "seal
+// later" mode for the ACTIVE transition. expected/perRecord feed the
+// version-specific attestation block.
+func (s *RegistrationService) sealActivationEvent(
+	ctx context.Context, reg *domain.AgentRegistration,
+	expected []domain.ExpectedDNSRecord, perRecord []port.RecordVerification,
+	schemaVersion string, now time.Time,
+) (*sealedActivation, error) {
+	if s.agentSealer == nil {
+		return nil, domain.NewUnavailableError("TL_UNAVAILABLE",
+			"agent sealing is not configured; activation cannot report success without a sealed event")
+	}
+
+	schemaVer, innerCanonical, err := s.buildActivationLeaf(ctx, reg, expected, perRecord, schemaVersion, now)
+	if err != nil {
+		return nil, err
+	}
+
+	producerSig, err := s.signCanonical(ctx, innerCanonical, now)
+	if err != nil {
+		return nil, fmt.Errorf("sign agent event: %w", err)
+	}
+
+	sealCtx, cancel := context.WithTimeout(ctx, s.sealTimeout)
+	defer cancel()
+	sealStart := s.clock()
+	logID, err := s.agentSealer.SealAgentEvent(sealCtx, schemaVer, innerCanonical, producerSig)
+	if err != nil {
+		// Transient (TL didn't confirm; activation retryable, nothing
+		// consumed) is an expected detour under a TL incident → WARN.
+		// Anything else means the RA produced an event the TL refuses —
+		// a pipeline bug operators must see → ERROR. The underlying
+		// transport cause is logged at the tlclient adapter boundary
+		// before the domain mapping strips it.
+		ev := s.logger.Error()
+		if errors.Is(err, domain.ErrUnavailable) {
+			ev = s.logger.Warn()
+		}
+		ev.Err(err).
+			Str("agentId", reg.AgentID).
+			Str("fqdn", reg.FQDN()).
+			Str("schemaVersion", schemaVer).
+			Msg("agent activation seal failed")
+		return nil, err
+	}
+	// Logged BEFORE the commit: if the commit then fails, this line is
+	// what ties the orphaned AGENT_REGISTERED leaf back to this RA.
+	s.logger.Info().
+		Str("agentId", reg.AgentID).
+		Str("fqdn", reg.FQDN()).
+		Str("schemaVersion", schemaVer).
+		Str("logId", logID).
+		Dur("sealDuration", s.clock().Sub(sealStart)).
+		Msg("agent activation event sealed")
+
+	// Persist exactly the bytes the TL verified — the same
+	// {innerEventCanonical, producerSignature} wrapper worker-delivered
+	// rows carry, so the feed's projection parses both identically.
+	payload, err := json.Marshal(OutboxPayload{
+		InnerEventCanonical: json.RawMessage(innerCanonical),
+		ProducerSignature:   producerSig,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal sealed activation payload: %w", err)
+	}
+	return &sealedActivation{SchemaVersion: schemaVer, Payload: payload, LogID: logID}, nil
+}
+
+// buildActivationLeaf builds and JCS-canonicalizes the single terminal
+// AGENT_REGISTERED leaf for the requested lane, returning the
+// schema-version tag and the canonical bytes the RA will sign and seal.
+// The two lanes diverge only in the event builder and canonicalizer; the
+// sign-and-seal tail in sealActivationEvent is shared.
+func (s *RegistrationService) buildActivationLeaf(
+	ctx context.Context, reg *domain.AgentRegistration,
+	expected []domain.ExpectedDNSRecord, perRecord []port.RecordVerification,
+	schemaVersion string, now time.Time,
+) (string, []byte, error) {
+	if isV1Lane(schemaVersion) {
+		inner, err := s.buildAgentRegisteredV1Event(ctx, reg, expected, now)
+		if err != nil {
+			return "", nil, err
+		}
+		canonical, err := eventv1.CanonicalizeEvent(inner)
+		if err != nil {
+			return "", nil, fmt.Errorf("canonicalize V1 agent event: %w", err)
+		}
+		return eventv1.SchemaVersion, canonical, nil
+	}
+
+	inner, err := s.buildAgentRegisteredEvent(ctx, reg, expected, perRecord, now)
+	if err != nil {
+		return "", nil, err
+	}
+	canonical, err := event.CanonicalizeEvent(inner)
+	if err != nil {
+		return "", nil, fmt.Errorf("canonicalize agent event: %w", err)
+	}
+	return event.SchemaVersion, canonical, nil
 }
 
 // baseInnerEvent populates the fields every event carries about its

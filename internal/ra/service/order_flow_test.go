@@ -59,7 +59,8 @@ func TestVerifyDNS_TransientServerCertError_Aborts(t *testing.T) {
 		fx.agents, fx.endpoints, fx.certs, byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier())
+	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier()).
+		WithAgentSealer(fx.sealer)
 
 	// Register + verify-acme with the store healthy so the CSR-issued
 	// server cert is persisted and the agent reaches the pre-DNS state.
@@ -166,7 +167,7 @@ func rebuildWithIssuer(fx *regFixture, issuer port.ServerCertificateIssuer, dnsV
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateIssuer(issuer)
+	).WithServerCertificateIssuer(issuer).WithAgentSealer(fx.sealer)
 	if dnsV != nil {
 		svc = svc.WithDNSVerifier(dnsV)
 	}
@@ -992,7 +993,8 @@ func TestGetServerCertRenewal_TransientServerCertError_Propagates(t *testing.T) 
 		fx.agents, fx.endpoints, fx.certs, byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier())
+	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier()).
+		WithAgentSealer(fx.sealer)
 
 	agentID := registerAndActivate(t, fx, svc)
 	// BYOC renewal completes synchronously, leaving a completed renewal
@@ -1176,35 +1178,29 @@ func (challengeBlindDNSVerifier) VerifyRecords(
 	return &port.VerificationResult{AllRequired: all, Results: results}, nil
 }
 
-// claimAgentRegistered claims the outbox and returns the canonical
-// inner-event bytes of the first AGENT_REGISTERED row carrying the
-// given schema version. Both lanes share the eventType token, so the
-// probe decode works for either envelope shape.
+// claimAgentRegistered returns the canonical inner-event bytes of the
+// first AGENT_REGISTERED event carrying the given schema version.
+// AGENT_REGISTERED is sealed INLINE at activation (seal-before-success),
+// so the event is read from the fixture's recording sealer, not the
+// outbox. Both lanes share the eventType token, so the probe decode
+// works for either envelope shape.
 func claimAgentRegistered(t *testing.T, fx *regFixture, schemaVersion string) []byte {
 	t.Helper()
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
-	if err != nil {
-		t.Fatalf("Claim: %v", err)
-	}
-	for _, row := range rows {
-		if row.SchemaVersion != schemaVersion {
+	for _, s := range fx.sealer.sealed() {
+		if s.SchemaVersion != schemaVersion {
 			continue
-		}
-		var p service.OutboxPayload
-		if err := json.Unmarshal(row.PayloadJSON, &p); err != nil {
-			t.Fatalf("unmarshal OutboxPayload: %v", err)
 		}
 		var probe struct {
 			EventType string `json:"eventType"`
 		}
-		if err := json.Unmarshal(p.InnerEventCanonical, &probe); err != nil {
+		if err := json.Unmarshal(s.InnerCanonical, &probe); err != nil {
 			t.Fatalf("unmarshal inner event: %v", err)
 		}
 		if probe.EventType == string(event.TypeAgentRegistered) {
-			return p.InnerEventCanonical
+			return s.InnerCanonical
 		}
 	}
-	t.Fatalf("no AGENT_REGISTERED event with schema version %s in the outbox", schemaVersion)
+	t.Fatalf("no AGENT_REGISTERED event with schema version %s was sealed", schemaVersion)
 	return nil
 }
 

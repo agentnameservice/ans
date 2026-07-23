@@ -16,6 +16,16 @@
 #                                  callers can capture via $( ... ).
 #   wait_ready URL               — poll until /v2/admin/ready returns 200
 #   require_cmd CMD              — fail with a clear error if CMD is missing
+#
+# AI Catalog helpers (shared by catalog.sh + ai-catalog.sh):
+#   cat_req METHOD PATH [BODY]   — request; sets CAT_STATUS + CAT_BODY
+#   assert_status WANT LABEL     — assert the last cat_req's status
+#   cassert LABEL JSON FILTER    — assert a jq boolean filter over JSON
+#   cat_activate AGENT_ID        — verify-acme → verify-dns → ACTIVE
+#   gen_csrs HOST ANS_NAME       — emit IDENTITY_CSR_PEM + SERVER_CSR_PEM
+#   cat_doc AGENT_ID OUTFILE     — GET host-complete ai-catalog document;
+#                                  sets CAT_DOC_STATUS/CTYPE/ETAG, body→file
+#   cat_doc_inm AGENT_ID ETAG    — conditional GET; sets CAT_DOC_STATUS (304)
 
 set -euo pipefail
 
@@ -24,14 +34,25 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 BIN="${BIN:-$ROOT/bin}"
 DATA="${DATA:-$ROOT/data/demo}"
 # Pick up per-session exports start.sh may have persisted (e.g.
-# ANS_DNS_ZONE when `--with-dns` was used). Each line is KEY=VALUE.
-if [ -f "$DATA/env" ]; then
+# ANS_DNS_ZONE when `--with-dns` was used, or the DNS verifier
+# mode/server for dns-records.sh). Each line is KEY=VALUE.
+#
+# start.sh itself sets ANS_DEMO_SKIP_ENV=1 before sourcing this file:
+# the env file is start.sh's OUTPUT (rewritten on every start), never
+# its input — sourcing a previous run's values there would silently
+# re-apply a stale DNS verifier mode to a fresh stack.
+if [ -f "$DATA/env" ] && [ "${ANS_DEMO_SKIP_ENV:-0}" != "1" ]; then
   # shellcheck disable=SC1091
   set -a; . "$DATA/env"; set +a
 fi
 RA_URL="${RA_URL:-http://localhost:18080}"
 TL_URL="${TL_URL:-http://localhost:18081}"
 FINDER_URL="${FINDER_URL:-http://localhost:18082}"
+# The RA's externally-reachable TL base (config tl-client.public-base-url,
+# which MUST be https). The AI Catalog entry's badgeUrl + SCITT-receipt
+# attestation URI are built from this — same host:port as TL_URL in the
+# demo, https scheme. Mirrors config/defaults.go's PublicBaseURL default.
+TL_PUBLIC_URL="${TL_PUBLIC_URL:-https://localhost:18081}"
 RA_API_KEY="${RA_API_KEY:-ans-dev-key-change-me}"
 # ANS SDKs send `Authorization: sso-key <apiKey>:<apiSecret>` — the
 # reference RA's format. The demo RA accepts both `Bearer` (the
@@ -352,6 +373,139 @@ assert_tl_identity_audit() {
       "$TL_URL/v1/identities/$identity_id/audit" 2>/dev/null || true)
   done
   fail "checkpoint never covered identity $identity_id's leaves in ${timeout}s (records=${count}, with proof=${withproof:-0}; want $expected)"
+}
+
+# ──────────────────────────────────────────────────────────────────
+# AI Catalog demo helpers (shared by catalog.sh and ai-catalog.sh)
+# ──────────────────────────────────────────────────────────────────
+
+# cat_req METHOD PATH [BODY] — issue an RA request and set CAT_STATUS +
+# CAT_BODY in THIS shell. Unlike curl_json (whose LAST_HTTP_STATUS is lost
+# when the call is captured in a $(...) subshell), this keeps body and
+# status together so a caller can assert both — exactly what the catalog
+# routes' 200-vs-422 paths need.
+cat_req() {
+  local method="$1" path="$2" body="${3:-}" tmp
+  tmp=$(mktemp)
+  if [ -n "$body" ]; then
+    CAT_STATUS=$(curl -sS -X "$method" \
+      -H "Authorization: Bearer $RA_API_KEY" \
+      -H "Content-Type: application/json" \
+      --data "$body" -o "$tmp" -w '%{http_code}' "$RA_URL$path" || true)
+  else
+    CAT_STATUS=$(curl -sS -X "$method" \
+      -H "Authorization: Bearer $RA_API_KEY" \
+      -o "$tmp" -w '%{http_code}' "$RA_URL$path" || true)
+  fi
+  CAT_BODY=$(cat "$tmp")
+  rm -f "$tmp"
+  local color="$C_GREEN"
+  [ "${CAT_STATUS:-0}" -ge 400 ] && color="$C_YELLOW"
+  printf "${C_DIM}→ %s %s${C_RESET}  ${color}← %s${C_RESET}\n" "$method" "$path" "$CAT_STATUS" >&2
+  printf '%s' "$CAT_BODY" | pretty_json >&2
+}
+
+# assert_status WANT LABEL — fail unless the last cat_req returned WANT.
+assert_status() {
+  [ "${CAT_STATUS:-}" = "$1" ] || fail "$2: expected HTTP $1, got ${CAT_STATUS:-<none>}"
+}
+
+# cassert LABEL JSON JQ_FILTER — fail unless the jq boolean filter is
+# true against JSON. Keeps the per-field assertions terse and readable.
+cassert() {
+  local label="$1" json="$2" filter="$3"
+  if printf '%s' "$json" | jq -e "$filter" >/dev/null 2>&1; then
+    ok "$label"
+  else
+    printf '%s' "$json" | pretty_json >&2
+    fail "assertion failed: $label  (filter: $filter)"
+  fi
+}
+
+# cat_activate AGENT_ID — drive an agent to ACTIVE (verify-acme →
+# verify-dns). The demo's noop DNS verifier accepts any state, so both
+# steps succeed. A catalog entry exists only once the agent is ACTIVE.
+cat_activate() {
+  local id="$1"
+  cat_req POST "/v2/ans/agents/$id/verify-acme"
+  assert_status 202 "verify-acme $id"
+  cat_req POST "/v2/ans/agents/$id/verify-dns"
+  assert_status 202 "verify-dns $id"
+  ok "agent $id is ACTIVE"
+}
+
+# gen_csrs HOST ANS_NAME — generate an identity CSR (URI SAN = ANS name)
+# and a server CSR (DNS SAN = host), exporting IDENTITY_CSR_PEM and
+# SERVER_CSR_PEM. Mirrors register.sh.
+gen_csrs() {
+  local host="$1" ans="$2"
+  local dir="$DATA/csr-catalog/$host"
+  rm -rf "$dir"
+  mkdir -p "$dir"
+  cat >"$dir/identity.cnf" <<CNF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+[req_dn]
+CN = $ans
+[v3_req]
+subjectAltName = URI:$ans
+CNF
+  openssl ecparam -name prime256v1 -genkey -noout -out "$dir/identity.key" 2>/dev/null
+  openssl req -new -key "$dir/identity.key" -config "$dir/identity.cnf" -out "$dir/identity.csr" 2>/dev/null
+  IDENTITY_CSR_PEM=$(cat "$dir/identity.csr")
+
+  cat >"$dir/server.cnf" <<CNF
+[req]
+distinguished_name = req_dn
+req_extensions     = v3_req
+prompt             = no
+[req_dn]
+CN = $host
+[v3_req]
+subjectAltName = DNS:$host
+CNF
+  openssl ecparam -name prime256v1 -genkey -noout -out "$dir/server.key" 2>/dev/null
+  openssl req -new -key "$dir/server.key" -config "$dir/server.cnf" -out "$dir/server.csr" 2>/dev/null
+  SERVER_CSR_PEM=$(cat "$dir/server.csr")
+}
+
+# cat_doc AGENT_ID OUTFILE — GET the host-complete AI Catalog document for
+# the host AGENT_ID belongs to, writing the body to OUTFILE and setting
+# CAT_DOC_STATUS, CAT_DOC_CTYPE, and CAT_DOC_ETAG from the response headers.
+# This is the literal ai-catalog.json an Agent-Host Provider republishes
+# verbatim at https://{agentHost}/.well-known/ai-catalog.json.
+#
+# Fetched as the authenticated owner: this RA deployment owner-scopes the
+# catalog routes (ReadOwnership), whereas IMPL §6 models them as public.
+# A public deployment would simply drop the Authorization header; every
+# document assertion below is otherwise identical.
+cat_doc() {
+  local id="$1" outfile="$2" hdr
+  hdr=$(mktemp)
+  CAT_DOC_STATUS=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
+    -D "$hdr" -o "$outfile" -w '%{http_code}' \
+    "$RA_URL/v2/ans/agents/$id/ai-catalog" || true)
+  # Guard the grep so a missing header yields an empty var rather than
+  # tripping `set -o pipefail` (a non-200 response may omit ETag).
+  CAT_DOC_CTYPE=$({ grep -i '^content-type:' "$hdr" || true; } | sed -E 's/^[^:]*:[[:space:]]*//' | tr -d '\r')
+  CAT_DOC_ETAG=$({ grep -i '^etag:' "$hdr" || true; } | sed -E 's/^[Ee][Tt][Aa][Gg]:[[:space:]]*//' | tr -d '\r')
+  rm -f "$hdr"
+  local color="$C_GREEN"
+  [ "${CAT_DOC_STATUS:-0}" -ge 400 ] && color="$C_YELLOW"
+  printf "${C_DIM}→ GET /v2/ans/agents/%s/ai-catalog${C_RESET}  ${color}← %s${C_RESET}\n" "$id" "$CAT_DOC_STATUS" >&2
+}
+
+# cat_doc_inm AGENT_ID ETAG — conditional GET with If-None-Match; sets
+# CAT_DOC_STATUS (304 when the document is byte-identical to ETAG). Lets an
+# AHP poll the refresh target cheaply.
+cat_doc_inm() {
+  local id="$1" etag="$2"
+  CAT_DOC_STATUS=$(curl -sS -H "Authorization: Bearer $RA_API_KEY" \
+    -H "If-None-Match: $etag" -o /dev/null -w '%{http_code}' \
+    "$RA_URL/v2/ans/agents/$id/ai-catalog" || true)
+  printf "${C_DIM}→ GET /v2/ans/agents/%s/ai-catalog  (If-None-Match)${C_RESET}  ← %s\n" "$id" "$CAT_DOC_STATUS" >&2
 }
 
 # wait_ready URL [TIMEOUT_SECONDS]

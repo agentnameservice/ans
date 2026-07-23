@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
@@ -9,6 +10,10 @@ import (
 
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/ra/service"
+)
+
+const (
+	maxCommentsLength = 200
 )
 
 // V1LifecycleHandler groups the V1 post-registration transitions:
@@ -148,6 +153,12 @@ func (h *V1LifecycleHandler) Revoke(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Reason == "" {
 		h.writeError(w, domain.NewValidationError("MISSING_REASON", "reason is required"))
+		return
+	}
+
+	if len(req.Comments) > maxCommentsLength {
+		WriteError(w, domain.NewValidationError("COMMENTS_TOO_LONG",
+			fmt.Sprintf("comments exceeds %d characters", maxCommentsLength)))
 		return
 	}
 

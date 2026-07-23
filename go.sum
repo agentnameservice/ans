@@ -85,8 +85,8 @@ github.com/transparency-dev/formats v0.1.0 h1:oL0zUFuYUjg8AbtjPMnIRDmjbaHo5jCjEW
 github.com/transparency-dev/formats v0.1.0/go.mod h1:d2FibUOHfCMdCe/+/rbKt1IPLBbPTDfwj46kt541/mU=
 github.com/transparency-dev/merkle v0.0.2 h1:Q9nBoQcZcgPamMkGn7ghV8XiTZ/kRxn1yCG81+twTK4=
 github.com/transparency-dev/merkle v0.0.2/go.mod h1:pqSy+OXefQ1EDUVmAJ8MUhHB9TXGuzVAT58PqBoHz1A=
-github.com/transparency-dev/tessera v1.0.3 h1:MC4Qobga8YOFGOnci2evEaCzduGXr9B8LiRv1K2qgg4=
-github.com/transparency-dev/tessera v1.0.3/go.mod h1:WD/EMM6RXWRyImk9yyJ2hrs8xdknN/lpwUrFR2GemfU=
+github.com/transparency-dev/tessera v1.0.4 h1:IXjGowubcLR0T3zUQrysSMKgtTh9KGKQ0iajUiubyP4=
+github.com/transparency-dev/tessera v1.0.4/go.mod h1:WD/EMM6RXWRyImk9yyJ2hrs8xdknN/lpwUrFR2GemfU=
 github.com/x448/float16 v0.8.4 h1:qLwI1I70+NjRFUR3zs1JPUCgaCXSh3SW62uAKT1mSBM=
 github.com/x448/float16 v0.8.4/go.mod h1:14CWIYCyZA/cWjXOioeEpHeN/83MdbZDRQHoFcYsOfg=
 go.opentelemetry.io/auto/sdk v1.2.1 h1:jXsnJ4Lmnqd11kwkBV2LgLoFMZKizbCi5fNZ/ipaZ64=

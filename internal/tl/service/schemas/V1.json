@@ -189,7 +189,7 @@
           "type": "string"
         },
         "revocationReasonCode": {
-          "description": "RFC 5280 revocation reason code",
+          "description": "Revocation reason code",
           "enum": [
             "AA_COMPROMISE",
             "AFFILIATION_CHANGED",

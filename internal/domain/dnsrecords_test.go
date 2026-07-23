@@ -18,11 +18,12 @@ func TestValidDiscoveryProfiles(t *testing.T) {
 }
 
 // TestDefaultDiscoveryProfiles pins the default set applied when a V2
-// register request omits discoveryProfiles. Pinned to the stable
-// {ANS_TXT} family while ANS_DNSAID is brought to conformance.
+// register request omits discoveryProfiles. Pinned to the DNS-AID
+// SVCB family {ANS_DNSAID}; operators with legacy `_ans` zone tooling
+// opt into ANS_TXT explicitly.
 func TestDefaultDiscoveryProfiles(t *testing.T) {
 	got := DefaultDiscoveryProfiles()
-	want := []DiscoveryProfile{DiscoveryProfileANSTXT}
+	want := []DiscoveryProfile{DiscoveryProfileANSDNSAID}
 	assert.Equal(t, want, got)
 }
 

@@ -36,6 +36,8 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/rs/zerolog"
+
 	"github.com/agentnameservice/ans/internal/domain"
 )
 
@@ -84,6 +86,7 @@ type Client struct {
 	baseURL string
 	apiKey  string
 	http    *http.Client
+	logger  zerolog.Logger
 }
 
 // New constructs a Client. baseURL is the TL's listen URL (no
@@ -96,6 +99,7 @@ func New(baseURL, apiKey string, timeout time.Duration) *Client {
 		baseURL: baseURL,
 		apiKey:  apiKey,
 		http:    &http.Client{Timeout: timeout},
+		logger:  zerolog.Nop(),
 	}
 }
 
@@ -241,6 +245,28 @@ func IsPermanent(err error) bool {
 	return errors.As(err, &p)
 }
 
+// WithLogger attaches the structured logger used to record the raw
+// transport cause of a failed seal BEFORE the domain mapping strips it —
+// the RA-side line that distinguishes a timeout from connection-refused
+// from a 429 during a TL incident. Defaults to zerolog.Nop().
+func (c *Client) WithLogger(logger zerolog.Logger) *Client {
+	c.logger = logger.With().Str("component", "tl-client").Logger()
+	return c
+}
+
+// logSealFailure records the unmapped transport error for a failed seal.
+// WARN for transient faults (retryable; expected during a TL incident),
+// ERROR for permanent rejections (the RA produced an event the TL
+// refuses). The domain error the caller receives carries only the
+// sanitized category, so this line is where the cause survives.
+func (c *Client) logSealFailure(lane string, err error) {
+	ev := c.logger.Error()
+	if IsTransient(err) {
+		ev = c.logger.Warn()
+	}
+	ev.Err(err).Str("lane", lane).Msg("TL seal failed")
+}
+
 // SealIdentityEvent submits a producer-signed identity event on the
 // IDENTITY lane and returns only after the TL acknowledges the seal —
 // the client half of seal-before-success (design §5.6.1). Identity
@@ -255,6 +281,9 @@ func IsPermanent(err error) bool {
 //     a pipeline bug, not weather; operators must see it.
 func (c *Client) SealIdentityEvent(ctx context.Context, innerCanonical []byte, producerSig string) error {
 	_, err := c.Append(ctx, "IDENTITY", innerCanonical, producerSig)
+	if err != nil {
+		c.logSealFailure("IDENTITY", err)
+	}
 	switch {
 	case err == nil:
 		return nil
@@ -264,5 +293,36 @@ func (c *Client) SealIdentityEvent(ctx context.Context, innerCanonical []byte, p
 	default:
 		return domain.NewInternalError("TL_REJECTED_EVENT",
 			"the transparency log rejected the identity event", err)
+	}
+}
+
+// SealAgentEvent submits a producer-signed AGENT event on the V1 or V2
+// ingest lane and returns only after the TL acknowledges the seal — the
+// client half of seal-before-success for agent ACTIVATION (ANS-1 §12.3:
+// "the RA MUST NOT activate without a sealed event"). Used by the
+// registration service to seal AGENT_REGISTERED inline at verify-dns,
+// before the agent is reported ACTIVE. On success it returns the
+// TL-assigned logId from the ack — the activation path persists it on a
+// pre-delivered outbox row so the sealed event surfaces on the
+// agent-events feed (which gates on log_id) without riding the worker.
+// Error mapping mirrors SealIdentityEvent: transient → TL_UNAVAILABLE
+// (retryable, nothing consumed — the activation can be retried),
+// permanent → TL_REJECTED_EVENT (the RA produced an event the TL refuses
+// — a pipeline bug operators must see). schemaVersion selects the lane
+// ("V1" or "V2").
+func (c *Client) SealAgentEvent(ctx context.Context, schemaVersion string, innerCanonical []byte, producerSig string) (string, error) {
+	res, err := c.Append(ctx, schemaVersion, innerCanonical, producerSig)
+	if err != nil {
+		c.logSealFailure(schemaVersion, err)
+	}
+	switch {
+	case err == nil:
+		return res.LogID, nil
+	case IsTransient(err):
+		return "", domain.NewUnavailableError("TL_UNAVAILABLE",
+			"the transparency log did not confirm the seal; activation is retryable and nothing was consumed")
+	default:
+		return "", domain.NewInternalError("TL_REJECTED_EVENT",
+			"the transparency log rejected the agent event", err)
 	}
 }

@@ -108,6 +108,42 @@ Generally speaking, Git handles attribution automatically.
 Ensure that your contribution follows the standards set by the project's style
 guide with respect to patterns, naming, documentation and testing.
 
+## Developer Certificate of Origin
+
+This project follows the Linux Foundation contribution model. Every commit
+must carry a `Signed-off-by:` trailer certifying the
+[Developer Certificate of Origin](https://developercertificate.org) — your
+assertion that you have the right to submit the change under the project's
+license. Sign off each commit with:
+
+```
+git commit -s
+```
+
+Missing sign-offs on an existing branch can be fixed with
+`git rebase --signoff origin/main` followed by a force-push. The `DCO`
+status check — the org-wide [DCO app](https://github.com/apps/dco), the
+same enforcement used across Linux Foundation projects — validates this
+on every pull request; bot-authored commits (Dependabot, release-please)
+and merge commits are exempt.
+
+## AI-Assisted Contributions
+
+AI-assisted contributions are welcome **with disclosure**, following the
+[Linux kernel convention](https://docs.kernel.org/process/coding-assistants.html):
+
+- Disclose the tooling in the pull request's **AI assistance** section,
+  naming the tool and model, e.g. `Assisted-by: Claude Code (claude-fable-5)`.
+- AI tools must never add `Signed-off-by:` lines. DCO certification belongs
+  to the human submitter, who remains fully responsible for the correctness
+  and licensing of the contribution.
+
+## Linking Issues
+
+Every pull request must reference an issue with a closing keyword (e.g.
+`Fixes #123`). Open the issue first — issues are where triage and
+prioritization happen.
+
 # Additional Resources
 
 - [General GitHub Documentation](https://help.github.com/)

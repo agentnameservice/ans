@@ -242,6 +242,10 @@ func (failingOutbox) Enqueue(_ context.Context, _, _, _ string, _ []byte, _ time
 	return 0, errors.New("simulated outbox failure")
 }
 
+func (failingOutbox) RecordSealed(_ context.Context, _, _, _ string, _ []byte, _ string) (int64, error) {
+	return 0, errors.New("simulated outbox failure")
+}
+
 // anyAgentID looks up the agentID for the given ANS name. Helpers
 // only — the AnsName is unique per fixture, so the lookup is
 // deterministic.
@@ -259,7 +263,9 @@ func anyAgentID(t *testing.T, fx *regFixture, ans domain.AnsName) string {
 type regFixture struct {
 	svc          *service.RegistrationService
 	req          service.RegisterRequest
+	db           *sqlite.DB
 	outboxStore  *sqlite.OutboxStore
+	sealer       *recordingAgentSealer
 	uow          port.UnitOfWork
 	agents       port.AgentStore
 	endpoints    port.EndpointStore
@@ -331,6 +337,7 @@ func newRegFixture(t *testing.T) *regFixture {
 		t.Fatal(err)
 	}
 
+	sealer := &recordingAgentSealer{}
 	svc := service.NewRegistrationService(
 		agents, endpoints, certsStore, byoc, renewals, validator, identityCA, bus, outbox, db, discoveryReg,
 	).WithSigner(service.EventSigner{
@@ -340,7 +347,8 @@ func newRegFixture(t *testing.T) *regFixture {
 	}).WithServerCertificateIssuer(serverCA).
 		// The challenge gate is unconditional; the noop verifier plays
 		// the quickstart role (accepts any published state).
-		WithDNSVerifier(dns.NewNoopVerifier())
+		WithDNSVerifier(dns.NewNoopVerifier()).
+		WithAgentSealer(sealer)
 
 	// Build a valid identity CSR whose URI SAN matches the ANS name
 	// and a server CSR whose DNS SAN matches the FQDN.
@@ -351,7 +359,9 @@ func newRegFixture(t *testing.T) *regFixture {
 
 	return &regFixture{
 		svc:          svc,
+		db:           db,
 		outboxStore:  outbox,
+		sealer:       sealer,
 		uow:          db,
 		agents:       agents,
 		endpoints:    endpoints,

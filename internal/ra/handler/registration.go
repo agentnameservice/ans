@@ -44,9 +44,9 @@ type registrationRequest struct {
 
 	// DiscoveryProfiles is the set of DNS record families the RA emits
 	// for this registration. Each element is one of "ANS_DNSAID" or
-	// "ANS_TXT". Typical values: ["ANS_TXT"] (default), ["ANS_DNSAID"],
+	// "ANS_TXT". Typical values: ["ANS_DNSAID"] (default), ["ANS_TXT"],
 	// or ["ANS_DNSAID", "ANS_TXT"] (transition union).
-	// Empty/missing → ["ANS_TXT"]. Any invalid element rejected
+	// Empty/missing → ["ANS_DNSAID"]. Any invalid element rejected
 	// with 422 INVALID_DISCOVERY_PROFILE. See ANS_SPEC.md §4.4.2.
 	DiscoveryProfiles []string `json:"discoveryProfiles,omitempty"`
 }
@@ -251,10 +251,11 @@ func mapRegistrationResponse(resp *service.RegisterResponse, r *http.Request) *r
 	// Register-time next-steps reflect the deferred-cert flow: certs
 	// only issue once verify-acme proves domain control, so the only
 	// step the operator can take right now is publish a challenge
-	// artifact and call verify-acme. Production DNS records
-	// (TRUST/BADGE/DISCOVERY/TLSA) only materialize on the
-	// verify-acme 202, where they appear paired with VERIFY_DNS as
-	// the next step.
+	// artifact and call verify-acme.
+	// Production DNS records (TRUST / BADGE / DISCOVERY / TLSA)
+	// don't appear until after verify-acme issues certs — the TLSA
+	// fingerprint can't exist before the server cert does.
+	// The records surface on GET agent detail via registrationPending.dnsRecords
 	return &registrationPendingResponse{
 		AgentID:    resp.Registration.AgentID,
 		Status:     string(resp.Registration.Status),
