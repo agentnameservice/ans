@@ -192,6 +192,24 @@ type VLEI struct {
 	PresentTimeout time.Duration `koanf:"present-timeout"`
 }
 
+// WebBotAuth selects the web-bot-auth (web-bot-auth kind) directory
+// resolver — the HTTP Message Signatures directory fetch behind the
+// web-bot-auth identifier kind. Top-level, matching the DNS verifier and
+// the vLEI verifier, because it is a distinct outbound dependency.
+type WebBotAuth struct {
+	Directory WebBotAuthDirectory `koanf:"directory"`
+}
+
+// WebBotAuthDirectory selects the directory resolver adapter. "noop"
+// (default) performs no I/O and synthesizes the endorsed key set from
+// the keys embedded in the submitted proofs (quickstart — signature
+// verification still genuinely runs, only the live-directory binding is
+// waived; NOT for production); "http" performs the hardened HTTPS fetch
+// with WebPKI validation and SSRF dialer guards.
+type WebBotAuthDirectory struct {
+	Type string `koanf:"type"` // "noop" | "http"
+}
+
 // Keys holds key-manager configuration.
 type Keys struct {
 	Type string    `koanf:"type"` // "file"
@@ -294,6 +312,7 @@ type RAConfig struct {
 	DNS        DNS        `koanf:"dns"`
 	Identity   Identity   `koanf:"identity"`
 	VLEI       VLEI       `koanf:"vlei"`
+	WebBotAuth WebBotAuth `koanf:"webbotauth"`
 	Keys       Keys       `koanf:"keys"`
 	Store      Store      `koanf:"store"`
 	TLClient   TLClient   `koanf:"tl-client"`
@@ -418,6 +437,7 @@ func loadKoanf(path, envPrefix string) (*koanf.Koanf, error) {
 const (
 	caTypeSelf       = "self"
 	verifierTypeNoop = "noop"
+	schemeHTTP       = "http"
 )
 
 // Validate ensures the RA config is internally consistent.
@@ -465,6 +485,11 @@ func (c *RAConfig) Validate() error {
 	}
 	if c.Identity.RegisterRateLimit < 0 {
 		return errors.New("identity.register-rate-limit must not be negative")
+	}
+	switch c.WebBotAuth.Directory.Type {
+	case "", verifierTypeNoop, schemeHTTP:
+	default:
+		return fmt.Errorf("webbotauth.directory.type %q not supported (expected 'noop' or 'http')", c.WebBotAuth.Directory.Type)
 	}
 	if err := validateVLEI(&c.VLEI); err != nil {
 		return err
@@ -561,7 +586,7 @@ func validateVLEI(v *VLEI) error {
 			return errors.New("vlei.base-url is required when vlei.type is 'verifier'")
 		}
 		u, err := url.Parse(v.BaseURL)
-		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		if err != nil || u.Host == "" || (u.Scheme != schemeHTTP && u.Scheme != "https") {
 			return fmt.Errorf("vlei.base-url must be a valid http(s) URL, got %q", v.BaseURL)
 		}
 	default:
@@ -633,7 +658,7 @@ func validateAbsoluteServiceURL(raw string, allowHTTP bool, label string) error 
 	}
 	switch u.Scheme {
 	case "https":
-	case "http":
+	case schemeHTTP:
 		if !allowHTTP {
 			return fmt.Errorf("%s must use https scheme, got %q", label, u.Scheme)
 		}

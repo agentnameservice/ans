@@ -2,21 +2,17 @@ package didresolver
 
 import (
 	"context"
-	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
-	"golang.org/x/net/publicsuffix"
 
+	"github.com/agentnameservice/ans/internal/adapter/securefetch"
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
 )
@@ -165,14 +161,14 @@ func (w *Web) parseResponse(did string, resp *http.Response) (*port.DIDDocument,
 		return nil, domain.NewValidationError("DID_RESOLUTION_FAILED",
 			fmt.Sprintf("DID document fetch for %s returned status %d", did, resp.StatusCode))
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, w.maxBodyBytes+1))
+	body, err := securefetch.ReadCappedBody(resp.Body, w.maxBodyBytes)
+	if errors.Is(err, securefetch.ErrBodyTooLarge) {
+		return nil, domain.NewValidationError("DID_RESOLUTION_FAILED",
+			fmt.Sprintf("DID document for %s exceeds the %d-byte limit", did, w.maxBodyBytes))
+	}
 	if err != nil {
 		return nil, domain.NewValidationError("DID_RESOLUTION_FAILED",
 			fmt.Sprintf("could not read the DID document for %s", did))
-	}
-	if int64(len(body)) > w.maxBodyBytes {
-		return nil, domain.NewValidationError("DID_RESOLUTION_FAILED",
-			fmt.Sprintf("DID document for %s exceeds the %d-byte limit", did, w.maxBodyBytes))
 	}
 
 	doc, err := parseDIDDocument(body)
@@ -186,142 +182,40 @@ func (w *Web) parseResponse(did string, resp *http.Response) (*port.DIDDocument,
 	return doc, nil
 }
 
-// newClient builds the per-resolve HTTP client: pinning dialer +
-// WebPKI transport + same-registrable-domain redirect policy. A fresh
-// client per call keeps the DNS pin scoped to exactly one
-// verify-control round.
+// newClient builds the per-resolve HTTP client on the shared
+// securefetch toolkit: the SSRF-hardened pinning dialer (pinned to 443,
+// the only port did:web can express) + WebPKI transport +
+// same-registrable-domain redirect policy. A fresh client per call
+// keeps the DNS pin scoped to exactly one verify-control round.
 func (w *Web) newClient(originHost string) (*http.Client, error) {
-	pinned := &pinningDialer{allowPrivate: w.allowPrivate}
-	transport := &http.Transport{
-		DialContext:       pinned.DialContext,
-		ForceAttemptHTTP2: true,
-		TLSClientConfig:   &tls.Config{RootCAs: w.rootCAs, MinVersion: tls.VersionTLS12},
-		// This transport is built per Resolve call against one
-		// registrant-steered host; keeping idle connections open
-		// would let a connection linger ~90s after the fetch with no
-		// reuse benefit. Close them when the request completes.
-		DisableKeepAlives: true,
+	dialerOpts := []securefetch.DialerOption{securefetch.WithRequirePort("443")}
+	if w.allowPrivate {
+		dialerOpts = append(dialerOpts, securefetch.WithAllowPrivateNetworks())
 	}
-	originDomain, err := registrableDomain(originHost)
+	dialer := securefetch.NewDialer(dialerOpts...)
+
+	originDomain, err := securefetch.RegistrableDomain(originHost)
 	if err != nil {
 		return nil, domain.NewValidationError("DID_BAD_FORMAT",
 			fmt.Sprintf("did:web host %q has no registrable domain", originHost))
 	}
-	return &http.Client{
-		Transport: transport,
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
-			if len(via) >= maxRedirects {
-				return domain.NewValidationError("DID_RESOLUTION_FAILED",
-					"too many redirects resolving the DID document")
-			}
-			if req.URL.Scheme != "https" {
-				return domain.NewValidationError("DID_RESOLUTION_FAILED",
-					"DID document redirect left https")
-			}
-			redirDomain, derr := registrableDomain(req.URL.Hostname())
-			if derr != nil || redirDomain != originDomain {
-				return domain.NewValidationError("DID_REDIRECT_DOMAIN_MISMATCH",
-					"DID document redirect left the DID's registrable domain")
-			}
-			return nil
-		},
-	}, nil
-}
-
-// registrableDomain returns the eTLD+1 for a host. Single-label hosts
-// (localhost, bare TLDs) error — they have no registrable domain.
-func registrableDomain(host string) (string, error) {
-	return publicsuffix.EffectiveTLDPlusOne(strings.ToLower(host))
-}
-
-// pinningDialer resolves, filters, and pins target IPs.
-//
-// The pin map lives for one Resolve call (one dialer per client per
-// call): the first connection to a host fixes its IP, so a DNS rebind
-// between the initial fetch and a redirect hop — or between TLS
-// handshake retries — cannot redirect a later connection to a
-// different (possibly internal) address. Every chosen IP passes the
-// denylist *after* resolution; hostname-string checks are worthless
-// against rebinding.
-type pinningDialer struct {
-	allowPrivate bool
-
-	mu  sync.Mutex
-	pin map[string]string // host → ip
-}
-
-func (d *pinningDialer) DialContext(ctx context.Context, network, addr string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(addr)
-	if err != nil {
-		return nil, errors.New("didresolver: malformed dial address")
-	}
-	if port != "443" {
-		// did:web fetches are pinned to 443; nothing else should
-		// ever reach the dialer.
-		return nil, errors.New("didresolver: refusing non-443 connection")
-	}
-
-	d.mu.Lock()
-	if d.pin == nil {
-		d.pin = make(map[string]string)
-	}
-	pinnedIP, ok := d.pin[host]
-	d.mu.Unlock()
-
-	if !ok {
-		var err error
-		pinnedIP, err = d.resolveAndPin(ctx, host)
-		if err != nil {
-			return nil, err
+	checkRedirect := func(req *http.Request, via []*http.Request) error {
+		if len(via) >= maxRedirects {
+			return domain.NewValidationError("DID_RESOLUTION_FAILED",
+				"too many redirects resolving the DID document")
 		}
-	}
-
-	var dialer net.Dialer
-	return dialer.DialContext(ctx, network, net.JoinHostPort(pinnedIP, port))
-}
-
-// resolveAndPin resolves the host, applies the egress denylist to
-// every candidate address, and pins the first allowed IP. First
-// writer wins — concurrent dials for one host converge on one pin.
-func (d *pinningDialer) resolveAndPin(ctx context.Context, host string) (string, error) {
-	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil || len(ips) == 0 {
-		return "", errors.New("didresolver: host did not resolve")
-	}
-	chosen := ""
-	for _, ip := range ips {
-		if d.allowPrivate || isPublicUnicast(ip.IP) {
-			chosen = ip.IP.String()
-			break
+		if req.URL.Scheme != "https" {
+			return domain.NewValidationError("DID_RESOLUTION_FAILED",
+				"DID document redirect left https")
 		}
+		redirDomain, derr := securefetch.RegistrableDomain(req.URL.Hostname())
+		if derr != nil || redirDomain != originDomain {
+			return domain.NewValidationError("DID_REDIRECT_DOMAIN_MISMATCH",
+				"DID document redirect left the DID's registrable domain")
+		}
+		return nil
 	}
-	if chosen == "" {
-		return "", errors.New("didresolver: host resolves only to disallowed addresses")
-	}
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	if existing, dup := d.pin[host]; dup {
-		return existing, nil
-	}
-	d.pin[host] = chosen
-	return chosen, nil
-}
-
-// isPublicUnicast rejects every address class the egress denylist
-// names: loopback, RFC 1918 / ULA private ranges, link-local (which
-// contains the cloud-metadata addresses), multicast, and unspecified.
-func isPublicUnicast(ip net.IP) bool {
-	switch {
-	case ip.IsLoopback(),
-		ip.IsPrivate(),
-		ip.IsLinkLocalUnicast(),
-		ip.IsLinkLocalMulticast(),
-		ip.IsMulticast(),
-		ip.IsUnspecified():
-		return false
-	default:
-		return true
-	}
+	return securefetch.NewClient(dialer, w.rootCAs, checkRedirect), nil
 }
 
 // didDocumentWire is the on-the-wire DID document subset we parse.
