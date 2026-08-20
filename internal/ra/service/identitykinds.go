@@ -47,6 +47,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	anscrypto "github.com/agentnameservice/ans/internal/crypto"
 	"github.com/agentnameservice/ans/internal/domain"
@@ -143,7 +144,7 @@ type controlVerifier interface {
 // did:ion, and did:ethr slot in here when their verifiers are real;
 // until then domain.InferIdentifierKind may recognize a value's form
 // but the missing registry entry yields IDENTIFIER_KIND_UNSUPPORTED.
-func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifier) map[domain.IdentifierKind]controlVerifier {
+func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifier, dirResolver port.WebBotAuthDirectoryResolver) map[domain.IdentifierKind]controlVerifier {
 	// NOTE: deliberately NOT exhaustive over IdentifierKind — a
 	// recognized-but-absent kind (did:plc, did:ion, did:ethr, until
 	// their verifiers ship) MUST fail with IDENTIFIER_KIND_UNSUPPORTED
@@ -151,8 +152,9 @@ func newControlVerifiers(resolver port.DIDResolver, leiCtl port.LEIControlVerifi
 	// only registered when configured.
 	//exhaustive:ignore // registry is intentionally partial; absent kinds map to IDENTIFIER_KIND_UNSUPPORTED
 	m := map[domain.IdentifierKind]controlVerifier{
-		domain.KindDIDWeb: &didWebVerifier{resolver: resolver},
-		domain.KindDIDKey: &didKeyVerifier{},
+		domain.KindDIDWeb:     &didWebVerifier{resolver: resolver},
+		domain.KindDIDKey:     &didKeyVerifier{},
+		domain.KindWebBotAuth: &webBotAuthVerifier{resolver: dirResolver, clock: time.Now},
 	}
 	if leiCtl != nil {
 		m[domain.KindLEI] = &leiVerifier{v: leiCtl} // absent → IDENTIFIER_KIND_UNSUPPORTED
