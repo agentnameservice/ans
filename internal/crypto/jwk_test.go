@@ -327,3 +327,58 @@ func TestEdDSAJWSVerify(t *testing.T) {
 		t.Fatal("EdDSA header must not verify with an ECDSA key")
 	}
 }
+
+// TestJWKThumbprint_RFC8037Vector pins the RFC 7638 thumbprint against
+// the Ed25519 vector from RFC 8037 Appendix A.3, the same key type
+// web-bot-auth uses. V4.
+func TestJWKThumbprint_RFC8037Vector(t *testing.T) {
+	jwk := json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}`)
+	got, err := JWKThumbprint(jwk)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	const want = "kPrK_qmxVWaYVA9wwBF6Iuo3vVzz7TxHCTwXBygrS4k"
+	if got != want {
+		t.Fatalf("thumbprint = %q, want %q", got, want)
+	}
+}
+
+// TestJWKThumbprint_MemberOrderIndependent confirms the digest is over
+// the canonical (lexicographically-ordered) member set, so a directory
+// JWK and a proof header jwk with differently-ordered members still
+// yield the same kid. V4.
+func TestJWKThumbprint_MemberOrderIndependent(t *testing.T) {
+	a := json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}`)
+	b := json.RawMessage(`{"x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo","crv":"Ed25519","kty":"OKP"}`)
+	ta, err := JWKThumbprint(a)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tb, err := JWKThumbprint(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ta != tb {
+		t.Fatalf("member order changed thumbprint: %q vs %q", ta, tb)
+	}
+}
+
+// TestJWKThumbprint_Rejections pins V12/V4: only OKP/Ed25519 keys have
+// a thumbprint here; every other kty/crv and a malformed x errors.
+func TestJWKThumbprint_Rejections(t *testing.T) {
+	cases := map[string]json.RawMessage{
+		"EC key":     json.RawMessage(`{"kty":"EC","crv":"P-256","x":"f83OJ3D2xF1Bg8vub9tLe1gHMzV76e8Tus9uPHvRVEU","y":"x_FEzRu9m36HLN_tue659LNpXW6pCyStikYjKIWI5a0"}`),
+		"RSA key":    json.RawMessage(`{"kty":"RSA","n":"abc","e":"AQAB"}`),
+		"OKP X25519": json.RawMessage(`{"kty":"OKP","crv":"X25519","x":"11qYAYKxCrfVS_7TyWQHOg7hcvPapiMlrwIaaPcHURo"}`),
+		"bad x":      json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"!!!"}`),
+		"short x":    json.RawMessage(`{"kty":"OKP","crv":"Ed25519","x":"AAAA"}`),
+		"not json":   json.RawMessage(`{`),
+	}
+	for name, jwk := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := JWKThumbprint(jwk); err == nil {
+				t.Fatalf("%s: expected error, got nil", name)
+			}
+		})
+	}
+}
