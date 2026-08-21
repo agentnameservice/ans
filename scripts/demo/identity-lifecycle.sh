@@ -14,6 +14,10 @@
 #   5.  GET    /v2/ans/identities/{id}                     detail
 #   6.  POST   /v2/ans/identities                          register did:key (zero-I/O kind)
 #   7.  POST   .../verify-control                          did:key proof → VERIFIED
+#   7a. POST   /v2/ans/identities                          register web-bot-auth (Signature-Agent URL) → 202
+#   7b. POST   .../verify-control                          Ed25519 proof, kid = RFC 7638 JWK thumbprint →
+#                                                          VERIFIED (noop directory: real JWS, waived binding)
+#   7c. TL     /v1/identities/{id}/audit                   sealed IDENTITY_VERIFIED, web-bot-auth VM verbatim
 #   8.  (register TWO fresh agents to ACTIVE — the fleet)
 #   9.  POST   .../links                                   did:web → BOTH agents in one call (ONE IDENTITY_LINKED,
 #                                                          ansIds[2]); did:key → agent #1 (its own stream's event)
@@ -198,10 +202,47 @@ curl_json POST "/v2/ans/identities/$DK_ID/verify-control" \
 assert_2xx "did:key verify-control"
 ok "did:key identity VERIFIED — the keyless-future test track"
 
+# ----- 7a-7c. web-bot-auth — the Signature-Agent URL kind (noop directory) -----
+header "7a. POST /v2/ans/identities  (register a web-bot-auth Signature-Agent URL → 202 + challenge)"
+WBA_HOST="webbot-$(openssl rand -hex 4).example.com"
+WBA_VALUE="https://${WBA_HOST}"
+note "the identifier IS the Signature-Agent URL; the RA canonicalizes it to the well-known directory URL"
+WBA_RESP=$(curl_json POST /v2/ans/identities "$(jq -n --arg v "$WBA_VALUE" '{value: $v}')")
+WBA_ID=$(printf '%s' "$WBA_RESP" | jq -r '.identityId // empty')
+[ -n "$WBA_ID" ] || fail "web-bot-auth register failed"
+WBA_INPUT=$(printf '%s' "$WBA_RESP" | jq -r '.challenges[0].signingInput')
+WBA_CANONICAL=$(printf '%s' "$WBA_RESP" | jq -r '.value')
+ok "identityId=$WBA_ID → canonical $WBA_CANONICAL (PENDING_CONTROL)"
+
+header "7b. POST /v2/ans/identities/$WBA_ID/verify-control  (Ed25519 proof; kid = RFC 7638 JWK thumbprint)"
+note "web-bot-auth is Ed25519-only, and the kid MUST be the key's JWK thumbprint (not a free-form fragment)"
+signproof keygen -alg ed25519 -out "$KEY_DIR/webbot.pem" >/dev/null
+WBA_KID=$(signproof thumbprint -key "$KEY_DIR/webbot.pem")
+WBA_PROOF=$(signproof sign -key "$KEY_DIR/webbot.pem" -kid "$WBA_KID" -input "$WBA_INPUT")
+curl_json POST "/v2/ans/identities/$WBA_ID/verify-control" \
+  "$(jq -n --arg p "$WBA_PROOF" '{signedProofs: [$p]}')" >/dev/null
+assert_2xx "web-bot-auth verify-control"
+note "noop directory resolver: the JWS still genuinely verifies against the embedded key; only the"
+note "  'the live directory at the Signature-Agent URL endorses this key' binding is waived (quickstart)"
+ok "web-bot-auth identity VERIFIED — the automated-traffic kind (draft-meunier-webbotauth-httpsig-protocol-02)"
+
+header "7c. TL: GET /v1/identities/$WBA_ID/audit  (sealed IDENTITY_VERIFIED — web-bot-auth VM verbatim)"
+assert_tl_identity_audit "$WBA_ID" 1
+WBA_VM=$(curl_tl GET "/v1/identities/$WBA_ID/audit" | \
+  jq -r '[.records[].payload.producer.event | select(.keys)][0].keys[0].verificationMethod')
+WBA_VM_TYPE=$(printf '%s' "$WBA_VM" | jq -r '.type // empty')
+WBA_VM_ID=$(printf '%s' "$WBA_VM" | jq -r '.id // empty')
+WBA_VM_CRV=$(printf '%s' "$WBA_VM" | jq -r '.publicKeyJwk.crv // empty')
+[ "$WBA_VM_TYPE" = "JsonWebKey2020" ] || fail "web-bot-auth seal should be a JsonWebKey2020 method, got $WBA_VM_TYPE"
+[ "$WBA_VM_ID" = "${WBA_CANONICAL}#${WBA_KID}" ] || fail "web-bot-auth VM id should be <directoryURL>#<thumbprint>, got $WBA_VM_ID"
+[ "$WBA_VM_CRV" = "Ed25519" ] || fail "web-bot-auth key must be Ed25519, got $WBA_VM_CRV"
+ok "sealed verbatim: type=JsonWebKey2020, id=<directoryURL>#<thumbprint>, Ed25519 publicKeyJwk"
+
 # ----- 8. Register a small fleet (the WHATs) -----
-header "8. Register TWO fresh agents to ACTIVE (the fleet to link)"
+header "8. Register THREE fresh agents to ACTIVE (the fleet to link)"
 AGENT_1=$(register_agent "linked-a-$(openssl rand -hex 4).example.com")
 AGENT_2=$(register_agent "linked-b-$(openssl rand -hex 4).example.com")
+WBA_AGENT=$(register_agent "linked-bot-$(openssl rand -hex 4).example.com")
 # The AGENT lane still seals via the async outbox (flagged 2026-06-11
 # as a bug in the design doc §5.6.1 — agents should also wait for seal
 # confirmation; tracked separately). Until that lands, wait for both
@@ -209,7 +250,8 @@ AGENT_2=$(register_agent "linked-b-$(openssl rand -hex 4).example.com")
 # agent TL status, which needs the AGENT_REGISTERED leaves present.
 poll_tl_audit "$AGENT_1" 1 30
 poll_tl_audit "$AGENT_2" 1 30
-ok "fleet ready: $AGENT_1 + $AGENT_2"
+poll_tl_audit "$WBA_AGENT" 1 30
+ok "fleet ready: $AGENT_1 + $AGENT_2 + $WBA_AGENT"
 
 # ----- 9. Link the fleet — one owner-gated call per identity -----
 header "9a. POST /v2/ans/identities/$IDENTITY_ID/links  (did:web → BOTH agents, one call)"
@@ -225,6 +267,18 @@ DK_LINK=$(curl_json POST "/v2/ans/identities/$DK_ID/links" \
   "$(jq -n --arg a "$AGENT_1" '{agentIds: [$a]}')")
 [ "$(printf '%s' "$DK_LINK" | jq -r '.linked // 0')" = "1" ] || fail "did:key link failed"
 ok "agent-1 now carries TWO identities: the multi-key did:web and the Ed25519 did:key"
+
+header "9c. POST /v2/ans/identities/$WBA_ID/links  (web-bot-auth → the bot agent — the automated-traffic WHO)"
+note "the same link path carries every WHO kind; the automated-traffic identity binds to its agent identically"
+WBA_LINK=$(curl_json POST "/v2/ans/identities/$WBA_ID/links" \
+  "$(jq -n --arg a "$WBA_AGENT" '{agentIds: [$a]}')")
+[ "$(printf '%s' "$WBA_LINK" | jq -r '.linked // 0')" = "1" ] || fail "web-bot-auth link failed"
+# The web-bot-auth stream now carries IDENTITY_VERIFIED + IDENTITY_LINKED,
+# and the reverse join names the bot agent — seal-before-success, no poll.
+assert_tl_identity_audit "$WBA_ID" 2
+WBA_AGENTS_COUNT=$(curl_tl GET "/v1/identities/$WBA_ID/agents" | jq -r '.agents | length')
+[ "$WBA_AGENTS_COUNT" = "1" ] || fail "web-bot-auth reverse join should list 1 agent, got $WBA_AGENTS_COUNT"
+ok "web-bot-auth linked to the bot agent — IDENTITY_LINKED sealed, reverse join names 1 agent"
 
 # ----- 10. RA-side computed identities[] -----
 header "10. GET /v2/ans/agents/$AGENT_1  (RA detail — computed identities[], never stored on the agent)"
@@ -393,10 +447,13 @@ ok "ONE IDENTITY_REVOKED propagated to agent-2's join at read time; agent-1's di
 header "Identity lifecycle complete"
 printf "  did:web      %s  (VERIFIED w/ 2 keys → rotated to 1 → REVOKED)\n" "$IDENTITY_ID" >&2
 printf "  did:key      %s  (Ed25519 — VERIFIED, linked to agent-1 throughout)\n" "$DK_ID" >&2
+printf "  web-bot-auth %s  (Ed25519 Signature-Agent URL — VERIFIED via noop directory, linked to the bot agent)\n" "$WBA_ID" >&2
 printf "  agent-1      %s (carried BOTH whos; kept the did:key after the did:web unlink)\n" "$AGENT_1" >&2
 printf "  agent-2      %s (did:web-linked throughout; saw rotation + revocation at read time)\n" "$AGENT_2" >&2
+printf "  bot agent    %s (web-bot-auth-linked — the automated-traffic WHO)\n" "$WBA_AGENT" >&2
 printf "  receipt      %s\n" "$IDENTITY_RECEIPT" >&2
 printf "\n" >&2
 printf "  sealed: did:web stream — IDENTITY_VERIFIED (multi-key), IDENTITY_LINKED (ansIds[2]),\n" >&2
 printf "  IDENTITY_UPDATED, IDENTITY_UNLINKED, IDENTITY_REVOKED; did:key stream —\n" >&2
-printf "  IDENTITY_VERIFIED (Multikey, verbatim), IDENTITY_LINKED.\n" >&2
+printf "  IDENTITY_VERIFIED (Multikey, verbatim), IDENTITY_LINKED; web-bot-auth stream —\n" >&2
+printf "  IDENTITY_VERIFIED (JsonWebKey2020, Ed25519), IDENTITY_LINKED.\n" >&2

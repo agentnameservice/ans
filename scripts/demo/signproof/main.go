@@ -52,8 +52,10 @@ func run(args []string) error {
 		return keygen(args[1:])
 	case "sign":
 		return sign(args[1:])
+	case "thumbprint":
+		return thumbprint(args[1:])
 	default:
-		return fmt.Errorf("unknown subcommand %q (want keygen or sign)", args[0])
+		return fmt.Errorf("unknown subcommand %q (want keygen, sign, or thumbprint)", args[0])
 	}
 }
 
@@ -106,6 +108,56 @@ func keygen(args []string) error {
 	// stdout carries exactly the did:key identifier so shell callers
 	// can capture it: DID=$(go run ./scripts/demo/signproof keygen ...).
 	fmt.Fprintln(os.Stdout, "did:key:"+multibase)
+	return nil
+}
+
+// thumbprint prints a key's RFC 7638 JWK thumbprint on stdout. This is
+// the kid a web-bot-auth proof must claim: the verifier indexes the
+// directory's endorsed keys by recomputed thumbprint and rejects any
+// proof whose kid (or embedded jwk) is not that thumbprint. Shell
+// callers capture it: KID=$(go run ./scripts/demo/signproof thumbprint -key key.pem).
+func thumbprint(args []string) error {
+	fs := flag.NewFlagSet("thumbprint", flag.ContinueOnError)
+	keyPath := fs.String("key", "", "path to the private key PEM (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *keyPath == "" {
+		return errors.New("thumbprint: -key is required")
+	}
+
+	raw, err := os.ReadFile(*keyPath)
+	if err != nil {
+		return fmt.Errorf("read key: %w", err)
+	}
+	block, _ := pem.Decode(raw)
+	if block == nil {
+		return errors.New("key file is not PEM")
+	}
+	parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+	if err != nil {
+		return fmt.Errorf("parse key: %w", err)
+	}
+
+	var pub any
+	switch key := parsed.(type) {
+	case *ecdsa.PrivateKey:
+		pub = &key.PublicKey
+	case ed25519.PrivateKey:
+		pub = key.Public()
+	default:
+		return fmt.Errorf("unsupported key type %T (want P-256 or Ed25519)", parsed)
+	}
+
+	jwk, err := anscrypto.PublicKeyToJWK(pub)
+	if err != nil {
+		return fmt.Errorf("encode jwk: %w", err)
+	}
+	tp, err := anscrypto.JWKThumbprint(jwk)
+	if err != nil {
+		return fmt.Errorf("thumbprint: %w", err)
+	}
+	fmt.Fprintln(os.Stdout, tp)
 	return nil
 }
 
