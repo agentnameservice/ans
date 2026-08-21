@@ -14,8 +14,11 @@ Payment is used as the worked example below because it is the case people most
 often assume needs new protocol machinery. It does not.
 
 ```
-scripts/demo/payable-endpoints/verify.sh          # offline, fixtures only
-scripts/demo/payable-endpoints/verify.sh --live   # also compare the live descriptor
+scripts/demo/capability-descriptors/verify.sh    # offline, fixtures only
+scripts/demo/capability-descriptors/verify.sh \
+  --live https://agent.your.tld/.well-known/agent-card.json
+                                                 # also compose a registration
+                                                 # for your live descriptor
 ```
 
 No running ANS stack is required to *run* this demo — it asserts against
@@ -63,25 +66,30 @@ Two implementation constraints shape any such composition:
 
 ## Worked example: an A2A card advertising payment tooling
 
-The committed fixture — `testdata/agent-card.json` — is an A2A agent-card whose
-skills include `get_payment_requirements` (which returns an x402 `accepts`
-block), alongside `resolve_alias`, `discover_agent`, `check_alias_available`, and
-`get_agent_registration_info`. It is served from the same host registered as
-`agentHost`, so the same-host policy holds and the endpoint stays
-catalog-eligible.
+The committed fixture — `testdata/agent-card.json` — is a neutral A2A agent-card
+for `agent.example.com` whose skills include `get_payment_requirements` (a
+payment-quoting skill returning an x402 `accepts` block) beside an ordinary
+non-payment skill. Nothing is served at that host; the fixture exists so the
+offline assertion stays deterministic forever, and its shape is the one a real
+production card takes. The descriptor URL sits on the same origin as the agent,
+so the same-host policy holds and the endpoint stays catalog-eligible.
 
-`verify.sh` prints the registration body this produces:
+To run the composition against a **real** descriptor, pass its URL to
+`--live` — the script fetches it, computes its pin and `cap-sha256`, and prints
+the registration body you would POST for it.
+
+`verify.sh` prints the registration body the fixture produces:
 
 ```json
 {
-  "agentHost": "api.dnsofmoney.com",
+  "agentHost": "agent.example.com",
   "discoveryProfiles": ["ANS_DNSAID"],
   "endpoints": [
     {
       "protocol": "A2A",
-      "agentUrl": "https://api.dnsofmoney.com/a2a/v1",
-      "metaDataUrl": "https://api.dnsofmoney.com/.well-known/agent-card.json",
-      "metaDataHash": "SHA256:23133f65cc200a06f79009d3b43e65dd743fb7d0a914109274a6c5b5a9c0d41b",
+      "agentUrl": "https://agent.example.com/a2a/v1",
+      "metaDataUrl": "https://agent.example.com/.well-known/agent-card.json",
+      "metaDataHash": "SHA256:d8386a152720b0b9e1dd05a6456a812d864d6b85aca2a5a4d1decffc50d8ad88",
       "transports": ["JSON_RPC"]
     }
   ]
@@ -106,7 +114,7 @@ captured verbatim from `scripts/demo/dns-records.sh --json` and committed as
 `testdata/expected-svcb.txt`:
 
 ```
-1 . alpn=a2a port=443 key65400=https://api.dnsofmoney.com/.well-known/agent-card.json key65401=IxM_ZcwgCgb3kAnTtD5l3XQ_t9CpFBCSdKbFtanA1Bs key65402=a2a key65409=agent-card.json
+1 . alpn=a2a port=443 key65400=https://agent.example.com/.well-known/agent-card.json key65401=2DhqFScgsLnh3QWmRWqBLYZNa4WsoqWk0d7P_FDYrYg key65402=a2a key65409=agent-card.json
 ```
 
 | SvcParam | Value | Source |
@@ -114,7 +122,7 @@ captured verbatim from `scripts/demo/dns-records.sh --json` and committed as
 | `alpn` | `a2a` | from the endpoint's `protocol` |
 | `port` | `443` | default |
 | `key65400` (`cap`) | the `metaDataUrl` | the locator a resolver follows |
-| `key65401` (`cap-sha256`) | `IxM_ZcwgCgb3kAnTtD5l3XQ_t9CpFBCSdKbFtanA1Bs` | base64url of the **raw** digest bytes, not the hex text |
+| `key65401` (`cap-sha256`) | `2DhqFScgsLnh3QWmRWqBLYZNa4WsoqWk0d7P_FDYrYg` | base64url of the **raw** digest bytes, not the hex text |
 | `key65402` (`bap`) | `a2a` | agent protocol |
 | `key65409` (`well-known`) | `agent-card.json` | emitted because `metaDataUrl` is a `https://{fqdn}/.well-known/<suffix>` URL |
 
@@ -136,22 +144,20 @@ integrity-pinned capability descriptor.
 The fixture's SHA-256 is:
 
 ```
-23133f65cc200a06f79009d3b43e65dd743fb7d0a914109274a6c5b5a9c0d41b
+d8386a152720b0b9e1dd05a6456a812d864d6b85aca2a5a4d1decffc50d8ad88
 ```
 
 `verify.sh` asserts the committed fixture against this value. That assertion is
-offline and deterministic, so this example stays verifiable regardless of what
-the live endpoint does later.
+offline and deterministic — the fixture is pinned to a host nobody serves, so it
+can never drift out from under the demo.
 
-`--live` additionally fetches the real descriptor and compares. **A mismatch
-there is reported, not failed.** A changed descriptor is either drift or a
-legitimate new version, and a digest alone cannot distinguish the two — which is
-precisely why the teaching example is pinned to a fixture rather than to
-whatever the network happens to return.
-
-That distinction is the practical lesson of `metaDataHash`: it detects change,
-and change is the operator's signal to re-verify and re-register. It is not a
-liveness check.
+Your real descriptor *will* change over time, and that is the practical lesson
+of `metaDataHash`: it detects change, and change is the operator's signal to
+re-verify and re-register (`--live` prints the fresh pin to register with). It
+is not a liveness check, and a digest mismatch alone cannot distinguish a
+legitimate new version from unintended drift — which is precisely why the
+teaching example is pinned to a committed fixture rather than to whatever the
+network happens to return.
 
 ## Scope and non-goals
 
@@ -181,11 +187,9 @@ scripts/demo/start.sh
 # then drive it to PENDING_DNS:
 #   POST /v2/ans/agents/{agentId}/verify-acme
 scripts/demo/dns-records.sh --json | jq -r '.[] | select(.type=="SVCB") | .value' \
-  > scripts/demo/payable-endpoints/testdata/expected-svcb.txt
+  > scripts/demo/capability-descriptors/testdata/expected-svcb.txt
 scripts/demo/stop.sh --clean
 ```
-
-Recorded against `upstream/main` at `d8ed4bb` on 2026-08-01.
 
 ## References
 

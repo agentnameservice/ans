@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compose a payable agent endpoint from an existing AgentEndpoint.metaDataUrl,
+# Compose a capability descriptor from an existing AgentEndpoint.metaDataUrl,
 # and verify the integrity pin that makes it trustworthy.
 #
 # ANS discovers and verifies agents by name; the Protocol enum is deliberately
@@ -21,46 +21,58 @@
 #      registration actually produced when run against ans-ra, captured verbatim
 #      from scripts/demo/dns-records.sh,
 #   3. prints the registration body this composition produces, and
-#   4. with --live, fetches the real descriptor and reports whether it still
-#      matches the fixture.
+#   4. with --live URL, applies the same composition to YOUR descriptor:
+#      fetches it, computes its pin and cap-sha256, and prints the registration
+#      body you would POST for it.
 #
 # Step 2 is the load-bearing one: the expected row is recorded output from the
 # reference implementation, not a value re-derived by this script. If the emit
 # path in internal/adapter/discovery/ans/dnsaid.go changes shape, this fails
 # instead of quietly agreeing with itself.
 #
-# On --live mismatch the demo does NOT fail: a changed descriptor is either
-# drift or a legitimate new version, and from the digest alone you cannot tell
-# which. That ambiguity is the reason the pin is checked against a committed
-# fixture rather than against whatever the network returns today.
+# The fixture is a neutral card for agent.example.com — nothing serves it; it
+# exists so the offline assertion stays deterministic forever. Your own,
+# necessarily different, descriptor is what --live is for.
 #
 # EXECUTE this script; do NOT `source` it (set -euo pipefail would leak into
 # your interactive shell).
 #
 # Usage:
-#   scripts/demo/payable-endpoints/verify.sh           # offline, fixture only
-#   scripts/demo/payable-endpoints/verify.sh --live    # also compare live descriptor
+#   scripts/demo/capability-descriptors/verify.sh
+#       # offline, fixture only
+#   scripts/demo/capability-descriptors/verify.sh --live https://agent.your.tld/.well-known/agent-card.json
+#       # additionally compose a registration for your live descriptor
 #
 # No running ANS stack is required — this demo asserts over a committed
 # fixture and therefore does not source scripts/demo/common.sh.
 #
-# Exits 0 when the fixture matches its pin; non-zero on a pin mismatch or a
-# missing dependency.
+# Exits 0 when the fixture matches its pin; non-zero on a pin mismatch, a
+# missing dependency, or an unreachable --live descriptor.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 FIXTURE="$SCRIPT_DIR/testdata/agent-card.json"
 EXPECTED_SVCB="$SCRIPT_DIR/testdata/expected-svcb.txt"
-AGENT_HOST="api.dnsofmoney.com"
+# The neutral host the committed fixture is pinned to. Nothing is served
+# there — the fixture keeps the offline assertion deterministic; --live is
+# how you run the composition against a real descriptor.
+AGENT_HOST="agent.example.com"
 METADATA_URL="https://$AGENT_HOST/.well-known/agent-card.json"
 AGENT_URL="https://$AGENT_HOST/a2a/v1"
 
 # The pin this demo asserts. Keep in sync with README.md §"The integrity pin".
-PINNED_SHA256="23133f65cc200a06f79009d3b43e65dd743fb7d0a914109274a6c5b5a9c0d41b"
+PINNED_SHA256="d8386a152720b0b9e1dd05a6456a812d864d6b85aca2a5a4d1decffc50d8ad88"
 
-LIVE=0
-[ "${1:-}" = "--live" ] && LIVE=1
+LIVE_URL=""
+if [ "${1:-}" = "--live" ]; then
+  LIVE_URL="${2:-}"
+  [ -n "$LIVE_URL" ] || {
+    printf 'FAIL: --live takes the descriptor URL as an argument, e.g.\n' >&2
+    printf '  %s --live https://agent.your.tld/.well-known/agent-card.json\n' "$0" >&2
+    exit 1
+  }
+fi
 
 fail() { printf '\nFAIL: %s\n' "$*" >&2; exit 1; }
 header() { printf '\n\033[1m%s\033[0m\n' "$*"; }
@@ -68,14 +80,34 @@ require_cmd() {
   command -v "$1" >/dev/null 2>&1 || fail "missing required command: $1"
 }
 
-require_cmd sha256sum
+# sha256 of a file, hex digest only. sha256sum on Linux; stock macOS ships
+# shasum (Perl) but not coreutils sha256sum.
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256_file() { sha256sum "$1" | cut -d' ' -f1; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256_file() { shasum -a 256 "$1" | cut -d' ' -f1; }
+else
+  fail "missing required command: sha256sum (or shasum)"
+fi
+
 require_cmd base64
+require_cmd xxd
 [ -f "$FIXTURE" ] || fail "fixture not found: $FIXTURE"
+
+# dnsaid.go publishes key65401 (cap-sha256) as base64url of the RAW digest
+# bytes, not of the hex text. Decode the hex, then base64url-encode unpadded.
+cap_sha256_from_hex() {
+  printf '%s' "$1" \
+    | xxd -r -p \
+    | base64 \
+    | tr '+/' '-_' \
+    | tr -d '=\n'
+}
 
 # ---------------------------------------------------------------------------
 header "1. Fixture digest vs the pin"
 
-FIXTURE_SHA="$(sha256sum "$FIXTURE" | cut -d' ' -f1)"
+FIXTURE_SHA="$(sha256_file "$FIXTURE")"
 printf '  fixture : %s\n' "${FIXTURE#"$SCRIPT_DIR/"}"
 printf '  sha256  : %s\n' "$FIXTURE_SHA"
 printf '  pinned  : %s\n' "$PINNED_SHA256"
@@ -90,15 +122,7 @@ printf '  -> match\n'
 # ---------------------------------------------------------------------------
 header "2. Derived cap-sha256 vs the row ans-ra actually emitted"
 
-# dnsaid.go publishes key65401 (cap-sha256) as base64url of the RAW digest
-# bytes, not of the hex text. Decode the hex, then base64url-encode unpadded.
-CAP_SHA256="$(
-  printf '%s' "$FIXTURE_SHA" \
-    | xxd -r -p \
-    | base64 \
-    | tr '+/' '-_' \
-    | tr -d '=\n'
-)"
+CAP_SHA256="$(cap_sha256_from_hex "$FIXTURE_SHA")"
 printf '  derived key65401 : %s\n' "$CAP_SHA256"
 
 [ -f "$EXPECTED_SVCB" ] || fail "missing recorded SVCB row: $EXPECTED_SVCB"
@@ -156,29 +180,46 @@ printf '\n  The descriptor — not ANS — carries the capability. ANS'"'"'s rol
 printf '  verified discovery of an integrity-pinned locator.\n'
 
 # ---------------------------------------------------------------------------
-if [ "$LIVE" -eq 1 ]; then
-  header "5. Live descriptor comparison (--live)"
+if [ -n "$LIVE_URL" ]; then
+  header "5. Your descriptor (--live)"
   require_cmd curl
+
+  case "$LIVE_URL" in
+    https://*) : ;;
+    *) fail "--live URL must be https (the same policy the RA enforces on metaDataUrl)" ;;
+  esac
+  LIVE_HOST="${LIVE_URL#https://}"
+  LIVE_HOST="${LIVE_HOST%%/*}"
 
   LIVE_TMP="$(mktemp)"
   trap 'rm -f "$LIVE_TMP"' EXIT
 
-  if ! curl -sSf "$METADATA_URL" -o "$LIVE_TMP" 2>/dev/null; then
-    printf '  live descriptor unreachable at %s\n' "$METADATA_URL"
-    printf '  (network-dependent; the fixture assertion above still stands)\n'
-  else
-    LIVE_SHA="$(sha256sum "$LIVE_TMP" | cut -d' ' -f1)"
-    printf '  live sha256 : %s\n' "$LIVE_SHA"
-    if [ "$LIVE_SHA" = "$FIXTURE_SHA" ]; then
-      printf '  -> identical to the fixture\n'
-    else
-      printf '  -> DIFFERS from the fixture\n\n'
-      printf '  The live descriptor has changed since this fixture was committed.\n'
-      printf '  From the digest alone you cannot distinguish a legitimate new\n'
-      printf '  version from unintended drift — which is exactly why the pin is\n'
-      printf '  asserted against the fixture. Not a failure of this demo.\n'
-    fi
-  fi
+  curl -sSf "$LIVE_URL" -o "$LIVE_TMP" 2>/dev/null \
+    || fail "descriptor unreachable at $LIVE_URL"
+
+  LIVE_SHA="$(sha256_file "$LIVE_TMP")"
+  LIVE_CAP="$(cap_sha256_from_hex "$LIVE_SHA")"
+  printf '  descriptor       : %s\n' "$LIVE_URL"
+  printf '  sha256 pin       : %s\n' "$LIVE_SHA"
+  printf '  cap-sha256 (raw) : %s\n' "$LIVE_CAP"
+  printf '\n  Registration body for this descriptor:\n'
+  cat <<JSON
+  {
+    "agentHost": "$LIVE_HOST",
+    "discoveryProfiles": ["ANS_DNSAID"],
+    "endpoints": [
+      {
+        "protocol": "A2A",
+        "agentUrl": "https://$LIVE_HOST/a2a/v1",
+        "metaDataUrl": "$LIVE_URL",
+        "metaDataHash": "SHA256:$LIVE_SHA"
+      }
+    ]
+  }
+JSON
+  printf '\n  The pin binds the registration to the exact bytes fetched above.\n'
+  printf '  When the descriptor changes, re-verify and re-register — metaDataHash\n'
+  printf '  detects change; it is not a liveness check.\n'
 fi
 
 header "OK"

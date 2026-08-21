@@ -1,1 +1,0 @@
-1 . alpn=a2a port=443 key65400=https://api.dnsofmoney.com/.well-known/agent-card.json key65401=IxM_ZcwgCgb3kAnTtD5l3XQ_t9CpFBCSdKbFtanA1Bs key65402=a2a key65409=agent-card.json
