@@ -1921,14 +1921,17 @@ components:
           default: ["ANS_DNSAID"]
           description: |
             Set of DNS record families the RA tells the operator to
-            publish and emits in the AGENT_REGISTERED TL event's
-            attestations.dnsRecordsProvisioned[]. The computed records
-            surface to the client on GET /v2/ans/agents/{agentId} as
-            registrationPending.dnsRecords[] once the agent reaches
-            PENDING_DNS — not on the 202 register response, which
-            returns only the ACME challenge (production records are
-            deferred until verify-acme proves domain control and issues
-            the certificates the TLSA binding depends on).
+            publish. The AGENT_REGISTERED TL event's
+            attestations.dnsRecordsProvisioned[] carries these records
+            narrowed to the ones DNS actually answered with at
+            verify-dns, so an optional record the operator chose not to
+            publish is absent from the event rather than attested as
+            present. The computed records surface to the client on GET
+            /v2/ans/agents/{agentId} as registrationPending.dnsRecords[]
+            once the agent reaches PENDING_DNS — not on the 202 register
+            response, which returns only the ACME challenge (production
+            records are deferred until verify-acme proves domain control
+            and issues the certificates the TLSA binding depends on).
 
             Each value names one record family; an operator publishing
             the union (DNS-AID-aligned SVCB plus the original `_ans` TXT
