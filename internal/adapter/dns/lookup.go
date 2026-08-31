@@ -138,6 +138,51 @@ func (v *LookupVerifier) exchange(ctx context.Context, server string, name strin
 	return resp, nil
 }
 
+// inspectAnswers records the response's rcode outcome on r and reports whether
+// the answer section is worth inspecting.
+//
+// NXDOMAIN is an answer, not a fault. The resolver is stating
+// authoritatively that the name does not exist, so the record is
+// definitively unpublished, and Error stays empty. That empty Error is
+// what keeps the record on the MISSING path in the service layer's drop
+// classification: an operator who declines an optional record never
+// creates the owner name at all — no `_443._tcp.<fqdn>` when they skip
+// DANE — so real DNS answers NXDOMAIN rather than NODATA (RFC 2308 §2).
+// Reporting that as a lookup fault would escalate every such activation
+// to WARN and bury the genuine narrowing that channel exists to surface.
+//
+// NODATA (SUCCESS with an empty answer section — the name exists but
+// carries no records of this type, which is what an apex with A but no
+// HTTPS returns) also reaches the caller with Error empty, via the
+// SUCCESS arm and an answer loop that matches nothing. Both shapes of
+// ordinary absence therefore look the same to the service layer, which is
+// the intent: neither is a fault.
+//
+// Every other non-success rcode — SERVFAIL, REFUSED, and the rest — is a
+// genuine fault: we did not learn whether the record exists. Those
+// populate Error, the only signal the RA has that a signed attestation was
+// narrowed by an upstream problem rather than by an operator's choice.
+//
+// Returning early on NXDOMAIN means DNSSECVerified stays false even when
+// the denial of existence was itself authenticated. That is deliberate:
+// the field has exactly one consumer, the service layer's hard-fail rule
+// for a rewritten record in a signed zone, and that rule requires a live
+// value to disagree with (Actual != ""). Nothing answered here, so the
+// rule cannot apply, and a record dropped from the attestation never
+// reaches the wire where the flag would be published. Setting it would be
+// inert.
+func inspectAnswers(r *port.RecordVerification, resp *dns.Msg) bool {
+	switch resp.Rcode {
+	case dns.RcodeSuccess:
+		return true
+	case dns.RcodeNameError:
+		return false
+	default:
+		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
+		return false
+	}
+}
+
 func (v *LookupVerifier) verifyTXT(ctx context.Context, server string, rec domain.ExpectedDNSRecord) port.RecordVerification {
 	r := port.RecordVerification{Record: rec}
 	resp, err := v.exchange(ctx, server, rec.Name, dns.TypeTXT)
@@ -145,8 +190,7 @@ func (v *LookupVerifier) verifyTXT(ctx context.Context, server string, rec domai
 		r.Error = err.Error()
 		return r
 	}
-	if resp.Rcode != dns.RcodeSuccess {
-		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
+	if !inspectAnswers(&r, resp) {
 		return r
 	}
 	wantNorm := strings.TrimSpace(rec.Value)
@@ -186,8 +230,7 @@ func (v *LookupVerifier) verifyTLSA(ctx context.Context, server string, rec doma
 		r.Error = err.Error()
 		return r
 	}
-	if resp.Rcode != dns.RcodeSuccess {
-		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
+	if !inspectAnswers(&r, resp) {
 		return r
 	}
 	r.DNSSECVerified = resp.AuthenticatedData
@@ -228,8 +271,7 @@ func (v *LookupVerifier) verifyHTTPS(ctx context.Context, server string, rec dom
 		r.Error = err.Error()
 		return r
 	}
-	if resp.Rcode != dns.RcodeSuccess {
-		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
+	if !inspectAnswers(&r, resp) {
 		return r
 	}
 	r.DNSSECVerified = resp.AuthenticatedData
@@ -286,8 +328,7 @@ func (v *LookupVerifier) verifySVCB(ctx context.Context, server string, rec doma
 		r.Error = err.Error()
 		return r
 	}
-	if resp.Rcode != dns.RcodeSuccess {
-		r.Error = fmt.Sprintf("rcode %s", dns.RcodeToString[resp.Rcode])
+	if !inspectAnswers(&r, resp) {
 		return r
 	}
 	r.DNSSECVerified = resp.AuthenticatedData

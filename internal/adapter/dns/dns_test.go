@@ -71,14 +71,28 @@ type testServer struct {
 	addr    string
 	mu      sync.RWMutex
 	answers map[string][]miekg.RR
-	ad      bool // set AuthenticatedData on replies to simulate a DNSSEC-validating resolver
-	srv     *miekg.Server
-	stop    func()
+	// existing marks owner names that exist in the zone. An empty answer
+	// set for such a name is NODATA (SUCCESS, no answers) rather than
+	// NXDOMAIN — the distinction the drop classification depends on, so it
+	// has to be reachable from tests. Names absent from this map behave as
+	// they always have: an empty answer set is NXDOMAIN.
+	existing map[string]bool
+	// servfail forces a SERVFAIL reply per "name:TYPE" key, so the genuine
+	// lookup-fault path is reachable without an unroutable address and a
+	// timeout.
+	servfail map[string]bool
+	ad       bool // set AuthenticatedData on replies to simulate a DNSSEC-validating resolver
+	srv      *miekg.Server
+	stop     func()
 }
 
 func newTestServer(t *testing.T) *testServer {
 	t.Helper()
-	s := &testServer{answers: map[string][]miekg.RR{}}
+	s := &testServer{
+		answers:  map[string][]miekg.RR{},
+		existing: map[string]bool{},
+		servfail: map[string]bool{},
+	}
 
 	pc, err := net.ListenPacket("udp", "127.0.0.1:0")
 	if err != nil {
@@ -95,10 +109,18 @@ func newTestServer(t *testing.T) *testServer {
 		m.AuthenticatedData = s.ad
 		if len(req.Question) > 0 {
 			q := req.Question[0]
-			key := strings.ToLower(q.Name) + ":" + miekg.TypeToString[q.Qtype]
-			m.Answer = append(m.Answer, s.answers[key]...)
-			if len(m.Answer) == 0 {
-				m.Rcode = miekg.RcodeNameError
+			name := strings.ToLower(q.Name)
+			key := name + ":" + miekg.TypeToString[q.Qtype]
+			switch {
+			case s.servfail[key]:
+				m.Rcode = miekg.RcodeServerFailure
+			default:
+				m.Answer = append(m.Answer, s.answers[key]...)
+				// An empty answer set is NXDOMAIN unless the owner name is
+				// known to exist, in which case it is NODATA.
+				if len(m.Answer) == 0 && !s.existing[name] {
+					m.Rcode = miekg.RcodeNameError
+				}
 			}
 		}
 		s.mu.RUnlock()
@@ -129,6 +151,24 @@ func (s *testServer) add(name, typ, rrString string) {
 	key := strings.ToLower(miekg.Fqdn(name)) + ":" + typ
 	s.mu.Lock()
 	s.answers[key] = append(s.answers[key], rr)
+	s.mu.Unlock()
+}
+
+// addName marks an owner name as existing without giving it records of
+// any particular type, so a query for a type it lacks answers NODATA
+// (SUCCESS, empty answer) instead of NXDOMAIN. This is the apex-with-A-but-
+// no-HTTPS shape.
+func (s *testServer) addName(name string) {
+	s.mu.Lock()
+	s.existing[strings.ToLower(miekg.Fqdn(name))] = true
+	s.mu.Unlock()
+}
+
+// addServfail makes queries for one name/type answer SERVFAIL, which is
+// the genuine lookup fault — as opposed to either shape of absence.
+func (s *testServer) addServfail(name, typ string) {
+	s.mu.Lock()
+	s.servfail[strings.ToLower(miekg.Fqdn(name))+":"+typ] = true
 	s.mu.Unlock()
 }
 
@@ -452,10 +492,22 @@ func TestLookupVerifier_SVCB_DNSSECFlagPropagates(t *testing.T) {
 	}
 }
 
-func TestLookupVerifier_NXDOMAINSurfacedAsError(t *testing.T) {
+// TestLookupVerifier_NXDOMAINIsAbsenceNotError pins the rcode split the
+// service layer's drop classification reads. NXDOMAIN is an authoritative
+// "this name does not exist", which is exactly what an operator who
+// declined an optional record produces — they never created the owner
+// name, so there is nothing there to answer NODATA. Reporting it through
+// Error would put every such activation on the LOOKUP_ERROR/WARN arm and
+// bury the SERVFAIL narrowing that arm exists to surface.
+//
+// This test previously asserted the opposite. It was written when nothing
+// read RecordVerification.Error, so the field was descriptive only; the
+// attestation-narrowing change gave it behavioral meaning, and the old
+// shape was wrong under that meaning.
+func TestLookupVerifier_NXDOMAINIsAbsenceNotError(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t)
-	// No records added — server returns NXDOMAIN.
+	// No records and no owner name — server returns NXDOMAIN.
 	recs := []domain.ExpectedDNSRecord{{
 		Name: "missing.agent.example.com", Type: domain.DNSRecordTXT,
 		Value: "doesnt-matter", Required: true,
@@ -464,8 +516,89 @@ func TestLookupVerifier_NXDOMAINSurfacedAsError(t *testing.T) {
 	if got[0].found {
 		t.Error("NXDOMAIN must not be Found")
 	}
-	if got[0].errString == "" {
-		t.Error("NXDOMAIN should surface a descriptive error")
+	if got[0].errString != "" {
+		t.Errorf("NXDOMAIN is absence, not a lookup fault; Error must stay empty, got %q", got[0].errString)
+	}
+	if got[0].actual != "" {
+		t.Errorf("nothing answered, so Actual must stay empty (it is what separates MISSING from MISMATCH); got %q", got[0].actual)
+	}
+}
+
+// TestLookupVerifier_AbsenceShapesAndFaultsAreDistinguishable covers the
+// full rcode matrix across every record type ANS queries, because the
+// classification is per-type code paths and a regression in one would be
+// invisible from the others.
+//
+// The three columns are the ones the drop classification has to keep
+// apart: NXDOMAIN and NODATA are both ordinary absence (Error empty), and
+// SERVFAIL is a fault (Error set). TLSA is the type an operator most often
+// declines, and the apex HTTPS/SVCB rows are the NODATA shape — the name
+// exists with other records, just not this type.
+func TestLookupVerifier_AbsenceShapesAndFaultsAreDistinguishable(t *testing.T) {
+	t.Parallel()
+
+	types := []struct {
+		typ   domain.DNSRecordType
+		qtype string
+		value string
+	}{
+		{domain.DNSRecordTXT, "TXT", "v=ans1; irrelevant"},
+		{domain.DNSRecordTLSA, "TLSA", "3 0 1 abcdef"},
+		{domain.DNSRecordHTTPS, "HTTPS", "1 . alpn=h2"},
+		{domain.DNSRecordSVCB, "SVCB", "1 . alpn=a2a port=443"},
+	}
+
+	for _, tc := range types {
+		t.Run(string(tc.typ), func(t *testing.T) {
+			t.Parallel()
+
+			t.Run("nxdomain_is_absence", func(t *testing.T) {
+				t.Parallel()
+				s := newTestServer(t)
+				got := s.verifyAgainst(t, []domain.ExpectedDNSRecord{{
+					Name: "nx.agent.example.com", Type: tc.typ, Value: tc.value,
+				}})
+				if got[0].found {
+					t.Error("must not be Found")
+				}
+				if got[0].errString != "" {
+					t.Errorf("NXDOMAIN must leave Error empty, got %q", got[0].errString)
+				}
+			})
+
+			t.Run("nodata_is_absence", func(t *testing.T) {
+				t.Parallel()
+				s := newTestServer(t)
+				s.addName("nodata.agent.example.com")
+				got := s.verifyAgainst(t, []domain.ExpectedDNSRecord{{
+					Name: "nodata.agent.example.com", Type: tc.typ, Value: tc.value,
+				}})
+				if got[0].found {
+					t.Error("must not be Found")
+				}
+				if got[0].errString != "" {
+					t.Errorf("NODATA must leave Error empty, got %q", got[0].errString)
+				}
+			})
+
+			t.Run("servfail_is_a_fault", func(t *testing.T) {
+				t.Parallel()
+				s := newTestServer(t)
+				s.addServfail("broken.agent.example.com", tc.qtype)
+				got := s.verifyAgainst(t, []domain.ExpectedDNSRecord{{
+					Name: "broken.agent.example.com", Type: tc.typ, Value: tc.value,
+				}})
+				if got[0].found {
+					t.Error("must not be Found")
+				}
+				if got[0].errString == "" {
+					t.Fatal("SERVFAIL is a genuine fault and must populate Error; without it the drop is indistinguishable from an operator's choice")
+				}
+				if !strings.Contains(got[0].errString, "SERVFAIL") {
+					t.Errorf("Error should name the rcode so operators can act on it, got %q", got[0].errString)
+				}
+			})
+		})
 	}
 }
 

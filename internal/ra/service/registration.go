@@ -806,8 +806,12 @@ type sealedActivation struct {
 // mirroring the identity lane). A failed seal is a failed activation:
 // nothing is committed and the agent stays PENDING_DNS for the operator to
 // retry. A nil sealer fails closed with TL_UNAVAILABLE — there is no "seal
-// later" mode for the ACTIVE transition. expected/perRecord feed the
-// version-specific attestation block.
+// later" mode for the ACTIVE transition.
+//
+// expected/perRecord feed the version-specific attestation block. Callers
+// pass the attestedDNSRecords-filtered set, not the raw expected set: this
+// leaf is signed into an append-only log, so an optional record the
+// operator never published must be absent from it rather than attested.
 func (s *RegistrationService) sealActivationEvent(
 	ctx context.Context, reg *domain.AgentRegistration,
 	expected []domain.ExpectedDNSRecord, perRecord []port.RecordVerification,
