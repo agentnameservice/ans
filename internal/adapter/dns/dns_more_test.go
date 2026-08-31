@@ -52,8 +52,11 @@ func TestLookupVerifier_HTTPS_Mismatch(t *testing.T) {
 	}
 }
 
-// TestLookupVerifier_HTTPS_NXDOMAIN — server returns no records
-// → NXDOMAIN → r.Error populated with "rcode NXDOMAIN".
+// TestLookupVerifier_HTTPS_NXDOMAIN — server returns no records and the
+// owner name does not exist → NXDOMAIN → not Found, and Error stays empty
+// because absence is not a lookup fault. The CNAME-at-apex operator who
+// structurally cannot publish an HTTPS RR (RFC 1034 §3.6.2) lands here,
+// and their activation must not read as an upstream problem.
 func TestLookupVerifier_HTTPS_NXDOMAIN(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t)
@@ -65,8 +68,8 @@ func TestLookupVerifier_HTTPS_NXDOMAIN(t *testing.T) {
 	if got[0].found {
 		t.Error("NXDOMAIN HTTPS must not be Found")
 	}
-	if got[0].errString == "" {
-		t.Error("expected error to be populated for NXDOMAIN HTTPS")
+	if got[0].errString != "" {
+		t.Errorf("NXDOMAIN is absence, not a fault; Error must stay empty, got %q", got[0].errString)
 	}
 }
 

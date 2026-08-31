@@ -21,8 +21,12 @@ import (
 
 // verified pairs an expected record with the verifier's verdict, mirroring
 // what the lookup adapter returns: the same Record struct it was handed,
-// plus Found. Actual stays empty, which is the MISSING shape — nothing
-// answered at that name.
+// plus Found. With found=false, Actual and Error both stay empty, which is
+// the MISSING shape — the adapter produces it for both NXDOMAIN (the name
+// does not exist, which is what declining an optional record looks like)
+// and NODATA (the name exists with no records of this type). See
+// TestDropCauseMatchesLookupAdapterShapes for why those two must not carry
+// an Error.
 func verified(r domain.ExpectedDNSRecord, found bool) port.RecordVerification {
 	return port.RecordVerification{Record: r, Found: found}
 }
@@ -92,6 +96,12 @@ func TestAttestedDNSRecords(t *testing.T) {
 			// The default-profile bug this filter exists to fix. Operator
 			// published SVCB and badge, skipped the optional TLSA. Activation
 			// succeeds either way; the leaf must not claim the TLSA.
+			//
+			// On real DNS this is the NXDOMAIN shape: declining DANE means
+			// never creating `_443._tcp.<fqdn>`, so the name does not exist.
+			// The adapter reports that as Found=false with Error empty, which
+			// is why this drops as MISSING rather than LOOKUP_ERROR and stays
+			// on the INFO arm.
 			name:     "unpublished_optional_is_dropped",
 			expected: []domain.ExpectedDNSRecord{svcb, badge, tlsa},
 			perRecord: []port.RecordVerification{
@@ -323,6 +333,94 @@ func TestAttestedDNSRecords_DropSummaryIsLogSafe(t *testing.T) {
 	// why the record went unattested, and nothing else in the RA reports it.
 	if dropped[1].Cause != dropCauseLookupError || dropped[1].Error != "rcode SERVFAIL" {
 		t.Errorf("resolver failure must reach the log with its cause: %+v", dropped[1])
+	}
+}
+
+// TestDropCauseMatchesLookupAdapterShapes is the seam test between this
+// classification and the adapter that feeds it. Every case below is the
+// exact port.RecordVerification the real LookupVerifier emits for one DNS
+// outcome, so the two stay in agreement.
+//
+// This exists because the classification is only as good as the adapter's
+// contract, and that contract is easy to get wrong in a way no
+// service-level test would catch: the adapter used to report NXDOMAIN
+// through Error, which put the single most common drop — an operator
+// declining DANE, which yields NXDOMAIN on real DNS because the
+// `_443._tcp` owner name is never created — on the LOOKUP_ERROR/WARN arm.
+// Hand-built fixtures modelled absence as Error=="" and so agreed with the
+// intent while the adapter disagreed with both. The adapter side is pinned
+// by TestLookupVerifier_AbsenceShapesAndFaultsAreDistinguishable; this is
+// the other half.
+func TestDropCauseMatchesLookupAdapterShapes(t *testing.T) {
+	t.Parallel()
+	rec := rec("_443._tcp.a.example.com", domain.DNSRecordTLSA, "3 0 1 abcd", false)
+
+	cases := []struct {
+		name string
+		// dnsOutcome names the real-world DNS response this models.
+		dnsOutcome string
+		v          port.RecordVerification
+		haveResult bool
+		want       string
+	}{
+		{
+			name:       "nxdomain",
+			dnsOutcome: "NXDOMAIN — owner name absent; the skip-DANE case",
+			v:          port.RecordVerification{Record: rec},
+			haveResult: true,
+			want:       dropCauseMissing,
+		},
+		{
+			name:       "nodata",
+			dnsOutcome: "NOERROR, empty answer — name exists, no record of this type",
+			v:          port.RecordVerification{Record: rec},
+			haveResult: true,
+			want:       dropCauseMissing,
+		},
+		{
+			name:       "value_disagrees",
+			dnsOutcome: "NOERROR with a record whose value differs (stale fingerprint)",
+			v:          port.RecordVerification{Record: rec, Actual: "3 0 1 ffff"},
+			haveResult: true,
+			want:       dropCauseMismatch,
+		},
+		{
+			name:       "servfail",
+			dnsOutcome: "SERVFAIL — the question went unanswered",
+			v:          port.RecordVerification{Record: rec, Error: "rcode SERVFAIL"},
+			haveResult: true,
+			want:       dropCauseLookupError,
+		},
+		{
+			name:       "refused",
+			dnsOutcome: "REFUSED — likewise a fault, not an answer",
+			v:          port.RecordVerification{Record: rec, Error: "rcode REFUSED"},
+			haveResult: true,
+			want:       dropCauseLookupError,
+		},
+		{
+			name:       "transport_failure",
+			dnsOutcome: "no response at all (timeout / unreachable resolver)",
+			v:          port.RecordVerification{Record: rec, Error: "read udp: i/o timeout"},
+			haveResult: true,
+			want:       dropCauseLookupError,
+		},
+		{
+			name:       "no_result_for_record",
+			dnsOutcome: "verifier returned a short result list — no evidence either way",
+			v:          port.RecordVerification{},
+			haveResult: false,
+			want:       dropCauseNoResult,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := dropCause(tc.v, tc.haveResult); got != tc.want {
+				t.Errorf("%s\n  got %q want %q", tc.dnsOutcome, got, tc.want)
+			}
+		})
 	}
 }
 
