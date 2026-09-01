@@ -955,6 +955,42 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		return nil, err
 	}
 
+	// The leaf attests what DNS answered with, not what we asked for.
+	// Optional records don't block activation, so an operator can reach
+	// this line having published the required records and skipped the
+	// TLSA or apex HTTPS rows; attesting those would sign a claim about
+	// records that don't exist. attestedDNSRecords drops them.
+	//
+	// Narrowing the leaf does not hide the record set from the operator.
+	// They read the full computed set from GET
+	// /v2/ans/agents/{agentId} as `registrationPending.dnsRecords[]`
+	// while the agent is PENDING_DNS, which is before they call
+	// verify-dns. It is not in this response: VerifyDNSResult carries no
+	// records, and the 202 body is agentStatus. It is also gone once the
+	// agent is ACTIVE, since buildRegistrationPendingBlock emits nothing
+	// outside the pending statuses.
+	attested, dropped := attestedDNSRecords(expected, perRecord)
+	if len(dropped) > 0 {
+		// Names, types and causes only, never values — same discipline as
+		// the 422 log above. The cause is the point: an operator skipping
+		// DANE, a stale value in their zone, and the resolver failing all
+		// land here looking identical, and only the first is a normal
+		// choice. A failed lookup is an upstream fault that just narrowed
+		// an append-only signed attestation, so it goes out at WARN and
+		// carries the resolver's own message.
+		ev := log.Info()
+		if droppedForLookupError(dropped) {
+			ev = log.Warn()
+		}
+		ev.
+			Str("agentId", agentID).
+			Str("fqdn", reg.FQDN()).
+			Int("expectedCount", len(expected)).
+			Int("attestedCount", len(attested)).
+			Interface("droppedRecords", dropped).
+			Msg("omitting unverified optional DNS records from the activation attestation")
+	}
+
 	// Seal-before-success (ANS-1 §12.3: "the RA MUST NOT activate without a
 	// sealed event (step (d) is the point of no return)"). AGENT_REGISTERED
 	// is the single terminal transition that marks the agent live in the
@@ -967,7 +1003,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// (Both lanes emit the same eventType token in version-specific
 	// envelope shapes; the seal runs outside the tx so the network round
 	// trip never holds the SQLite write lock.)
-	sealed, err := s.sealActivationEvent(ctx, reg, expected, perRecord, in.SchemaVersion, now)
+	sealed, err := s.sealActivationEvent(ctx, reg, attested, perRecord, in.SchemaVersion, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1146,10 +1182,16 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 ) (*event.Event, error) {
 	inner := s.baseInnerEvent(reg, event.TypeAgentRegistered, now)
 
-	// Provisioned records: the exact record set the operator was
-	// asked to configure, now verified live. ACME challenge records
-	// are never on this list by construction — ComputeRequiredDNSRecords
-	// doesn't include them.
+	// Provisioned records: what the caller observed in DNS, already
+	// narrowed by attestedDNSRecords. Every required record is here
+	// (a required miss 422s before the seal), but optional records the
+	// operator chose not to publish — a TLSA row without DANE, the apex
+	// HTTPS RR a CNAME-at-apex zone cannot carry — are absent rather
+	// than attested. ACME challenge records are never on this list by
+	// construction; ComputeRequiredDNSRecords doesn't emit them.
+	//
+	// Callers must pass the filtered set. Handing this builder the raw
+	// expected set would sign claims about records nobody published.
 	//
 	// DNSSECVerified carries forward from the per-record verification
 	// result (set true by the lookup verifier when a validating

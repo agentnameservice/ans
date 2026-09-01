@@ -21,7 +21,24 @@ type RecordVerification struct {
 	// the live record carries coexistence extras) and is informational
 	// only — Found is the verdict.
 	Actual string
-	Error  string // Lookup error, if any.
+	// Error carries the reason the lookup could not answer the question at
+	// all: a transport failure, or a non-success rcode other than NXDOMAIN.
+	//
+	// NXDOMAIN is deliberately NOT an error. It is an authoritative answer
+	// that the name does not exist, which is how ordinary absence looks
+	// when an operator declines an optional record — they never create the
+	// owner name, so there is nothing there to return NODATA for. Both
+	// shapes of absence (NXDOMAIN, and SUCCESS with no matching answer)
+	// therefore leave Error empty.
+	//
+	// The service layer relies on that split when it decides what to say
+	// about a record it dropped from an attestation: an empty Error means
+	// the zone genuinely lacks the record and the operator chose that, so
+	// the drop is expected; a non-empty Error means an upstream fault left
+	// the question unanswered and a signed attestation was narrowed by
+	// something nobody intended. Widening Error to cover absence would
+	// collapse those two into one and make the distinction unrecoverable.
+	Error string
 	// DNSSECVerified is true when the response carried an
 	// authenticated-data (AD) bit from a validating resolver. Set
 	// on TLSA, SVCB, and HTTPS responses; surfaced to the TL

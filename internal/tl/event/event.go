@@ -205,11 +205,12 @@ type DNSRecord struct {
 	Type string `json:"type"`
 	// DNSSECVerified is true when the RA's verifier observed the
 	// DNSSEC authenticated-data bit on the response that produced
-	// this attestation. Only set for TLSA records where a
-	// validating resolver chain confirmed the cert-binding; absent
-	// on TXT/HTTPS and on TLSA lookups where the chain didn't
-	// validate. `omitempty` so the field drops out unless true —
-	// matches V1 byte-for-byte when zero.
+	// this attestation. Set on TLSA, SVCB, and HTTPS records, whose
+	// lookups capture the AD bit; absent on TXT, which doesn't, and
+	// absent on any lookup where the resolver chain didn't validate.
+	// Because DNSSEC signs RRsets, records sharing an owner name and
+	// type share one AD bit. `omitempty` so the field drops out
+	// unless true — matches V1 byte-for-byte when zero.
 	DNSSECVerified bool `json:"dnssecVerified,omitempty"`
 }
 

@@ -173,6 +173,11 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 	// operator publishes two records at the same owner name (e.g.
 	// two TXTs), V1 can only keep one. We preserve the last value
 	// encountered; this is a known V1 lossiness the V2 shape fixes.
+	//
+	// `expected` arrives already filtered to the records DNS answered
+	// with (see attestedDNSRecords) — the caller does that once for both
+	// lanes, so an optional record the operator skipped is absent here
+	// too rather than attested on the V1 wire.
 	dnsMap := make(map[string]string, len(expected))
 	for _, r := range expected {
 		dnsMap[r.Name] = r.Value
@@ -259,8 +264,17 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 //
 //   - `revokedAt` timestamp (RFC3339 UTC).
 //   - `revocationReasonCode` from the caller's stated reason.
-//   - `dnsRecordsProvisioned` — the records the operator now needs
-//     to tear down (same set that was attested at ACTIVE).
+//   - `dnsRecordsProvisioned` — the records the operator now needs to
+//     tear down. This is the currently computed set, NOT the set the
+//     AGENT_REGISTERED leaf attested. The two can differ two ways: an
+//     optional record the operator never published was dropped from the
+//     activation attestation (see attestedDNSRecords) but is still
+//     computed here, and a server-cert renewal moves the TLSA value to
+//     the current fingerprint. Revoke does no DNS lookup, so there is no
+//     observation to narrow against — tear-down guidance is the honest
+//     reading of this field on the revoke event, and a verifier should
+//     not diff it against the registration leaf as if it were a second
+//     attestation of the same state.
 //   - `validIdentityCerts[]` — the identity certs being revoked,
 //     so offline verifiers can mark their fingerprints untrusted.
 //   - `validServerCerts[]` — the BYOC server cert if any.
