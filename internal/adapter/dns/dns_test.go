@@ -344,6 +344,34 @@ func TestLookupVerifier_SVCB(t *testing.T) {
 			why:       "ServiceMode expectation should not match an AliasMode record",
 		},
 		{
+			// RFC 9460 §2.5.2: in ServiceMode, TargetName "." designates
+			// the record's owner name, so a live record whose target is
+			// the explicit owner FQDN — the form emitted by publishing
+			// tools such as the DNS-AID reference implementation — is
+			// the same target as the expected ".". Comparing the
+			// presentation strings literally would report a present,
+			// correct record as not-found.
+			name:      "servicemode-explicit-owner-fqdn-matches-expected-dot",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 agent.example.com. alpn=a2a port=443`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     true,
+			why:       "RFC 9460 §2.5.2: '.' and the explicit owner FQDN are the same effective TargetName",
+		},
+		{
+			// Effective-TargetName comparison must not degrade into
+			// "any target matches": an explicit target naming a host
+			// other than the owner is still a real mismatch.
+			name:      "servicemode-different-explicit-target-still-fails",
+			zoneName:  "agent.example.com.",
+			zoneRR:    `agent.example.com. 3600 IN SVCB 1 other.example.com. alpn=a2a port=443`,
+			queryName: "agent.example.com",
+			want:      `1 . alpn=a2a port=443`,
+			found:     false,
+			why:       "a target that is neither '.' nor the owner name designates a different endpoint",
+		},
+		{
 			// RFC 9460 §8 unknown-key ignore: a live record with extra
 			// SvcParams (e.g. another agentic spec adding its own keys to
 			// the same SVCB row) must still match when our committed

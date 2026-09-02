@@ -312,10 +312,12 @@ func formatHTTPSValue(s *dns.SVCB) string {
 // designs for multi-family coexistence in a single record — sibling
 // families can share one SVCB row, distinguished by their own
 // SvcParamKeys. Verification therefore implements RFC 9460 §8
-// unknown-key ignore semantics as a *subset* match: priority and
-// target must equal the expected value exactly, every expected
-// SvcParam must be present in the live record with an equal value,
-// and additional SvcParams in the live record are tolerated.
+// unknown-key ignore semantics as a *subset* match: priority must
+// equal the expected value exactly, targets must designate the same
+// effective TargetName (RFC 9460 §2.5.2 — "." and the explicit owner
+// FQDN are the same target in ServiceMode), every expected SvcParam
+// must be present in the live record with an equal value, and
+// additional SvcParams in the live record are tolerated.
 //
 // A strict-equality matcher would mark a multi-spec record not-found
 // and (in a DNSSEC-signed zone) trip the SVCB_DNSSEC_MISMATCH hard
@@ -353,7 +355,7 @@ func (v *LookupVerifier) verifySVCB(ctx context.Context, server string, rec doma
 			// not-found if no other answer matches.
 			continue
 		}
-		if matchesSVCBSubset(expected, actual) {
+		if matchesSVCBSubset(expected, actual, rec.Name) {
 			r.Found = true
 			r.Actual = gotStr
 			return r
@@ -407,14 +409,23 @@ func parseSVCBValue(s string) (parsedSVCB, error) {
 
 // matchesSVCBSubset reports whether `actual` carries all SvcParams
 // in `expected` (with equal values), tolerating any additional
-// SvcParams in `actual`. Priority and target must match exactly.
+// SvcParams in `actual`. Priority must match exactly; targets are
+// compared as effective TargetNames (see effectiveSVCBTarget), so a
+// ServiceMode "." and the explicit owner FQDN — the same target per
+// RFC 9460 §2.5.2 — match regardless of which presentation form a
+// publishing tool emitted.
 //
 // This is the verifier-side embodiment of RFC 9460 §8 unknown-key
 // ignore semantics: the RA only verifies the SvcParams it committed
 // to write; SvcParams from other agentic specs sharing the same
 // SVCB row pass through unexamined.
-func matchesSVCBSubset(expected, actual parsedSVCB) bool {
-	if expected.priority != actual.priority || expected.target != actual.target {
+func matchesSVCBSubset(expected, actual parsedSVCB, owner string) bool {
+	if expected.priority != actual.priority {
+		return false
+	}
+	serviceMode := expected.priority != 0
+	if effectiveSVCBTarget(expected.target, owner, serviceMode) !=
+		effectiveSVCBTarget(actual.target, owner, serviceMode) {
 		return false
 	}
 	for k, want := range expected.params {
@@ -424,6 +435,23 @@ func matchesSVCBSubset(expected, actual parsedSVCB) bool {
 		}
 	}
 	return true
+}
+
+// effectiveSVCBTarget returns the canonical effective TargetName of
+// an SVCB record for comparison purposes. RFC 9460 §2.5.2: "For
+// ServiceMode SVCB RRs, if TargetName has the value '.', then the
+// owner name of this record MUST be used as the effective
+// TargetName." So at owner `agent.example.com`, a target of "." and
+// an explicit `agent.example.com.` designate the same target; which
+// form appears is a choice of the publishing tool, not an identity.
+// In AliasMode (priority 0) "." means "service not available" and is
+// left as-is. Canonicalization (lowercase, trailing dot) also makes
+// the comparison case- and FQDN-dot-insensitive, as DNS names are.
+func effectiveSVCBTarget(target, owner string, serviceMode bool) string {
+	if serviceMode && target == "." {
+		return dns.CanonicalName(owner)
+	}
+	return dns.CanonicalName(target)
 }
 
 // normalizeTLSA collapses whitespace and lowercases the hex so
