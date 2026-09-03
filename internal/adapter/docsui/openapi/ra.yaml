@@ -1214,12 +1214,22 @@ paths:
         - Verified Identities
       summary: Register a verified identity
       description: |
-        Registers an identifier (the kind — `did:web`, `did:key` — is
-        inferred from the value's lexical form, never caller-asserted)
-        and returns the challenge round to sign: one entry per
-        eligible key, all over a single anti-replay nonce. The
-        identity is created in `PENDING_CONTROL`; nothing is sealed
-        until verify-control passes.
+        Registers an identifier (the kind — `did:web`, `did:key`,
+        `web-bot-auth` — is inferred from the value's lexical form,
+        never caller-asserted) and returns the challenge round to
+        sign: one entry per eligible key, all over a single
+        anti-replay nonce. The identity is created in
+        `PENDING_CONTROL`; nothing is sealed until verify-control
+        passes.
+
+        The `web-bot-auth` kind's value is an `https://`
+        Signature-Agent URL. It is canonicalized to the well-known
+        directory URL
+        `https://<host>[:port]/.well-known/http-message-signatures-directory`
+        — the URL a verifier fetches the HTTP Message Signatures
+        directory at (draft-meunier-webbotauth-httpsig-protocol-02). A
+        bare origin gets the well-known path added; any other path
+        returns 422 `WBA_URL_INVALID`.
 
         Re-POSTing the same value while the row is `PENDING_CONTROL`
         is the idempotent re-add: the same `identityId` returns with
@@ -1259,7 +1269,9 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '422':
           description: |
-            Invalid or unsupported identifier; for the `did:web` kind the
+            Invalid or unsupported identifier; for the `web-bot-auth`
+            kind a malformed Signature-Agent URL fails with
+            `WBA_URL_INVALID`; for the `did:web` kind the
             register-time resolution may fail with `DID_RESOLUTION_FAILED`
             or `DID_DOCUMENT_ID_MISMATCH`; for the `lei` kind —
             `IDENTIFIER_PRESENTATION_REQUIRED`, `LEI_PRESENTATION_INVALID`,
@@ -1387,7 +1399,9 @@ paths:
         '422':
           description: |
             Invalid replacement value (incl. `IDENTIFIER_KIND_MISMATCH`);
-            for the `did:web` kind the register-time resolution may fail
+            for the `web-bot-auth` kind a malformed Signature-Agent URL
+            fails with `WBA_URL_INVALID`; for the `did:web` kind the
+            register-time resolution may fail
             with `DID_RESOLUTION_FAILED` or `DID_DOCUMENT_ID_MISMATCH`;
             for the `lei` kind — `IDENTIFIER_PRESENTATION_REQUIRED`,
             `LEI_PRESENTATION_INVALID`, `LEI_MISMATCH`,
@@ -1417,9 +1431,20 @@ paths:
         before verifying any signature). Every proof must verify
         against the identifier's AUTHORITATIVE key for its `kid`
         (resolved from the DID document for `did:web`, decoded from
-        the identifier for `did:key`); one bad proof fails the call
-        closed. The nonce is consumed exactly once, inside the
-        success transaction — a failed attempt does not consume it.
+        the identifier for `did:key`, located in the fetched HTTP
+        Message Signatures directory for `web-bot-auth`); one bad
+        proof fails the call closed. The nonce is consumed exactly
+        once, inside the success transaction — a failed attempt does
+        not consume it.
+
+        The `web-bot-auth` kind submits `signedProofs` (EdDSA only).
+        Each proof's `kid` is the RFC 7638 thumbprint of an Ed25519
+        key; the RA fetches the directory at the canonical
+        Signature-Agent URL and seals the INTERSECTION of the
+        possession-proven and the directory-endorsed keys. A proof
+        for a key the directory does not currently endorse is dropped
+        (mid-rotation tolerance); at least one proof must match, else
+        `IDENTIFIER_PROOF_INVALID`.
 
         The `lei` kind instead submits a single `cesrSignature` over
         the same `signingInput`: the RA forwards it to the
@@ -1493,7 +1518,7 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
 
         '503':
-          description: Upstream unavailable (TL_UNAVAILABLE, or LEI_VERIFIER_UNAVAILABLE — retryable; the nonce is NOT consumed)
+          description: Upstream unavailable (TL_UNAVAILABLE, LEI_VERIFIER_UNAVAILABLE, or WBA_DIRECTORY_UNAVAILABLE — retryable; the nonce is NOT consumed)
           content:
             application/json:
               schema:
@@ -2896,12 +2921,16 @@ components:
       description: |
         Registers (POST) or rotates (PUT) an identifier. The kind is
         inferred from the value's lexical form — `did:web:` prefix,
-        `did:key:` prefix, or a 20-character LEI — never
-        caller-asserted.
+        `did:key:` prefix, a 20-character LEI, or an `https://`
+        Signature-Agent URL (`web-bot-auth`) — never caller-asserted.
       properties:
         value:
           type: string
-          description: The identifier to prove control of
+          description: |
+            The identifier to prove control of. For `web-bot-auth`,
+            an `https://` Signature-Agent URL, canonicalized to the
+            well-known directory URL
+            `https://<host>[:port]/.well-known/http-message-signatures-directory`.
           example: did:web:identity.acme-corp.com
         vleiPresentation:
           $ref: '#/components/schemas/VLEIPresentation'
@@ -2942,7 +2971,7 @@ components:
           description: RA-assigned UUIDv7 — the TL stream key
         kind:
           type: string
-          enum: ['did:web', 'did:key', 'lei']
+          enum: ['did:web', 'did:key', 'lei', 'web-bot-auth']
         value:
           type: string
           description: The canonical identifier this round proves
@@ -3089,7 +3118,7 @@ components:
           type: string
         kind:
           type: string
-          enum: ['did:web', 'did:key', 'lei']
+          enum: ['did:web', 'did:key', 'lei', 'web-bot-auth']
         value:
           type: string
         status:
@@ -3162,7 +3191,7 @@ components:
           type: string
         kind:
           type: string
-          enum: ['did:web', 'did:key', 'lei']
+          enum: ['did:web', 'did:key', 'lei', 'web-bot-auth']
         value:
           type: string
         identityStatus:

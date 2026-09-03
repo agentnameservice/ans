@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"crypto/elliptic"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -160,6 +161,49 @@ func PublicKeyToJWK(pub any) (json.RawMessage, error) {
 	default:
 		return nil, fmt.Errorf("%w: unsupported public key type %T", ErrJWK, pub)
 	}
+}
+
+// JWKThumbprint returns the RFC 7638 SHA-256 thumbprint of a public
+// JWK, base64url-encoded (unpadded) — the value web-bot-auth requires
+// as the JWS `kid` (draft-meunier-webbotauth-httpsig-protocol-02) and
+// the RA uses to locate the endorsing key in the resolved directory
+// JWKS. Only OKP/Ed25519 keys are supported (web-bot-auth is
+// Ed25519-only, JWK-OKP A.3); any other kty/crv errors rather than
+// returns a thumbprint over an unvetted member set.
+//
+// The digest is over the canonical JWK: the key's REQUIRED members
+// only, ordered lexicographically, with no whitespace (RFC 7638 §3).
+// For OKP those are {"crv","kty","x"}.
+func JWKThumbprint(jwk json.RawMessage) (string, error) {
+	var f jwkFields
+	if err := json.Unmarshal(jwk, &f); err != nil {
+		return "", fmt.Errorf("%w: %w", ErrJWK, err)
+	}
+	if f.Kty != "OKP" {
+		return "", fmt.Errorf("%w: JWK thumbprint supported only for OKP/Ed25519, got kty %q", ErrJWK, f.Kty)
+	}
+	if f.Crv != "Ed25519" {
+		return "", fmt.Errorf("%w: OKP thumbprint supported only for crv Ed25519, got %q", ErrJWK, f.Crv)
+	}
+	// A thumbprint over a malformed key would silently diverge from the
+	// directory's recomputation, so the x coordinate must be a
+	// well-formed Ed25519 point.
+	if x, err := base64.RawURLEncoding.DecodeString(f.X); err != nil || len(x) != ed25519.PublicKeySize {
+		return "", fmt.Errorf("%w: OKP x must be a %d-byte base64url value", ErrJWK, ed25519.PublicKeySize)
+	}
+	// Struct field order IS the emitted JSON order and matches the RFC
+	// 7638 lexicographic requirement (crv < kty < x); json.Marshal adds
+	// no whitespace and escapes member values correctly.
+	canonical, err := json.Marshal(struct {
+		Crv string `json:"crv"`
+		Kty string `json:"kty"`
+		X   string `json:"x"`
+	}{Crv: f.Crv, Kty: f.Kty, X: f.X})
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrJWK, err)
+	}
+	sum := sha256.Sum256(canonical)
+	return base64.RawURLEncoding.EncodeToString(sum[:]), nil
 }
 
 func marshalJWK(members map[string]string) (json.RawMessage, error) {

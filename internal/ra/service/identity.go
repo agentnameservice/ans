@@ -117,13 +117,14 @@ func NewIdentityService(
 	resolver port.DIDResolver,
 	sealer IdentityEventSealer,
 	leiCtl port.LEIControlVerifier,
+	dirResolver port.WebBotAuthDirectoryResolver,
 	uow port.UnitOfWork,
 ) *IdentityService {
 	return &IdentityService{
 		identities:   identities,
 		links:        links,
 		agents:       agents,
-		verifiers:    newControlVerifiers(resolver, leiCtl),
+		verifiers:    newControlVerifiers(resolver, leiCtl, dirResolver),
 		sealer:       sealer,
 		uow:          uow,
 		challengeTTL: time.Hour,
@@ -157,6 +158,12 @@ func NewIdentityService(
 // from.
 func (s *IdentityService) WithLogger(logger zerolog.Logger) *IdentityService {
 	s.logger = logger.With().Str("component", "identity-service").Logger()
+	// The web-bot-auth verifier keeps its own component-tagged logger for
+	// the directory-fetch and intersection-drop signals; propagate the
+	// same base logger so a kind's diagnostics share the request's fields.
+	if wba, ok := s.verifiers[domain.KindWebBotAuth].(*webBotAuthVerifier); ok {
+		wba.logger = logger.With().Str("component", "webbotauth-verifier").Logger()
+	}
 	return s
 }
 
@@ -209,6 +216,12 @@ func (s *IdentityService) WithSealTimeout(timeout time.Duration) *IdentityServic
 // WithClock overrides the time source (tests only).
 func (s *IdentityService) WithClock(fn func() time.Time) *IdentityService {
 	s.clock = fn
+	// Keep the web-bot-auth verifier's nbf/exp window decisions on the
+	// same clock the service uses, so tests that override time see
+	// consistent directory-key window behavior.
+	if wba, ok := s.verifiers[domain.KindWebBotAuth].(*webBotAuthVerifier); ok {
+		wba.clock = fn
+	}
 	return s
 }
 

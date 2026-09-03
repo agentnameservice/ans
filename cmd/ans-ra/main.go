@@ -29,6 +29,7 @@ import (
 	"github.com/agentnameservice/ans/internal/adapter/cert"
 	"github.com/agentnameservice/ans/internal/adapter/challenge"
 	"github.com/agentnameservice/ans/internal/adapter/didresolver"
+	"github.com/agentnameservice/ans/internal/adapter/directory/webbotauth"
 	"github.com/agentnameservice/ans/internal/adapter/dns"
 	"github.com/agentnameservice/ans/internal/adapter/docsui"
 	"github.com/agentnameservice/ans/internal/adapter/eventbus"
@@ -160,9 +161,14 @@ func run(cfgPath string) error {
 	// the lei kind's analog of
 	// the did:web resolver selection.
 	leiVerifier := selectLEIVerifier(cfg, logger)
+	// web-bot-auth directory resolver — noop (quickstart) or hardened
+	// HTTPS fetch of the HTTP Message Signatures directory, the
+	// web-bot-auth kind's analog of the did:web resolver selection.
+	dirResolver := selectWebBotAuthDirectoryResolver(cfg, logger)
 	logger.Info().
 		Str("resolver", cfg.Identity.Resolver.Type).
 		Str("vleiVerifier", cfg.VLEI.Type).
+		Str("webBotAuthDirectory", cfg.WebBotAuth.Directory.Type).
 		Dur("challengeTTL", cfg.Identity.ChallengeTTL).
 		Msg("verified-identity surface configured")
 
@@ -247,7 +253,7 @@ func run(cfgPath string) error {
 		identitySealer = tlSealer
 	}
 	identitySvc := service.NewIdentityService(
-		identityStore, identityLinks, agents, didResolver, identitySealer, leiVerifier, db,
+		identityStore, identityLinks, agents, didResolver, identitySealer, leiVerifier, dirResolver, db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
 		KeyID:      signerKeyID,
@@ -683,5 +689,21 @@ func selectLEIVerifier(cfg *config.RAConfig, logger zerolog.Logger) port.LEICont
 		return leiverifier.NewNoop()
 	default: // "off"
 		return nil
+	}
+}
+
+// selectWebBotAuthDirectoryResolver returns the configured web-bot-auth
+// directory resolver — the web-bot-auth kind's analog of
+// selectDIDResolver. "http" performs the hardened HTTPS fetch of the HTTP
+// Message Signatures directory (WebPKI + SSRF dialer guards, shared
+// securefetch transport); the default "noop" synthesizes the endorsed
+// key set from the submitted proofs' embedded keys for self-contained
+// local development.
+func selectWebBotAuthDirectoryResolver(cfg *config.RAConfig, logger zerolog.Logger) port.WebBotAuthDirectoryResolver {
+	switch cfg.WebBotAuth.Directory.Type {
+	case "http":
+		return webbotauth.NewHTTPResolver(webbotauth.WithLogger(logger))
+	default:
+		return webbotauth.NewNoopResolver()
 	}
 }

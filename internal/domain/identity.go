@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -29,6 +30,13 @@ const (
 	// a vLEI credential presentation verified by the LEIControlVerifier
 	// port (noop quickstart adapter, or the real vlei-verifier client).
 	KindLEI IdentifierKind = "lei"
+
+	// KindWebBotAuth — a web-bot-auth Signature-Agent URL
+	// (draft-meunier-webbotauth-httpsig-protocol-02). The authoritative
+	// keys live in the HTTP Message Signatures directory the URL serves;
+	// control is a JWS possession proof over the served signingInput
+	// whose key the directory JWKS endorses.
+	KindWebBotAuth IdentifierKind = "web-bot-auth"
 )
 
 // IdentityStatus is the verified-identity lifecycle state.
@@ -119,6 +127,8 @@ func proofMethodForKind(kind IdentifierKind) string {
 		return "did-key-sig"
 	case KindLEI:
 		return "lei-vlei-acdc"
+	case KindWebBotAuth:
+		return "web-bot-auth-sig"
 	default:
 		return ""
 	}
@@ -145,6 +155,12 @@ func InferIdentifierKind(raw string) (IdentifierKind, string, error) {
 			return "", "", NewValidationError("DID_BAD_FORMAT", "did:key value is empty")
 		}
 		return KindDIDKey, value, nil
+	case strings.HasPrefix(value, "https://"):
+		canonical, err := canonicalizeWebBotAuthURL(value)
+		if err != nil {
+			return "", "", err
+		}
+		return KindWebBotAuth, canonical, nil
 	case isLEI(value):
 		return KindLEI, strings.ToUpper(value), nil
 	case strings.HasPrefix(value, "did:"):
@@ -162,8 +178,71 @@ func InferIdentifierKind(raw string) (IdentifierKind, string, error) {
 			fmt.Sprintf("did method %q is not supported (supported: did:web, did:key)", method))
 	default:
 		return "", "", NewValidationError("IDENTIFIER_KIND_UNSUPPORTED",
-			fmt.Sprintf("identifier %q matches no supported kind (did:web, did:key, lei)", value))
+			fmt.Sprintf("identifier %q matches no supported kind (did:web, did:key, lei, web-bot-auth https:// URL)", value))
 	}
+}
+
+// wellKnownDirectoryPath is the web-bot-auth HTTP Message Signatures
+// directory path (draft-meunier-webbotauth-httpsig-protocol-02). The
+// canonical identifier value is always the URL a verifier fetches this
+// document at, so any bare-origin submission is completed to it.
+const wellKnownDirectoryPath = "/.well-known/http-message-signatures-directory"
+
+// maxWebBotAuthURLLen bounds the Signature-Agent URL. The identifier is
+// stored and sealed, so an unbounded value is a resource concern.
+const maxWebBotAuthURLLen = 2048
+
+// canonicalizeWebBotAuthURL validates a web-bot-auth Signature-Agent
+// URL and returns its canonical form: the well-known directory URL a
+// verifier fetches the directory at
+// (https://<host>[:port]/.well-known/http-message-signatures-directory).
+//
+// The URL a verifier resolves IS the identifier (the draft's
+// "Signature-Agent URL is the identifier"), so canonicalization pins it:
+//   - scheme MUST be https; host is lowercased, port preserved,
+//   - no userinfo, query, or fragment — the identifier must be
+//     byte-derivable and carry no ambient request state,
+//   - a bare origin (empty path or "/") → derive the well-known path,
+//   - an explicit well-known path → accepted as-is,
+//   - any other path → WBA_URL_INVALID.
+func canonicalizeWebBotAuthURL(value string) (string, error) {
+	if len(value) > maxWebBotAuthURLLen {
+		return "", NewValidationError("WBA_URL_INVALID",
+			fmt.Sprintf("Signature-Agent URL exceeds the %d-character limit", maxWebBotAuthURLLen))
+	}
+	u, err := url.Parse(value)
+	if err != nil {
+		return "", NewValidationError("WBA_URL_INVALID", "Signature-Agent URL is not a valid URL")
+	}
+	if u.Scheme != "https" {
+		return "", NewValidationError("WBA_URL_INVALID", "Signature-Agent URL must use https")
+	}
+	if u.User != nil {
+		return "", NewValidationError("WBA_URL_INVALID", "Signature-Agent URL must not carry userinfo")
+	}
+	if u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return "", NewValidationError("WBA_URL_INVALID", "Signature-Agent URL must not carry a query or fragment")
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return "", NewValidationError("WBA_URL_INVALID", "Signature-Agent URL has no host")
+	}
+	if err := validateDNSHost(host); err != nil {
+		return "", NewValidationError("WBA_URL_INVALID",
+			fmt.Sprintf("Signature-Agent URL host %q is not a valid DNS name", host))
+	}
+	switch u.EscapedPath() {
+	case "", "/", wellKnownDirectoryPath:
+		// bare origin (derive the path) or the directory path itself.
+	default:
+		return "", NewValidationError("WBA_URL_INVALID",
+			"Signature-Agent URL path must be empty or the well-known directory path")
+	}
+	authority := host
+	if p := u.Port(); p != "" {
+		authority += ":" + p
+	}
+	return "https://" + authority + wellKnownDirectoryPath, nil
 }
 
 // isLEI reports whether the value is shaped like an ISO 17442 LEI:

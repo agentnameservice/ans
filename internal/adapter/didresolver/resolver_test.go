@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -218,80 +217,9 @@ func TestWebResolver_NoRegistrableDomain(t *testing.T) {
 	}
 }
 
-func TestWebResolver_SSRFBlocksLoopback(t *testing.T) {
-	// A real end-to-end run against a loopback host: the pinning
-	// dialer must reject the resolved address class. The DID needs a
-	// registrable domain, so use a hosts-style resolver shim via the
-	// dialer directly.
-	d := &pinningDialer{}
-	_, err := d.DialContext(context.Background(), "tcp", "localhost:443")
-	if err == nil || !strings.Contains(err.Error(), "disallowed") {
-		t.Fatalf("loopback should be rejected: %v", err)
-	}
-}
-
-func TestPinningDialer_RejectsNon443(t *testing.T) {
-	d := &pinningDialer{}
-	if _, err := d.DialContext(context.Background(), "tcp", "example.com:8443"); err == nil {
-		t.Fatal("non-443 should be rejected")
-	}
-	if _, err := d.DialContext(context.Background(), "tcp", "malformed"); err == nil {
-		t.Fatal("malformed address should be rejected")
-	}
-}
-
-func TestPinningDialer_AllowPrivateReachesLoopback(t *testing.T) {
-	// With the test-only escape hatch the dialer connects to a local
-	// listener — proving the happy dial path works end to end.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() { _ = ln.Close() }()
-	go func() {
-		conn, aerr := ln.Accept()
-		if aerr == nil {
-			_ = conn.Close()
-		}
-	}()
-
-	_, port, _ := net.SplitHostPort(ln.Addr().String())
-	_ = port // the dialer pins 443; dial loopback via a name that resolves there
-	d := &pinningDialer{allowPrivate: true}
-	// localhost:443 likely has no listener; accept either a
-	// connection refusal (dial path reached) or success.
-	conn, err := d.DialContext(context.Background(), "tcp", "localhost:443")
-	if err == nil {
-		_ = conn.Close()
-	} else if strings.Contains(err.Error(), "disallowed") {
-		t.Fatalf("allowPrivate must bypass the class filter: %v", err)
-	}
-}
-
-func TestIsPublicUnicast(t *testing.T) {
-	cases := []struct {
-		ip   string
-		want bool
-	}{
-		{"127.0.0.1", false},
-		{"10.1.2.3", false},
-		{"172.16.0.1", false},
-		{"192.168.1.1", false},
-		{"169.254.169.254", false}, // cloud metadata (link-local)
-		{"::1", false},
-		{"fe80::1", false},
-		{"fc00::1", false},
-		{"ff02::1", false},
-		{"0.0.0.0", false},
-		{"93.184.216.34", true},
-		{"2606:2800:220:1::1", true},
-	}
-	for _, tc := range cases {
-		if got := isPublicUnicast(net.ParseIP(tc.ip)); got != tc.want {
-			t.Errorf("isPublicUnicast(%s) = %v, want %v", tc.ip, got, tc.want)
-		}
-	}
-}
+// The SSRF dialer, IP denylist, and registrable-domain helper now live
+// in the shared securefetch package; their unit tests moved there. This
+// file keeps the did:web-specific redirect-policy and parse coverage.
 
 func TestCheckRedirectPolicy(t *testing.T) {
 	w := NewWebResolver()

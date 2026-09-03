@@ -31,6 +31,20 @@ func TestInferIdentifierKind(t *testing.T) {
 		{in: "did:key:zDnaeUm3QkcyZWZTPttxB711jgqRDhkwvhF485SFw1bDZ9AQw", wantKind: KindDIDKey, wantCanonical: "did:key:zDnaeUm3QkcyZWZTPttxB711jgqRDhkwvhF485SFw1bDZ9AQw"},
 		{in: "5493001KJTIIGC8Y1R17", wantKind: KindLEI, wantCanonical: "5493001KJTIIGC8Y1R17"},
 		{in: "5493001kjtiigc8y1r17", wantKind: KindLEI, wantCanonical: "5493001KJTIIGC8Y1R17"},
+		// web-bot-auth: bare origin derives the well-known directory
+		// URL; an explicit directory path is accepted; host lowercased;
+		// port preserved. V1.
+		{in: "https://signer.example.com", wantKind: KindWebBotAuth, wantCanonical: "https://signer.example.com/.well-known/http-message-signatures-directory"},
+		{in: "https://Signer.Example.COM/", wantKind: KindWebBotAuth, wantCanonical: "https://signer.example.com/.well-known/http-message-signatures-directory"},
+		{in: "  https://signer.example.com:8443  ", wantKind: KindWebBotAuth, wantCanonical: "https://signer.example.com:8443/.well-known/http-message-signatures-directory"},
+		{in: "https://signer.example.com/.well-known/http-message-signatures-directory", wantKind: KindWebBotAuth, wantCanonical: "https://signer.example.com/.well-known/http-message-signatures-directory"},
+		{in: "http://signer.example.com", wantErr: "IDENTIFIER_KIND_UNSUPPORTED"},
+		{in: "https://signer.example.com/other/path", wantErr: "WBA_URL_INVALID"},
+		{in: "https://user@signer.example.com", wantErr: "WBA_URL_INVALID"},
+		{in: "https://signer.example.com/?a=b", wantErr: "WBA_URL_INVALID"},
+		{in: "https://signer.example.com/#frag", wantErr: "WBA_URL_INVALID"},
+		{in: "https://", wantErr: "WBA_URL_INVALID"},
+		{in: "https://signer_bad.example.com", wantErr: "WBA_URL_INVALID"},
 		{in: "did:web:", wantErr: "DID_BAD_FORMAT"},
 		{in: "did:web:acme.com%3A8443", wantErr: "DID_BAD_FORMAT"},
 		{in: "did:web:user@acme.com", wantErr: "DID_BAD_FORMAT"},
@@ -80,6 +94,15 @@ func TestValidateDNSHostEdges(t *testing.T) {
 	}
 	if _, _, err := InferIdentifierKind("did:web:acme-.com"); err == nil {
 		t.Error("trailing-hyphen label should fail")
+	}
+}
+
+// TestWebBotAuthURLLengthBound pins V1's ≤2048-character ceiling on the
+// Signature-Agent URL.
+func TestWebBotAuthURLLengthBound(t *testing.T) {
+	longHost := strings.Repeat("a", 2100) + ".example.com"
+	if _, _, err := InferIdentifierKind("https://" + longHost); err == nil {
+		t.Error("over-long web-bot-auth URL should fail")
 	}
 }
 
@@ -266,6 +289,7 @@ func TestProofMethodForKind(t *testing.T) {
 		KindDIDWeb:            "did-web-sig",
 		KindDIDKey:            "did-key-sig",
 		KindLEI:               "lei-vlei-acdc",
+		KindWebBotAuth:        "web-bot-auth-sig",
 		IdentifierKind("???"): "",
 	}
 	for kind, want := range cases {

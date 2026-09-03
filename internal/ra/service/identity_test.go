@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/agentnameservice/ans/internal/adapter/didresolver"
+	"github.com/agentnameservice/ans/internal/adapter/directory/webbotauth"
 	"github.com/agentnameservice/ans/internal/adapter/keymanager"
 	"github.com/agentnameservice/ans/internal/adapter/leiverifier"
 	"github.com/agentnameservice/ans/internal/adapter/store/sqlite"
@@ -146,6 +147,7 @@ func newIdentityFixtureWithLEI(t *testing.T, resolver port.DIDResolver, lei port
 		resolver,
 		sealer,
 		lei,
+		webbotauth.NewNoopResolver(),
 		db,
 	).WithSigner(service.EventSigner{
 		KeyManager: km,
@@ -1466,6 +1468,7 @@ func TestNilSealerFailsClosed(t *testing.T) {
 		didresolver.NewNoopResolver(),
 		nil, // no sealer
 		leiverifier.NewNoop(),
+		webbotauth.NewNoopResolver(),
 		db,
 	)
 	ctx := context.Background()
@@ -1564,6 +1567,7 @@ func TestReleaseClaim_LeakedClaimIsLoggedNotSwallowed(t *testing.T) {
 		didresolver.NewNoopResolver(),
 		sealer,
 		leiverifier.NewNoop(),
+		webbotauth.NewNoopResolver(),
 		db,
 	).WithSigner(service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"}).
 		WithClock(clock.Now).WithLogger(zerolog.New(io.Discard))

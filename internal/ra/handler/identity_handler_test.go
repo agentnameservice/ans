@@ -26,6 +26,7 @@ import (
 	"github.com/agentnameservice/ans/internal/adapter/auth"
 	"github.com/agentnameservice/ans/internal/adapter/cert"
 	"github.com/agentnameservice/ans/internal/adapter/didresolver"
+	"github.com/agentnameservice/ans/internal/adapter/directory/webbotauth"
 	"github.com/agentnameservice/ans/internal/adapter/eventbus"
 	"github.com/agentnameservice/ans/internal/adapter/leiverifier"
 	"github.com/agentnameservice/ans/internal/adapter/store/sqlite"
@@ -95,6 +96,7 @@ func newIdentityHTTPFixture(t *testing.T) *identityHTTPFixture {
 		didresolver.NewNoopResolver(),
 		okSealer{},
 		leiverifier.NewNoop(),
+		webbotauth.NewNoopResolver(),
 		db,
 	).WithChallengeTTL(30 * time.Minute)
 
