@@ -192,6 +192,11 @@ The verifier:
 6. ES256-verifies the signature over Sig_structure.
 7. Cross-checks that the receipt's computed leaf hash matches the
    badge's `merkleProof.leafHash` (same leaf in the same tree).
+8. For every metadata hash the leaf attests, fetches the descriptor at
+   the URL the attested SVCB row carries (`key65400`) and compares its
+   SHA-256 with the attested value. A mismatch fails verification; an
+   unreachable descriptor is reported only. `-check-metadata=false`
+   skips this step.
 
 ## Configuration
 
