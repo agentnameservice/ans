@@ -254,16 +254,31 @@ func (v *LookupVerifier) verifyTLSA(ctx context.Context, server string, rec doma
 	return r
 }
 
-// verifyHTTPS checks for an HTTPS-type record (RFC 9460). Matching
-// compares the SvcPriority + TargetName + params text verbatim
-// against the expected value after whitespace normalization.
+// verifyHTTPS checks for an HTTPS-type record (RFC 9460) at the
+// agent's bare FQDN. HTTPS is SVCB with a fixed service, so matching
+// uses the same subset rule as verifySVCB: priority must equal the
+// expected value, targets must designate the same effective TargetName
+// (§2.5.2), every expected SvcParam must be present, and additional
+// SvcParams are tolerated (§8).
+//
+// The subset rule is not a nicety here — for HTTPS it is the only rule
+// an operator behind a CDN can satisfy. Where the RA expects
+// `1 . alpn=h2`, an edge that also speaks HTTP/3 answers
+// `1 . alpn=h3,h2` with `ech` and address hints attached, and on a
+// proxied name the operator cannot publish anything else: the provider
+// synthesizes that record and serves it in place of a manual one. A
+// verbatim comparison marks it not-found, and in a DNSSEC-signed zone
+// the lifecycle layer then reads the disagreement as tampering
+// (HTTPS_DNSSEC_MISMATCH, a hard fail regardless of Required) — so the
+// record's optionality, which exists precisely for operators who cannot
+// publish it, never reaches them: the branch that grants the exemption
+// requires the record to be absent, and theirs is present with content
+// they do not control.
 //
 // Captures the DNSSEC AuthenticatedData bit on the response, mirroring
-// verifyTLSA and verifySVCB. The service-layer post-verify rule
-// (lifecycle.go verifyDNSRecords) treats a DNSSEC-authenticated HTTPS
-// record whose value disagrees with the expected one as a hard fail
-// — same threat shape as TLSA: an attacker rewrote a record in a
-// signed zone.
+// verifyTLSA and verifySVCB. Real tampering still fails: a different
+// priority, a different effective target, or an alpn that does not
+// carry the expected protocol.
 func (v *LookupVerifier) verifyHTTPS(ctx context.Context, server string, rec domain.ExpectedDNSRecord) port.RecordVerification {
 	r := port.RecordVerification{Record: rec}
 	resp, err := v.exchange(ctx, server, rec.Name, dns.TypeHTTPS)
@@ -275,19 +290,30 @@ func (v *LookupVerifier) verifyHTTPS(ctx context.Context, server string, rec dom
 		return r
 	}
 	r.DNSSECVerified = resp.AuthenticatedData
-	wantNorm := normalizeHTTPS(rec.Value)
+
+	expected, err := parseSVCBValue(rec.Value)
+	if err != nil {
+		r.Error = fmt.Sprintf("expected HTTPS value: %v", err)
+		return r
+	}
 	for _, rr := range resp.Answer {
 		https, ok := rr.(*dns.HTTPS)
 		if !ok {
 			continue
 		}
-		got := formatHTTPSValue(&https.SVCB)
+		gotStr := formatHTTPSValue(&https.SVCB)
 		if r.Actual == "" {
-			r.Actual = got
+			r.Actual = gotStr
 		}
-		if normalizeHTTPS(got) == wantNorm {
+		actual, err := parseSVCBValue(gotStr)
+		if err != nil {
+			// Skip records we can't parse — they'll surface as
+			// not-found if no other answer matches.
+			continue
+		}
+		if matchesSVCBSubset(expected, actual, rec.Name) {
 			r.Found = true
-			r.Actual = got
+			r.Actual = gotStr
 			return r
 		}
 	}
@@ -430,11 +456,59 @@ func matchesSVCBSubset(expected, actual parsedSVCB, owner string) bool {
 	}
 	for k, want := range expected.params {
 		got, ok := actual.params[k]
-		if !ok || got != want {
+		if !ok || !svcParamMatches(k, want, got) {
 			return false
 		}
 	}
 	return true
+}
+
+// svcParamMatches reports whether a live SvcParam value satisfies the
+// expected one. Every key compares by equality except `alpn`, which
+// RFC 9460 §7.1.1 defines as a *list* of protocol ids rather than a
+// scalar: the expected ids must all be advertised, and the server may
+// advertise more. An edge that speaks HTTP/3 as well as HTTP/2 serves
+// `alpn=h3,h2`, which satisfies an expected `alpn=h2` — the binding
+// the RA committed to is there, alongside another. An alpn that does
+// not carry the expected protocol still fails, so a record swapped for
+// one advertising a different service is caught.
+func svcParamMatches(key, want, got string) bool {
+	if key != "alpn" {
+		return want == got
+	}
+	advertised := make(map[string]struct{})
+	for _, id := range splitAlpn(got) {
+		advertised[id] = struct{}{}
+	}
+	for _, id := range splitAlpn(want) {
+		if _, ok := advertised[id]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// splitAlpn splits an alpn SvcParam's presentation value on its
+// separators. RFC 9460 §7.1.1 allows a protocol id to contain a comma,
+// escaped as `\,` in presentation form, so splitting on every comma
+// would tear one id in two; the escape is consumed and the id kept
+// whole.
+func splitAlpn(s string) []string {
+	out := []string{}
+	var cur strings.Builder
+	for i := 0; i < len(s); i++ {
+		switch {
+		case s[i] == '\\' && i+1 < len(s):
+			i++
+			cur.WriteByte(s[i])
+		case s[i] == ',':
+			out = append(out, cur.String())
+			cur.Reset()
+		default:
+			cur.WriteByte(s[i])
+		}
+	}
+	return append(out, cur.String())
 }
 
 // effectiveSVCBTarget returns the canonical effective TargetName of
@@ -458,11 +532,4 @@ func effectiveSVCBTarget(target, owner string, serviceMode bool) string {
 // "3 1 1 abcd..." matches "3  1  1 ABCD...".
 func normalizeTLSA(s string) string {
 	return strings.ToLower(strings.Join(strings.Fields(s), " "))
-}
-
-// normalizeHTTPS collapses whitespace for comparison. The SVCB
-// param ordering is canonical via miekg/dns's Marshal, so field
-// order isn't an issue for correctly-formed records.
-func normalizeHTTPS(s string) string {
-	return strings.Join(strings.Fields(s), " ")
 }
