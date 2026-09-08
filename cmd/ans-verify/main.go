@@ -23,6 +23,12 @@
 //     verification keys.
 //  6. Fetches the badge (/v1/agents/{agentId}) and cross-checks
 //     that the badge's merkleProof matches the receipt's proof.
+//  7. For every metadata hash the leaf attests, fetches the
+//     descriptor at the URL the attested SVCB row carries (key65400)
+//     and compares its SHA-256 with the attested value. A mismatch
+//     fails verification: the registration asserts something that
+//     is not true. An unreachable descriptor is reported only.
+//     Disable with -check-metadata=false.
 //
 // If -pubkey <path> is given, the tool loads that PEM public key
 // instead of fetching /root-keys. This is useful for
@@ -61,10 +67,12 @@ func main() {
 	}
 
 	var (
-		baseURL   string
-		agentID   string
-		pubKeyPEM string
-		verbose   bool
+		baseURL         string
+		agentID         string
+		pubKeyPEM       string
+		verbose         bool
+		checkMetadata   bool
+		metadataTimeout time.Duration
 	)
 
 	flag.StringVar(&baseURL, "url", "http://localhost:18081",
@@ -75,6 +83,10 @@ func main() {
 		"Path to a PEM public key file (optional; default fetches /root-keys)")
 	flag.BoolVar(&verbose, "v", false,
 		"Verbose output (show raw event JSON)")
+	flag.BoolVar(&checkMetadata, "check-metadata", true,
+		"Fetch each attested metadata descriptor and verify its hash (step 7)")
+	flag.DurationVar(&metadataTimeout, "metadata-timeout", 15*time.Second,
+		"Per-request timeout for step 7 descriptor fetches")
 	flag.Parse()
 
 	if agentID == "" {
@@ -156,6 +168,13 @@ func main() {
 	// --- Step 6: Cross-check against badge ---------------------------
 	fmt.Println("── Step 6: Cross-check against badge ──")
 	compareBadge(context.Background(), baseURL, agentID, receiptBytes)
+	fmt.Println()
+
+	// --- Step 7: Attested metadata hashes ---------------------------
+	fmt.Println("── Step 7: Attested metadata hashes ──")
+	if runMetadataStep(context.Background(), receiptBytes, checkMetadata, metadataTimeout) {
+		fatalf("metadata hash mismatch: the leaf attests a hash the served descriptor does not have")
+	}
 }
 
 // verifyReceiptStep extracts the receipt-verify nested logic out of
