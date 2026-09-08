@@ -292,6 +292,132 @@ func TestLookupVerifier_HTTPSMatch(t *testing.T) {
 	}
 }
 
+// TestLookupVerifier_HTTPSSubset pins the subset rule on the HTTPS RR:
+// the expected SvcParams must be present, extras are tolerated, alpn is
+// compared as a list (RFC 9460 §7.1.1), and the TargetName forms of
+// §2.5.2 designate the same target. The first case is the shape a CDN
+// edge synthesizes on a proxied name — the operator cannot publish any
+// other value, so a verbatim comparison would strand them.
+func TestLookupVerifier_HTTPSSubset(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		rr    string
+		want  string
+		found bool
+	}{
+		{
+			name:  "cdn_synthesized_record_satisfies_expected_alpn",
+			rr:    `agent.example.com. 300 IN HTTPS 1 . alpn="h3,h2" ipv4hint=192.0.2.1 ech="AEX+DQBB" ipv6hint=2001:db8::1`,
+			want:  `1 . alpn=h2`,
+			found: true,
+		},
+		{
+			// §2.5.2, as fixed for SVCB in #108: at this owner name the
+			// explicit FQDN and "." are the same target.
+			name:  "explicit_targetname_matches_dot",
+			rr:    `agent.example.com. 300 IN HTTPS 1 agent.example.com. alpn="h2"`,
+			want:  `1 . alpn=h2`,
+			found: true,
+		},
+		{
+			name:  "alpn_without_the_expected_protocol_does_not_match",
+			rr:    `agent.example.com. 300 IN HTTPS 1 . alpn="h3"`,
+			want:  `1 . alpn=h2`,
+			found: false,
+		},
+		{
+			name:  "different_priority_does_not_match",
+			rr:    `agent.example.com. 300 IN HTTPS 2 . alpn="h2"`,
+			want:  `1 . alpn=h2`,
+			found: false,
+		},
+		{
+			name:  "missing_expected_param_does_not_match",
+			rr:    `agent.example.com. 300 IN HTTPS 1 . alpn="h2"`,
+			want:  `1 . alpn=h2 port=8443`,
+			found: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			s := newTestServer(t)
+			s.add("agent.example.com.", "HTTPS", tc.rr)
+
+			recs := []domain.ExpectedDNSRecord{{
+				Name: "agent.example.com", Type: domain.DNSRecordHTTPS,
+				Value: tc.want, Required: false,
+			}}
+			got := s.verifyAgainst(t, recs)
+			if got[0].found != tc.found {
+				t.Errorf("found = %v, want %v (actual=%q)", got[0].found, tc.found, got[0].actual)
+			}
+			// Whether or not it matched, the served value is reported so
+			// the operator sees what the zone actually answered.
+			if got[0].actual == "" {
+				t.Error("Actual must carry the served record")
+			}
+		})
+	}
+}
+
+// TestLookupVerifier_HTTPSBadExpectedValue pins the branch that parsing
+// the expected value introduces: a stored value the RA could not have
+// written surfaces as an error, not as a silent not-found.
+func TestLookupVerifier_HTTPSBadExpectedValue(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t)
+	s.add("agent.example.com.", "HTTPS", `agent.example.com. 300 IN HTTPS 1 . alpn="h2"`)
+
+	recs := []domain.ExpectedDNSRecord{{
+		Name: "agent.example.com", Type: domain.DNSRecordHTTPS,
+		Value: "1", Required: false,
+	}}
+	got := s.verifyAgainst(t, recs)
+	if got[0].found {
+		t.Error("an unparseable expected value must not match")
+	}
+	if !strings.Contains(got[0].errString, "expected HTTPS value") {
+		t.Errorf("Error should name the expected value; got %q", got[0].errString)
+	}
+}
+
+// TestSVCParamMatches covers the per-key comparison rule directly,
+// including the escaped-comma alpn form that no live record in the
+// suite produces.
+func TestSVCParamMatches(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name       string
+		key        string
+		want, got  string
+		shouldPass bool
+	}{
+		{"scalar_param_equal", "port", "443", "443", true},
+		{"scalar_param_differs", "port", "443", "8443", false},
+		{"alpn_single_in_list", "alpn", "h2", "h3,h2", true},
+		{"alpn_list_in_longer_list", "alpn", "h2,h3", "h3,h2,http/1.1", true},
+		{"alpn_absent_from_list", "alpn", "h2", "h3,http/1.1", false},
+		{"alpn_exact", "alpn", "h2", "h2", true},
+		// A protocol id may itself contain a comma, escaped in
+		// presentation form (§7.1.1); the escape must not split the id.
+		{"alpn_escaped_comma_is_one_id", "alpn", `f\,oo`, `h2,f\,oo`, true},
+		{"alpn_escaped_comma_not_two_ids", "alpn", "oo", `h2,f\,oo`, false},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := svcParamMatches(tc.key, tc.want, tc.got); got != tc.shouldPass {
+				t.Errorf("svcParamMatches(%q, %q, %q) = %v, want %v",
+					tc.key, tc.want, tc.got, got, tc.shouldPass)
+			}
+		})
+	}
+}
+
 // TestLookupVerifier_SVCB exercises the Consolidated Approach SVCB
 // verifier across match, missing, and shape-mismatch paths. The match
 // case tests the same presentation form the RA's profile emitters
