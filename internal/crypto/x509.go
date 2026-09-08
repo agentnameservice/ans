@@ -25,6 +25,9 @@ import (
 // Baseline Requirements for publicly trusted certificates.
 const (
 	MinRSAKeyBits = 2048
+
+	// pemTypeCertificate is the PEM block type header for X.509 certificates.
+	pemTypeCertificate = "CERTIFICATE"
 )
 
 // AllowedSignatureAlgorithms is the allowlist of signature algorithms
@@ -61,7 +64,7 @@ var (
 // ParseCertificatePEM parses a single PEM-encoded X.509 certificate.
 func ParseCertificatePEM(pemData string) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(pemData))
-	if block == nil || block.Type != "CERTIFICATE" {
+	if block == nil || block.Type != pemTypeCertificate {
 		return nil, fmt.Errorf("%w: expected CERTIFICATE block", ErrPEMParse)
 	}
 	cert, err := x509.ParseCertificate(block.Bytes)
@@ -82,7 +85,7 @@ func ParseCertificateChainPEM(pemData string) ([]*x509.Certificate, error) {
 		if block == nil {
 			break
 		}
-		if block.Type != "CERTIFICATE" {
+		if block.Type != pemTypeCertificate {
 			continue
 		}
 		cert, err := x509.ParseCertificate(block.Bytes)
@@ -145,6 +148,37 @@ func CheckKeyStrength(pub any) error {
 func CertificateFingerprint(cert *x509.Certificate) string {
 	sum := sha256.Sum256(cert.Raw)
 	return hex.EncodeToString(sum[:])
+}
+
+// SPKIFingerprint returns the lowercase hex SHA-256 fingerprint of the
+// certificate's SubjectPublicKeyInfo (SPKI) DER encoding — the value
+// used in a TLSA `3 1 1` (DANE-EE + SPKI + SHA-256) record.
+//
+// Unlike CertificateFingerprint (which hashes the full DER cert), this
+// hash covers only the public-key structure. A cert renewal that reuses
+// the same key pair produces an identical SPKIFingerprint, so a `3 1 1`
+// TLSA record survives rollover without a DNS change — which is the
+// property auto-renewing CAs (Let's Encrypt, short-lived issuers) rely
+// on when the operator holds the key steady.
+func SPKIFingerprint(cert *x509.Certificate) string {
+	sum := sha256.Sum256(cert.RawSubjectPublicKeyInfo)
+	return hex.EncodeToString(sum[:])
+}
+
+// SPKIFingerprintFromPEM parses the first CERTIFICATE block in pemStr
+// and returns its SPKI SHA-256 fingerprint (lowercase hex). Returns an
+// error if the PEM is unparseable or contains no certificate block.
+// Use SPKIFingerprint when you already hold a parsed *x509.Certificate.
+func SPKIFingerprintFromPEM(pemStr string) (string, error) {
+	block, _ := pem.Decode([]byte(pemStr))
+	if block == nil || block.Type != pemTypeCertificate {
+		return "", fmt.Errorf("%w: no CERTIFICATE block found", ErrPEMParse)
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return "", fmt.Errorf("%w: %w", ErrCertParse, err)
+	}
+	return SPKIFingerprint(cert), nil
 }
 
 // VerifyChain verifies leaf against the given intermediates with an
