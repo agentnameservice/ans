@@ -401,8 +401,10 @@ func TestSVCParamMatches(t *testing.T) {
 		{"alpn_list_in_longer_list", "alpn", "h2,h3", "h3,h2,http/1.1", true},
 		{"alpn_absent_from_list", "alpn", "h2", "h3,http/1.1", false},
 		{"alpn_exact", "alpn", "h2", "h2", true},
-		// A protocol id may itself contain a comma, escaped in
-		// presentation form (§7.1.1); the escape must not split the id.
+		// A protocol id may itself contain a comma. These two carry the
+		// single-escaped form a person might write by hand; the form that
+		// actually arrives from the wire is exercised in
+		// TestSplitAlpnAgainstEmittedForm below.
 		{"alpn_escaped_comma_is_one_id", "alpn", `f\,oo`, `h2,f\,oo`, true},
 		{"alpn_escaped_comma_not_two_ids", "alpn", "oo", `h2,f\,oo`, false},
 	}
@@ -415,6 +417,49 @@ func TestSVCParamMatches(t *testing.T) {
 					tc.key, tc.want, tc.got, got, tc.shouldPass)
 			}
 		})
+	}
+}
+
+// TestSplitAlpnAgainstEmittedForm pins the split against the presentation
+// form the verifier is actually handed, rather than the one a person would
+// write. RFC 9460 §A.1 escapes an alpn value once for the list and again
+// for the zone file, and miekg/dns emits that double form, so the id
+// `f,oo` arrives as `f\\\044oo` and carries no comma byte at all.
+//
+// The record is rendered through formatHTTPSValue rather than hard-coded,
+// so the test fails if that emission ever changes under us.
+func TestSplitAlpnAgainstEmittedForm(t *testing.T) {
+	t.Parallel()
+	rr := &miekg.SVCB{Priority: 1, Target: "."}
+	rr.Value = []miekg.SVCBKeyValue{&miekg.SVCBAlpn{Alpn: []string{"f,oo", "h2"}}}
+
+	served := formatHTTPSValue(rr)
+	if !strings.Contains(served, `alpn=f\\\044oo,h2`) {
+		t.Fatalf("miekg no longer emits the double-escaped form; got %q", served)
+	}
+
+	parsed, err := parseSVCBValue(served)
+	if err != nil {
+		t.Fatalf("parseSVCBValue: %v", err)
+	}
+	ids := splitAlpn(parsed.params["alpn"])
+	if len(ids) != 2 {
+		t.Fatalf("comma-bearing id must stay one segment; got %q", ids)
+	}
+	if ids[0] != `f\\\044oo` {
+		t.Errorf("segment must be returned verbatim; got %q", ids[0])
+	}
+
+	// The served value satisfies an expected one written the same way, and
+	// the escaped id is not readable as the separate ids it looks like.
+	if !svcParamMatches("alpn", `f\\\044oo`, parsed.params["alpn"]) {
+		t.Error("an identically written expected id must match")
+	}
+	if svcParamMatches("alpn", "oo", parsed.params["alpn"]) {
+		t.Error(`"oo" is part of one escaped id, not an id of its own`)
+	}
+	if !svcParamMatches("alpn", "h2", parsed.params["alpn"]) {
+		t.Error("h2 sits after the separator and must still match")
 	}
 }
 
