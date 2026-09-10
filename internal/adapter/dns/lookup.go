@@ -489,26 +489,38 @@ func svcParamMatches(key, want, got string) bool {
 }
 
 // splitAlpn splits an alpn SvcParam's presentation value on its
-// separators. RFC 9460 §7.1.1 allows a protocol id to contain a comma,
-// escaped as `\,` in presentation form, so splitting on every comma
-// would tear one id in two; the escape is consumed and the id kept
-// whole.
+// separators, returning each id exactly as it was written.
+//
+// A comma inside a protocol id does not reach here as a comma. RFC 9460
+// §A.1 has the value escaped once for the alpn list and again for the
+// zone file, and miekg/dns emits that double form from SVCBAlpn.String()
+// — the id `f,oo` renders as `f\\\044oo`, with no comma byte in it. So
+// every comma in this string is a separator, and the escape handling
+// below only matters for an expected value someone wrote by hand in the
+// single-escaped `\,` form.
+//
+// Segments are returned verbatim rather than unescaped: both sides of the
+// comparison arrive as presentation text, and unescaping one convention
+// but not the other would make a served value differ from an identically
+// written expected one.
 func splitAlpn(s string) []string {
 	out := []string{}
-	var cur strings.Builder
-	for i := 0; i < len(s); i++ {
+	start, i := 0, 0
+	for i < len(s) {
 		switch {
 		case s[i] == '\\' && i+1 < len(s):
-			i++
-			cur.WriteByte(s[i])
+			// Skip the escape and the byte it escapes, so a comma that is
+			// part of an escape sequence is not read as a separator.
+			i += 2
 		case s[i] == ',':
-			out = append(out, cur.String())
-			cur.Reset()
+			out = append(out, s[start:i])
+			i++
+			start = i
 		default:
-			cur.WriteByte(s[i])
+			i++
 		}
 	}
-	return append(out, cur.String())
+	return append(out, s[start:])
 }
 
 // effectiveSVCBTarget returns the canonical effective TargetName of
