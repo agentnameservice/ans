@@ -43,6 +43,8 @@ type IdentityProofInput struct {
 func (in IdentityProofInput) Canonical() ([]byte, error) {
 	raw, err := json.Marshal(in)
 	if err != nil {
+		// NOTE: IdentityProofInput contains only strings, which json.Marshal
+		// always encodes, replacing any invalid UTF-8 with valid Unicode.
 		return nil, fmt.Errorf("proofinput: marshal: %w", err)
 	}
 	return Canonicalize(raw)
@@ -54,6 +56,8 @@ func (in IdentityProofInput) Canonical() ([]byte, error) {
 func (in IdentityProofInput) SigningInput() (string, error) {
 	canonical, err := in.Canonical()
 	if err != nil {
+		// NOTE: Canonical receives only the fixed struct's valid JSON string
+		// fields; there are no duplicate keys, numbers, or custom marshalers.
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(canonical), nil
