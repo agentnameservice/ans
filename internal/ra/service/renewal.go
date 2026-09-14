@@ -12,6 +12,8 @@ import (
 
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
 )
 
 // renewalChallengeWindow is how long the operator has to publish a
@@ -97,6 +99,7 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 
 	var renewal *domain.ServerCertificateRenewal
 	var csrID string
+	var newCSR *domain.AgentCSR
 
 	switch {
 	case csrSet:
@@ -130,43 +133,22 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 			return nil, domain.NewInternalError("CERT_ORDER_FAILED", "prepare renewal domain proof", err)
 		}
 		csrID = uuid.NewString()
-		newCSR, err := reg.SubmitServerCSR(csrID, in.ServerCsrPEM, now)
+		newCSR, err = reg.SubmitServerCSR(csrID, in.ServerCsrPEM, now)
 		if err != nil {
-			return nil, err
-		}
-		if err := s.agents.Save(ctx, reg); err != nil {
-			return nil, err
-		}
-		if err := s.certs.SaveCSR(ctx, agentID, newCSR); err != nil {
 			return nil, err
 		}
 		renewal = domain.NewCSRRenewal(agentID, reg.ID, csrID, prepared, now)
 
 	case byocSet:
-		v, err := s.validator.ValidateServerCertificate(ctx,
+		_, err := s.validator.ValidateServerCertificate(ctx,
 			in.ServerCertificatePEM, in.ServerCertificateChainPEM, reg.AnsName.FQDN())
 		if err != nil {
 			return nil, domain.NewCertificateError(
 				"INVALID_BYOC_CERT",
 				"BYOC certificate validation failed: "+err.Error())
 		}
-		// Persist the validated cert separately so the BYOC store
-		// has it before the renewal completes. The renewal itself
-		// carries the raw PEM so "verify-acme" has everything it
-		// needs to flip the cert over without a second read.
-		byocCert := &domain.ByocServerCertificate{
-			LeafCertificatePEM:      v.LeafPEM,
-			ChainCertificatesPEM:    v.ChainPEM,
-			SubjectCommonName:       v.CN,
-			SubjectAlternativeNames: v.SANs,
-			IssuerDN:                v.IssuerDN,
-			ValidFromTimestamp:      v.ValidFrom,
-			ValidToTimestamp:        v.ValidTo,
-			Fingerprint:             v.Fingerprint,
-		}
-		if err := s.byoc.Save(ctx, agentID, byocCert); err != nil {
-			return nil, err
-		}
+		// Retain the replacement only on the pending renewal. Saving it
+		// in byoc now would expose it before proof, even after cancellation.
 		// BYOC renewals issue no certificate, so no provider order
 		// exists — but domain control must still be proven before the
 		// operator's cert goes live. The RA self-issues the
@@ -180,7 +162,30 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 			domain.NewSelfIssuedOrder(dns01, http01, now.Add(renewalChallengeWindow)), now)
 	}
 
-	if err := s.renewals.Save(ctx, renewal); err != nil {
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.agents.FindByAgentID(txCtx, agentID)
+		if err != nil {
+			return err
+		}
+		if current.Status != domain.StatusActive {
+			return domain.NewInvalidStateError("AGENT_NOT_ACTIVE", "agent must remain ACTIVE to initiate renewal")
+		}
+		if pending, err := s.renewals.FindPendingByAgentID(txCtx, agentID); err == nil && pending != nil {
+			return domain.NewConflictError("PENDING_RENEWAL_EXISTS", "a renewal was submitted concurrently")
+		} else if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return err
+		}
+		if newCSR != nil {
+			current.ServerCSR = newCSR
+			if err := s.agents.Save(txCtx, current); err != nil {
+				return err
+			}
+			if err := s.certs.SaveCSR(txCtx, agentID, newCSR); err != nil {
+				return err
+			}
+		}
+		return s.renewals.Save(txCtx, renewal)
+	}); err != nil {
 		return nil, err
 	}
 
@@ -240,25 +245,43 @@ func (s *RegistrationService) CancelServerCertRenewal(ctx context.Context, agent
 	if err != nil {
 		return err
 	}
-	if !r.CompletedAt.IsZero() {
-		return domain.NewValidationError(
-			"RENEWAL_ALREADY_COMPLETED",
-			"cannot cancel a completed renewal")
-	}
-	// If the renewal originated from a CSR, flip the CSR to REJECTED
-	// as the reference's deleteIncompleteRenewal path does (atomic
-	// in the reference; we do it in sequence since SQLite's
-	// concurrency model is serializable at this level).
-	if r.RenewalType == domain.RenewalTypeCSR && r.ServerCsrID != "" {
-		csr, cerr := s.certs.FindCSRByID(ctx, agentID, r.ServerCsrID)
-		if cerr == nil && csr != nil && csr.Status == domain.CSRStatusPending {
-			rejected, rerr := csr.MarkRejected("Renewal cancelled", s.clock())
-			if rerr == nil {
-				_ = s.certs.SaveCSR(ctx, agentID, &rejected)
-			}
+	// Bind cancellation to the renewal observed on entry, then recheck its
+	// state under the same transaction that rejects the CSR and removes it.
+	// Completion or replacement between those reads must not be erased.
+	return s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.renewals.FindByAgentID(txCtx, agentID)
+		if err != nil {
+			return err
 		}
+		if current.ID != r.ID {
+			return domain.NewValidationError("RENEWAL_NOT_PENDING", "renewal was replaced during cancellation")
+		}
+		if !current.CompletedAt.IsZero() {
+			return domain.NewValidationError("RENEWAL_ALREADY_COMPLETED", "cannot cancel a completed renewal")
+		}
+		if err := s.rejectRenewalCSR(txCtx, agentID, current); err != nil {
+			return err
+		}
+		return s.renewals.Delete(txCtx, current.ID)
+	})
+}
+
+func (s *RegistrationService) rejectRenewalCSR(ctx context.Context, agentID string, r *domain.ServerCertificateRenewal) error {
+	if r.RenewalType != domain.RenewalTypeCSR || r.ServerCsrID == "" {
+		return nil
 	}
-	return s.renewals.Delete(ctx, r.ID)
+	csr, err := s.certs.FindCSRByID(ctx, agentID, r.ServerCsrID)
+	if err != nil {
+		return err
+	}
+	if csr.Status != domain.CSRStatusPending {
+		return nil
+	}
+	rejected, err := csr.MarkRejected("Renewal cancelled", s.clock())
+	if err != nil {
+		return err
+	}
+	return s.certs.SaveCSR(ctx, agentID, &rejected)
 }
 
 // VerifyRenewalACMEResult is returned to the handler so it can shape
@@ -291,6 +314,15 @@ type VerifyRenewalACMEResult struct {
 // re-driven calls skip the gate only after the RA's successful domain
 // proof has been persisted.
 func (s *RegistrationService) VerifyRenewalACME(ctx context.Context, agentID string) (*VerifyRenewalACMEResult, error) {
+	return s.verifyRenewalACME(ctx, agentID, event.SchemaVersion)
+}
+
+// VerifyRenewalACMEV1 completes a renewal and publishes on the V1 event lane.
+func (s *RegistrationService) VerifyRenewalACMEV1(ctx context.Context, agentID string) (*VerifyRenewalACMEResult, error) {
+	return s.verifyRenewalACME(ctx, agentID, eventv1.SchemaVersion)
+}
+
+func (s *RegistrationService) verifyRenewalACME(ctx context.Context, agentID, schemaVersion string) (*VerifyRenewalACMEResult, error) {
 	now := s.clock()
 
 	r, err := s.renewals.FindPendingByAgentID(ctx, agentID)
@@ -312,7 +344,7 @@ func (s *RegistrationService) VerifyRenewalACME(ctx context.Context, agentID str
 			return nil, domain.NewValidationError("RENEWAL_NOT_PENDING",
 				"renewal validation has already been verified")
 		}
-		return s.finalizeCSRRenewal(ctx, agentID, r, nil, now)
+		return s.finalizeCSRRenewal(ctx, agentID, r, nil, schemaVersion, now)
 	}
 
 	reg, err := s.agents.FindByAgentID(ctx, agentID)
@@ -342,28 +374,10 @@ func (s *RegistrationService) VerifyRenewalACME(ctx context.Context, agentID str
 	// cert becomes the agent's live ServerCert, and the renewal is
 	// marked completed.
 	if r.RenewalType == domain.RenewalTypeBYOC {
-		if err := r.MarkCompleted(now); err != nil {
-			return nil, err
-		}
-		if err := s.renewals.Save(ctx, r); err != nil {
-			return nil, err
-		}
-		res := &VerifyRenewalACMEResult{Renewal: r, Sync: true}
-		// The new cert was persisted at submission; surface its TLSA
-		// record so the operator can update DNS immediately. A transient
-		// store error must propagate rather than silently drop it.
-		cert, cerr := s.loadServerCert(ctx, agentID)
-		if cerr != nil {
-			return nil, cerr
-		}
-		if cert != nil {
-			rec := domain.TLSARecordForCert(reg.AnsName.FQDN(), cert.Fingerprint)
-			res.TLSARecord = &rec
-		}
-		return res, nil
+		return s.finalizeBYOCRenewal(ctx, reg, r, schemaVersion, now)
 	}
 
-	return s.finalizeCSRRenewal(ctx, agentID, r, verified, now)
+	return s.finalizeCSRRenewal(ctx, agentID, r, verified, schemaVersion, now)
 }
 
 // finalizeCSRRenewal completes the CSR-path renewal flow: fetch the
@@ -380,7 +394,7 @@ func (s *RegistrationService) VerifyRenewalACME(ctx context.Context, agentID str
 // reason.
 func (s *RegistrationService) finalizeCSRRenewal(
 	ctx context.Context, agentID string,
-	r *domain.ServerCertificateRenewal, verified []domain.ChallengeType, now time.Time,
+	r *domain.ServerCertificateRenewal, verified []domain.ChallengeType, schemaVersion string, now time.Time,
 ) (*VerifyRenewalACMEResult, error) {
 	if s.serverCA == nil {
 		return nil, domain.NewInternalError("SERVER_CA_DISABLED",
@@ -443,33 +457,86 @@ func (s *RegistrationService) finalizeCSRRenewal(
 	if err != nil {
 		return nil, err
 	}
-	if err := r.MarkCompleted(now); err != nil {
-		return nil, err
-	}
-	// Commit the new cert, the SIGNED CSR row, and the completed
-	// renewal atomically: a crash between them would otherwise leave
-	// the agent's live cert and its renewal record disagreeing about
-	// whether the rollover happened.
-	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
-		if err := s.byoc.Save(txCtx, agentID, newCert); err != nil {
-			return err
-		}
-		if err := s.certs.SaveCSR(txCtx, agentID, &signedCSR); err != nil {
-			return err
-		}
-		return s.renewals.Save(txCtx, r)
-	}); err != nil {
+	if err := s.commitCertificateRenewal(ctx, reg, r, newCert, &signedCSR, schemaVersion, now); err != nil {
 		return nil, err
 	}
 	tlsa := domain.TLSARecordForCert(reg.AnsName.FQDN(), v.Fingerprint)
 	return &VerifyRenewalACMEResult{Renewal: r, Sync: true, TLSARecord: &tlsa}, nil
 }
 
+func (s *RegistrationService) finalizeBYOCRenewal(
+	ctx context.Context, reg *domain.AgentRegistration, r *domain.ServerCertificateRenewal,
+	schemaVersion string, now time.Time,
+) (*VerifyRenewalACMEResult, error) {
+	v, err := s.validator.ValidateServerCertificate(ctx, r.ByocCertPEM, r.ByocChainPEM, reg.FQDN())
+	if err != nil {
+		return nil, domain.NewCertificateError("INVALID_BYOC_CERT", "renewal certificate validation failed: "+err.Error())
+	}
+	newCert := &domain.ByocServerCertificate{
+		LeafCertificatePEM: v.LeafPEM, ChainCertificatesPEM: v.ChainPEM,
+		SubjectCommonName: v.CN, SubjectAlternativeNames: v.SANs,
+		IssuerDN: v.IssuerDN, ValidFromTimestamp: v.ValidFrom,
+		ValidToTimestamp: v.ValidTo, Fingerprint: v.Fingerprint,
+	}
+	if err := s.commitCertificateRenewal(ctx, reg, r, newCert, nil, schemaVersion, now); err != nil {
+		return nil, err
+	}
+	tlsa := domain.TLSARecordForCert(reg.FQDN(), v.Fingerprint)
+	return &VerifyRenewalACMEResult{Renewal: r, Sync: true, TLSARecord: &tlsa}, nil
+}
+
+// commitCertificateRenewal stores the complete valid-certificate event in the
+// same transaction as the certificate and completed renewal.
+func (s *RegistrationService) commitCertificateRenewal(
+	ctx context.Context, reg *domain.AgentRegistration, r *domain.ServerCertificateRenewal,
+	cert *domain.ByocServerCertificate, signedCSR *domain.AgentCSR,
+	schemaVersion string, now time.Time,
+) error {
+	evidence, err := s.observeRenewalDNS(ctx, reg)
+	if err != nil {
+		return err
+	}
+	if err := r.MarkCompleted(now); err != nil {
+		return err
+	}
+	return s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.agents.FindByAgentID(txCtx, reg.AgentID)
+		if err != nil {
+			return err
+		}
+		if current.Status != domain.StatusActive {
+			return domain.NewInvalidStateError("AGENT_NOT_ACTIVE", "agent ceased to be ACTIVE during renewal")
+		}
+		pending, err := s.renewals.FindPendingByAgentID(txCtx, reg.AgentID)
+		if err != nil {
+			return err
+		}
+		if pending.ID != r.ID {
+			return domain.NewValidationError("RENEWAL_NOT_PENDING", "renewal was replaced during issuance")
+		}
+		if err := s.byoc.Save(txCtx, reg.AgentID, cert); err != nil {
+			return err
+		}
+		if signedCSR != nil {
+			current.ServerCSR = signedCSR
+			if err := s.certs.SaveCSR(txCtx, reg.AgentID, signedCSR); err != nil {
+				return err
+			}
+			if err := s.agents.Save(txCtx, current); err != nil {
+				return err
+			}
+		}
+		if err := s.renewals.Save(txCtx, r); err != nil {
+			return err
+		}
+		return s.enqueueCertificateRenewal(txCtx, reg, evidence, schemaVersion)
+	})
+}
+
 // generateChallengeTokens returns a pair of base64url-encoded random
-// tokens for the RA's self-issued challenges — used only on BYOC
-// paths, where no certificate provider participates and the RA itself
-// plays the validator. CSR-path challenges come from the issuer
-// port's CreateOrder instead. Each token is 32 bytes of crypto/rand
+// tokens for the RA's self-issued challenges. BYOC and cached provider
+// authorizations need fresh local owner proof; pending provider orders relay
+// their own account-bound challenges. Each token is 32 bytes of crypto/rand
 // (~43 base64url chars) — opaque to the verifier, it only needs to be
 // unpredictable per-flow. No JWK thumbprint binding: self-issued
 // challenges have no account key to bind to (Challenge.
