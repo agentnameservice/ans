@@ -11,9 +11,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/rs/zerolog"
 	"golang.org/x/crypto/acme"
 
@@ -83,6 +85,12 @@ type ACMEIssuer struct {
 	// chain for GetCACertificate. Informational for ACME providers —
 	// relying parties already hold the public root in system stores.
 	chainRootPEM string
+	directoryURL string
+	email        string
+	dataDir      string
+	options      []ACMEIssuerOption
+	ownersMu     sync.Mutex
+	owners       *lru.Cache[string, *ACMEIssuer]
 }
 
 // ACMEIssuerOption configures the issuer at construction time.
@@ -131,6 +139,10 @@ func NewACMEIssuer(directoryURL, email, dataDir string, opts ...ACMEIssuerOption
 		client:         &acme.Client{Key: key, DirectoryURL: directoryURL},
 		finalizeBudget: defaultFinalizeBudget,
 		logger:         zerolog.Nop(),
+		directoryURL:   directoryURL,
+		email:          email,
+		dataDir:        dataDir,
+		options:        append([]ACMEIssuerOption(nil), opts...),
 	}
 	if email != "" {
 		a.contact = []string{"mailto:" + email}
@@ -146,12 +158,10 @@ func NewACMEIssuer(directoryURL, email, dataDir string, opts ...ACMEIssuerOption
 //
 // A new order is not always 'pending': per RFC 8555 §7.1.3 a CA that
 // still holds a valid authorization for this account+identifier
-// returns the order already 'ready' (Let's Encrypt reuses
-// authorizations for ~30 days). The RA uses a single ACME account, so
-// a renewal or re-registration of a recently-validated FQDN hits this
-// routinely. In that case there is nothing for the owner to publish:
-// the order is relayed as ISSUING with no challenges, the RA's gate
-// skips ISSUING orders, and the next verify-acme finalizes directly.
+// returns the order already 'ready'. This adapter reports provider state;
+// the RA adds fresh local proof when there is no provider challenge.
+// RA callers use CreateOrderForOwner to isolate even pending authorization
+// reuse between customers.
 func (a *ACMEIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
 	if fqdn == "" {
 		return nil, errors.New("cert: create order: fqdn is required")
@@ -264,6 +274,13 @@ func (a *ACMEIssuer) collectChallenges(ctx context.Context, order *acme.Order) (
 // the RA verified, wait (bounded) for the provider's validation, then
 // finalize with the CSR and download the chain.
 func (a *ACMEIssuer) FinalizeOrder(ctx context.Context, req port.FinalizeOrderRequest) (*port.IssuedCert, error) {
+	if req.OwnerID != "" && !strings.HasPrefix(req.OrderRef,
+		scopedOrderPrefix+ownerAccountID(req.OwnerID)+":") {
+		return nil, fmt.Errorf("%w: ACME order is not bound to the authenticated owner; create a new order", port.ErrOrderFailed)
+	}
+	if strings.HasPrefix(req.OrderRef, scopedOrderPrefix) {
+		return a.finalizeOwnerOrder(ctx, req)
+	}
 	csr, err := anscrypto.ValidateServerCSR(req.CSRPEM, req.FQDN)
 	if err != nil {
 		return nil, err

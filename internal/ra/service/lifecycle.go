@@ -373,8 +373,8 @@ type VerifyACMEResult struct {
 // Idempotent: if the registration is already past PENDING_VALIDATION,
 // return the current state without erroring — matches the reference's
 // "if already progressed, succeed silently" semantics. Re-driven
-// calls on an ISSUING order skip the gate (the provider already
-// accepted the challenge answer) and only re-attempt the finalize.
+// calls on an ISSUING order skip the gate only when an earlier RA
+// verification was persisted, and only re-attempt the finalize.
 func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in VerifyInput) (*VerifyACMEResult, error) {
 	now := s.clock()
 	reg, err := s.agents.FindByAgentID(ctx, agentID)
@@ -543,10 +543,9 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 //     verified as published (DNS-01 TXT or HTTP-01 resource);
 //     otherwise 422 ACME_CHALLENGE_MISSING. Expired challenge
 //     windows are 422 ACME_CHALLENGE_EXPIRED.
-//   - ISSUING order → gate skipped: the provider already accepted a
-//     challenge answer on an earlier call, and the operator may have
-//     legitimately removed the artifact since. The re-driven call
-//     only re-attempts the finalize.
+//   - ISSUING order → gate skipped only when the RA has persisted a
+//     verified challenge from an earlier call. Provider authorization
+//     alone never substitutes for the current owner's proof.
 //   - FAILED order → 422 CERT_ORDER_FAILED; the operator cancels and
 //     re-registers.
 //
@@ -557,18 +556,16 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 // attestation's `domainValidation` method token is derived from it in
 // a later call (verify-dns), so it must survive on the aggregate.
 //
-// NOTE: zero-value orders (registrations predating order persistence)
-// skip the gate — no challenge was ever issued to the operator, so
-// there is nothing that could be verified. Every registration created
-// since order persistence carries one.
+// Legacy zero-value orders fail closed because no proof can be checked.
 func (s *RegistrationService) gateOrderChallenges(
 	ctx context.Context, reg *domain.AgentRegistration, now time.Time,
 ) ([]domain.ChallengeType, error) {
 	order := reg.CertOrder
 	switch {
 	case order.IsZero():
-		return nil, nil
-	case order.State == domain.OrderStateIssuing:
+		return nil, domain.NewValidationError("ACME_CHALLENGE_MISSING",
+			"registration has no persisted domain-control proof; register a new version")
+	case order.State == domain.OrderStateIssuing && order.VerifiedChallenge.IsValid():
 		return nil, nil
 	case order.State == domain.OrderStateFailed:
 		// 422 (validation), not 409: the spec documents only 422 on
@@ -577,11 +574,9 @@ func (s *RegistrationService) gateOrderChallenges(
 		// ANS name is immutable once used.
 		return nil, domain.NewValidationError("CERT_ORDER_FAILED",
 			"certificate order failed terminally; cancel this registration (POST /revoke) and register a new version")
-	case order.State != domain.OrderStatePending:
-		// COMPLETED while still PENDING_VALIDATION is unreachable —
-		// the order completes in the same transaction that advances
-		// the lifecycle. Tolerate rather than brick the row.
-		return nil, nil
+	case order.State != domain.OrderStatePending && order.State != domain.OrderStateIssuing:
+		return nil, domain.NewValidationError("ACME_CHALLENGE_MISSING",
+			"registration has no pending order with verifiable domain-control proof")
 	}
 	if order.IsExpired(now) {
 		// A lapsed-window order stays PENDING (expiry doesn't change
@@ -710,6 +705,7 @@ func (s *RegistrationService) finalizeServerOrder(
 			"server CSR pending but no certificate issuer configured — inconsistent state", nil)
 	}
 	issued, err := s.serverCA.FinalizeOrder(ctx, port.FinalizeOrderRequest{
+		OwnerID:  reg.OwnerID,
 		OrderRef: reg.CertOrder.OrderRef,
 		CSRPEM:   serverCSR.CSRContent,
 		FQDN:     reg.FQDN(),
