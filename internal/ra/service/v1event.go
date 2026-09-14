@@ -152,13 +152,16 @@ func v1RevokedCertList(certs []*domain.StoredCertificate) ([]eventv1.Certificate
 //     registrations that predate recording. (The reference emits a
 //     constant "ACME-DNS-01" here; its schema enumerates all three
 //     method tokens, so the faithful value is shape-compatible.)
-//   - `identityCert` singleton — the primary active identity cert.
+//   - `identityCert` singleton — the primary identity certificate evidence.
 //   - `validIdentityCerts[]` rotation array — every currently valid
 //     identity cert (includes the primary). Present even with one
 //     cert to match reference behavior.
 //   - `serverCert` singleton + `validServerCerts[]` rotation array
-//     when the operator supplied a BYOC cert at registration.
+//     for all currently valid server certificates, including renewals.
 //   - `metadataHashes` per-protocol, uppercased keys (A2A, MCP, ...).
+//
+// If a family has fully lapsed, retain its last-expiring non-revoked
+// certificate in the singleton and rotation array as expiry evidence.
 //
 // Populated from the same sources the V2 `buildAgentActiveEvent`
 // reads so V1 and V2 emits describe the same underlying agent
@@ -183,21 +186,17 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 		dnsMap[r.Name] = r.Value
 	}
 
-	// Identity certs: the full set of currently-valid certs. The
-	// singleton `identityCert` is the first one (there's typically
-	// one at registration time; rotation adds more). The
-	// `validIdentityCerts` array carries every valid cert including
-	// the primary — matches the reference presence rule.
+	// Keep valid overlap, or the last-expiring certificate as lapse evidence.
+	// The singleton is the primary fingerprint; the legacy rotation array
+	// carries its original notAfter so an expired family remains expired.
 	identityCerts, err := s.certs.FindIdentityCertificatesByAgent(ctx, reg.AgentID)
 	if err != nil {
 		return nil, err
 	}
+	identityCerts = attestedIdentityCerts(identityCerts, now)
 	var primaryIdentity *eventv1.CertificateInfo
 	validIdentity := make([]eventv1.CertificateInfoExtended, 0, len(identityCerts))
 	for _, c := range identityCerts {
-		if !c.IsValid(now) {
-			continue
-		}
 		fp, ferr := fingerprintOf(c.CertificatePEM)
 		if ferr != nil {
 			return nil, ferr
@@ -222,26 +221,28 @@ func (s *RegistrationService) buildAgentRegisteredV1Event(
 	// fault.
 	var primaryServer *eventv1.CertificateInfo
 	var validServer []eventv1.CertificateInfoExtended
-	byocCert, berr := s.loadServerCert(ctx, reg.AgentID)
+	serverCerts, berr := s.attestedServerCerts(ctx, reg.AgentID, now)
 	if berr != nil {
 		return nil, berr
 	}
-	if byocCert != nil {
-		fp := "SHA256:" + byocCert.Fingerprint
-		primaryServer = &eventv1.CertificateInfo{
-			Fingerprint: fp,
-			CertType:    "X509-DV-SERVER",
+	for _, serverCert := range serverCerts {
+		fp := "SHA256:" + serverCert.Fingerprint
+		if primaryServer == nil {
+			primaryServer = &eventv1.CertificateInfo{
+				Fingerprint: fp,
+				CertType:    "X509-DV-SERVER",
+			}
 		}
-		validServer = []eventv1.CertificateInfoExtended{{
+		validServer = append(validServer, eventv1.CertificateInfoExtended{
 			Fingerprint: fp,
 			CertType:    "X509-DV-SERVER",
-			NotAfter:    byocCert.ValidToTimestamp.UTC().Format(time.RFC3339),
-		}}
+			NotAfter:    serverCert.ValidToTimestamp.UTC().Format(time.RFC3339),
+		})
 	}
 
 	// `expiresAt` required at event level per the reference V1 spec —
-	// min(notAfter) across attested identity + server certs.
-	inner.ExpiresAt = agentCertExpiry(identityCerts, byocCert, now)
+	// the earlier of the latest expiry in each certificate family.
+	inner.ExpiresAt = agentCertExpiry(identityCerts, serverCerts, now)
 
 	// `domainValidation` mirrors the V2 builder: the method that
 	// actually satisfied the gate, recorded on the order at gate-pass

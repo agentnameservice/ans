@@ -48,3 +48,56 @@ func TestRegression_ACMEReuseRequiresNewOwnerProof(t *testing.T) {
 			result.Registration.Status, result.Registration.ServerCert != nil, len(certs))
 	}
 }
+
+func TestRegression_ServerRenewalPublishesUpdatedBinding(t *testing.T) {
+	ctx := context.Background()
+	fx := newRegFixture(t)
+	registration, err := fx.svc.RegisterAgent(ctx, fx.req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentID := registration.Registration.AgentID
+	if _, err := fx.svc.VerifyACME(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fx.svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatal(err)
+	}
+	before, err := fx.byoc.FindLatestValidByAgentID(ctx, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	initialSeals := len(fx.sealer.sealed())
+	if _, err := fx.svc.SubmitServerCertRenewal(ctx, agentID, service.SubmitRenewalInput{
+		ServerCsrPEM: testServerCSR(t, fx.req.AnsName.FQDN()),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := fx.svc.VerifyRenewalACME(ctx, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Renewal.CompletedAt.IsZero() {
+		t.Fatal("renewal did not complete")
+	}
+	after, err := fx.byoc.FindLatestValidByAgentID(ctx, agentID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before.Fingerprint == after.Fingerprint {
+		t.Fatal("renewal fixture did not change the certificate")
+	}
+	// Re-driving verify-dns on the active agent must not be assumed to
+	// repair the missing renewal event: exercise that path as well.
+	if _, err := fx.svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := fx.outboxStore.Claim(ctx, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fx.sealer.sealed()) == initialSeals && len(pending) == 0 {
+		t.Fatalf("server certificate changed from %s to %s, but renewal and a repeated verify-dns produced no TL seal or pending outbox event",
+			before.Fingerprint, after.Fingerprint)
+	}
+}

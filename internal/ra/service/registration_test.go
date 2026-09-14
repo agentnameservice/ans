@@ -278,6 +278,7 @@ type regFixture struct {
 	bus          port.EventBus
 	discoveryReg port.ProfileRegistry
 	signerPubPEM string
+	signer       service.EventSigner
 }
 
 func newRegFixture(t *testing.T) *regFixture {
@@ -304,7 +305,8 @@ func newRegFixture(t *testing.T) *regFixture {
 		t.Fatal(err)
 	}
 
-	// Real validator that skips chain verification (local-dev config).
+	// This fixture isolates lifecycle behavior. Executable trust-root wiring
+	// is covered separately by cmd/ans-ra's certificate-validation tests.
 	validator := cert.NewX509Validator(cert.WithSkipChainVerify())
 
 	bus := eventbus.NewInMemoryBus(zerolog.Nop())
@@ -374,6 +376,7 @@ func newRegFixture(t *testing.T) *regFixture {
 		bus:          bus,
 		discoveryReg: discoveryReg,
 		signerPubPEM: pubPEM,
+		signer:       service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"},
 		req: service.RegisterRequest{
 			OwnerID:     "owner-1",
 			AnsName:     ansName,
