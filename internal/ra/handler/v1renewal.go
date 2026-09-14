@@ -27,11 +27,8 @@ import (
 // V1-specific piece is the `nextStep.endpoint` URL scheme (/v1/…
 // instead of /v2/ans/…).
 //
-// TL emit: the V2 renewal service does not enqueue TL events today
-// (AGENT_RENEWED emission awaits the async cert-issuance path);
-// V1 therefore also emits nothing on the renewal write paths. When
-// issuance lands, both lanes will emit on completion — V2 as
-// CERTIFICATE_RENEWED, V1 as AGENT_RENEWED.
+// Both lanes publish AGENT_RENEWED on completion. The V1 completion
+// method selects the V1 envelope and outbox lane.
 //
 // Both server-cert paths supported (matching the reference): operators
 // can submit `serverCsrPEM` to have the configured
@@ -96,7 +93,7 @@ func (h *V1RenewalHandler) CancelServerCertRenewal(w http.ResponseWriter, r *htt
 // /v1/agents/{agentId}/certificates/server/renewal/verify-acme.
 func (h *V1RenewalHandler) VerifyRenewalACME(w http.ResponseWriter, r *http.Request) {
 	agentID := chi.URLParam(r, "agentId")
-	res, err := h.svc.VerifyRenewalACME(r.Context(), agentID)
+	res, err := h.svc.VerifyRenewalACMEV1(r.Context(), agentID)
 	if err != nil {
 		h.writeError(w, err)
 		return

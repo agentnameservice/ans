@@ -30,11 +30,9 @@ import (
 // shapes. If that diverges in a future spec version, this is the
 // place to fork them.
 //
-// Schema-version note: cert-submission handlers do NOT enqueue TL
-// events. The V1 RA emits a TL leaf only on terminal transitions
-// (AGENT_REGISTERED / AGENT_REVOKED / AGENT_RENEWED / AGENT_DEPRECATED);
-// CSR submission is intermediate state that the reference records
-// in its domain-level lifecycle store, not the TL.
+// Identity submission completes rotation synchronously and commits its V1
+// AGENT_RENEWED event with the replacement certificate. Server CSR submission
+// remains intermediate state; server renewal publishes only on completion.
 type V1CertificatesHandler struct {
 	responder
 	svc *service.RegistrationService
@@ -77,7 +75,7 @@ func (h *V1CertificatesHandler) GetServerCerts(w http.ResponseWriter, r *http.Re
 
 // SubmitIdentityCSR handles POST /v1/agents/{agentId}/certificates/identity.
 func (h *V1CertificatesHandler) SubmitIdentityCSR(w http.ResponseWriter, r *http.Request) {
-	h.submitCSR(w, r, h.svc.SubmitIdentityCSR, "Identity CSR accepted for processing")
+	h.submitCSR(w, r, h.svc.SubmitIdentityCSRV1, "Identity CSR accepted for processing")
 }
 
 // SubmitServerCSR handles POST /v1/agents/{agentId}/certificates/server.

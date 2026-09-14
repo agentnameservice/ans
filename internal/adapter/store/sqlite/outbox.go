@@ -128,6 +128,8 @@ func (s *OutboxStore) RecordSealed(
 // next_attempt_at_ms has passed. Callers process each event and then
 // call MarkSent or MarkFailed. There is no explicit lease — we rely on
 // the single-writer SQLite setup.
+// Only an agent's earliest unsent row is eligible, even if its retry is delayed.
+// This keeps later certificate snapshots from overtaking an earlier event.
 func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, error) {
 	if batchSize <= 0 {
 		batchSize = 10
@@ -136,8 +138,14 @@ func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, 
         SELECT id, event_type, agent_id, schema_version, payload_json, attempts,
                COALESCE(last_error, '') AS last_error,
                next_attempt_at_ms, created_at_ms
-        FROM outbox_events
+        FROM outbox_events AS candidate
         WHERE sent_at_ms IS NULL AND next_attempt_at_ms <= ?
+          AND NOT EXISTS (
+              SELECT 1 FROM outbox_events AS earlier
+              WHERE earlier.agent_id = candidate.agent_id
+                AND earlier.id < candidate.id
+                AND earlier.sent_at_ms IS NULL
+          )
         ORDER BY id ASC
         LIMIT ?`
 	rows, err := s.db.db.QueryContext(ctx, q, time.Now().UnixMilli(), batchSize)
