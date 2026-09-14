@@ -57,14 +57,14 @@
           "$ref": "#/definitions/Certificate"
         },
         "validIdentityCerts": {
-          "description": "All currently valid identity certificates for this agent version. Present when multiple identity certs are active (e.g. during renewal overlap). When omitted, only identityCert is active.",
+          "description": "Identity certificate evidence for this agent version: all currently valid certificates, or the last-expiring non-revoked certificate if the family has lapsed. An expired notAfter remains expiry evidence, not current authorization. When omitted, identityCert is the singleton evidence.",
           "items": {
             "$ref": "#/definitions/CertificateExtended"
           },
           "type": "array"
         },
         "validServerCerts": {
-          "description": "All currently valid server certificates for this agent version. Present when multiple server certs are active. When omitted, only serverCert is active.",
+          "description": "Server certificate evidence for this agent version: all currently valid certificates, or the last-expiring certificate if the family has lapsed. An expired notAfter remains expiry evidence, not current authorization. When omitted, serverCert is the singleton evidence.",
           "items": {
             "$ref": "#/definitions/CertificateExtended"
           },

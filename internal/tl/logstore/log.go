@@ -57,13 +57,14 @@ type Config struct {
 // other tests and (under enough parallel pressure) corrupts shared
 // state. See the test fixture in `internal/tl/handler/handler_test.go`.
 type Log struct {
-	cfg      Config
-	signer   note.Signer
-	appender *tessera.Appender
-	reader   tessera.LogReader
-	awaiter  *tessera.PublicationAwaiter
-	shutdown func(context.Context) error
-	bgCancel context.CancelFunc
+	cfg        Config
+	signer     note.Signer
+	appender   *tessera.Appender
+	reader     tessera.LogReader
+	awaiter    *tessera.PublicationAwaiter
+	shutdown   func(context.Context) error
+	bgCancel   context.CancelFunc
+	writerLock *os.File
 }
 
 // Open constructs a Tessera log over the given data directory using
@@ -100,9 +101,13 @@ func Open(ctx context.Context, cfg Config, signer note.Signer, opts ...Option) (
 		apply(&o)
 	}
 
+	writerLock, err := acquireWriterLock(cfg.DataDir)
+	if err != nil {
+		return nil, err
+	}
 	driver, err := posix.New(ctx, posix.Config{Path: cfg.DataDir})
 	if err != nil {
-		return nil, fmt.Errorf("logstore: open posix storage %q: %w", cfg.DataDir, err)
+		return nil, errors.Join(fmt.Errorf("logstore: open posix storage %q: %w", cfg.DataDir, err), releaseWriterLock(writerLock))
 	}
 
 	// BatchSize is validated above to be > 0 and is set from operator
@@ -111,7 +116,8 @@ func Open(ctx context.Context, cfg Config, signer note.Signer, opts ...Option) (
 	appendOpts := tessera.NewAppendOptions().
 		WithCheckpointSigner(signer, o.additionalSigners...).
 		WithBatching(uint(cfg.BatchSize), cfg.BatchMaxAge). //nolint:gosec // G115: BatchSize > 0 enforced above
-		WithCheckpointInterval(cfg.CheckpointInterval)
+		WithCheckpointInterval(cfg.CheckpointInterval).
+		WithAntispam(tessera.DefaultAntispamInMemorySize, nil)
 
 	// Tessera's background goroutines bind their lifetime to the
 	// context passed into NewAppender / NewPublicationAwaiter. Pass a
@@ -121,7 +127,7 @@ func Open(ctx context.Context, cfg Config, signer note.Signer, opts ...Option) (
 	appender, shutdown, reader, err := tessera.NewAppender(bgCtx, driver, appendOpts)
 	if err != nil {
 		bgCancel()
-		return nil, fmt.Errorf("logstore: new appender: %w", err)
+		return nil, errors.Join(fmt.Errorf("logstore: new appender: %w", err), releaseWriterLock(writerLock))
 	}
 
 	// PublicationAwaiter polls the reader at a short interval for
@@ -132,13 +138,14 @@ func Open(ctx context.Context, cfg Config, signer note.Signer, opts ...Option) (
 	awaiter := tessera.NewPublicationAwaiter(bgCtx, reader.ReadCheckpoint, 100*time.Millisecond)
 
 	return &Log{
-		cfg:      cfg,
-		signer:   signer,
-		appender: appender,
-		reader:   reader,
-		awaiter:  awaiter,
-		shutdown: shutdown,
-		bgCancel: bgCancel,
+		cfg:        cfg,
+		signer:     signer,
+		appender:   appender,
+		reader:     reader,
+		awaiter:    awaiter,
+		shutdown:   shutdown,
+		bgCancel:   bgCancel,
+		writerLock: writerLock,
 	}, nil
 }
 
@@ -165,6 +172,10 @@ func (l *Log) Close(ctx context.Context) error {
 		l.bgCancel()
 		l.waitForBackgroundIOQuiet()
 	}
+	if l.writerLock != nil {
+		shutdownErr = errors.Join(shutdownErr, releaseWriterLock(l.writerLock))
+		l.writerLock = nil
+	}
 	return shutdownErr
 }
 
@@ -183,7 +194,7 @@ func (l *Log) waitForBackgroundIOQuiet() {
 		quietWindow  = 3 // consecutive stable samples
 		maxWait      = 2 * time.Second
 	)
-	stateDir := filepath.Join(l.cfg.DataDir, "tiles", ".state")
+	stateDir := filepath.Join(l.cfg.DataDir, ".state")
 	deadline := time.Now().Add(maxWait)
 	var lastMod time.Time
 	stable := 0

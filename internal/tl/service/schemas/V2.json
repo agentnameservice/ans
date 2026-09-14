@@ -48,7 +48,7 @@
           "type": "string"
         },
         "identityCerts": {
-          "description": "All currently valid identity certificates for this agent version. Single-cert case is a one-element array; rotation overlap is N-element.",
+          "description": "Identity certificate evidence for this agent version: all currently valid certificates, or the last-expiring non-revoked certificate if the family has lapsed. An expired notAfter remains expiry evidence, not current authorization.",
           "items": {
             "$ref": "#/definitions/CertificateExtended"
           },
@@ -63,7 +63,7 @@
           "type": "object"
         },
         "serverCerts": {
-          "description": "All currently valid server certificates for this agent version. Single-cert case is a one-element array; rotation overlap is N-element.",
+          "description": "Server certificate evidence for this agent version: all currently valid certificates, or the last-expiring certificate if the family has lapsed. An expired notAfter remains expiry evidence, not current authorization.",
           "items": {
             "$ref": "#/definitions/CertificateExtended"
           },
