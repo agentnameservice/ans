@@ -510,10 +510,8 @@ func (b brokenIssuer) FinalizeOrder(_ context.Context, _ port.FinalizeOrderReque
 	return nil, context.Canceled
 }
 
-// TestVerifyACME_LegacyZeroOrder_SkipsGate pins backwards
-// compatibility: registrations persisted before order-tracking (zero
-// order, no challenge ever issued) skip the gate and advance.
-func TestVerifyACME_LegacyZeroOrder_SkipsGate(t *testing.T) {
+// Legacy registrations without any persisted proof must fail closed.
+func TestVerifyACME_LegacyZeroOrder_FailsClosed(t *testing.T) {
 	t.Parallel()
 	fx := newRegFixture(t)
 	svc := rebuildWithIssuer(fx, fx.serverCA, failingDNSVerifier{}, nil)
@@ -533,13 +531,8 @@ func TestVerifyACME_LegacyZeroOrder_SkipsGate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := svc.VerifyACME(context.Background(), agentID, service.VerifyInput{})
-	if err != nil {
-		t.Fatalf("legacy rows must not be gated on challenges they never received: %v", err)
-	}
-	if res.Registration.Status != domain.StatusPendingDNS {
-		t.Fatalf("status: got %s want PENDING_DNS", res.Registration.Status)
-	}
+	_, err = svc.VerifyACME(context.Background(), agentID, service.VerifyInput{})
+	mustErrCode(t, err, "ACME_CHALLENGE_MISSING")
 }
 
 // TestVerifyACME_Gate_SystemicDNSFailure: a resolver outage (lookup
@@ -709,15 +702,14 @@ func TestVerifyACME_ACMEIssuer_EndToEnd(t *testing.T) {
 	}
 	agentID := anyAgentID(t, fx, fx.req.AnsName)
 
-	// The 202's challenges are the provider's: the order ref is the
-	// provider order URL and the DNS TXT value is the key-auth
-	// digest, not the raw token.
+	// Challenges are the provider's; the internal order reference also
+	// identifies the owner's persistent ACME account.
 	reg, err := fx.agents.FindByAgentID(context.Background(), agentID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if reg.CertOrder.OrderRef != fake.OrderURL() {
-		t.Fatalf("order ref: got %q want provider order URL", reg.CertOrder.OrderRef)
+	if !strings.HasSuffix(reg.CertOrder.OrderRef, ":"+fake.OrderURL()) {
+		t.Fatalf("order ref %q lost the provider order URL", reg.CertOrder.OrderRef)
 	}
 	dns01, ok := reg.CertOrder.ChallengeOfType(domain.ChallengeTypeDNS01)
 	if !ok || dns01.EffectiveDNSRecordValue() == dns01.Token || dns01.KeyAuthorization == "" {
@@ -776,17 +768,12 @@ func (b bornReadyIssuer) GetCACertificate(ctx context.Context) (string, error) {
 	return b.real.GetCACertificate(ctx)
 }
 
-// TestVerifyACME_BornReadyOrder_SkipsGateAndFinalizes pins the
-// authorization-reuse path: a registration whose order came back
-// ISSUING with no challenges advances straight through verify-acme
-// without the operator publishing anything — the gate skips ISSUING
-// and the order finalizes.
-func TestVerifyACME_BornReadyOrder_SkipsGateAndFinalizes(t *testing.T) {
+// Cached provider authorization still requires fresh proof by the caller.
+func TestVerifyACME_BornReadyOrder_RequiresOwnerProof(t *testing.T) {
 	t.Parallel()
 	fx := newRegFixture(t)
-	// failingDNS proves the gate is genuinely skipped (not passed): if
-	// the gate ran, this verifier would reject and verify-acme would
-	// 422. It must reach PENDING_DNS regardless.
+	// The failing verifier proves that cached provider authorization
+	// cannot bypass the owner's challenge gate.
 	svc := rebuildWithIssuer(fx, bornReadyIssuer{real: fx.serverCA}, failingDNSVerifier{}, nil)
 
 	if _, err := svc.RegisterAgent(context.Background(), fx.req); err != nil {
@@ -797,20 +784,15 @@ func TestVerifyACME_BornReadyOrder_SkipsGateAndFinalizes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stored.CertOrder.State != domain.OrderStateIssuing || len(stored.CertOrder.Challenges) != 0 {
-		t.Fatalf("born-ready registration order: state=%s challenges=%d",
-			stored.CertOrder.State, len(stored.CertOrder.Challenges))
+	if stored.CertOrder.State != domain.OrderStatePending || len(stored.CertOrder.Challenges) != 2 {
+		t.Fatalf("cached authorization must receive fresh RA challenges: %+v", stored.CertOrder)
 	}
-
+	_, err = svc.VerifyACME(context.Background(), agentID, service.VerifyInput{})
+	mustErrCode(t, err, "ACME_CHALLENGE_MISSING")
+	svc = rebuildWithIssuer(fx, bornReadyIssuer{real: fx.serverCA}, dns.NewNoopVerifier(), nil)
 	res, err := svc.VerifyACME(context.Background(), agentID, service.VerifyInput{})
-	if err != nil {
-		t.Fatalf("born-ready verify-acme must finalize without a gate: %v", err)
-	}
-	if res.Registration.Status != domain.StatusPendingDNS {
-		t.Fatalf("status: got %s want PENDING_DNS", res.Registration.Status)
-	}
-	if res.Registration.ServerCert == nil {
-		t.Fatal("server cert missing after born-ready finalize")
+	if err != nil || res.Registration.Status != domain.StatusPendingDNS || res.Registration.ServerCert == nil {
+		t.Fatalf("verified owner must be able to finalize cached authorization: result=%+v err=%v", res, err)
 	}
 }
 
@@ -880,11 +862,8 @@ func TestRenewal_IssuerGenericError(t *testing.T) {
 	mustErrCode(t, err, "SERVER_CERT_ISSUE_FAILED")
 }
 
-// TestRenewal_BornReadyOrder_SkipsGate pins the renewal-lane twin of
-// authorization reuse: a CSR renewal whose order came back with no
-// challenges finalizes without the operator publishing anything, even
-// against a failing DNS verifier (proving the gate is skipped).
-func TestRenewal_BornReadyOrder_SkipsGate(t *testing.T) {
+// Renewal also requires fresh proof when provider authorization is cached.
+func TestRenewal_BornReadyOrder_RequiresOwnerProof(t *testing.T) {
 	t.Parallel()
 	fx := newRegFixture(t)
 	activateSvc := rebuildWithIssuer(fx, fx.serverCA, dns.NewNoopVerifier(), nil)
@@ -897,20 +876,15 @@ func TestRenewal_BornReadyOrder_SkipsGate(t *testing.T) {
 	if err != nil {
 		t.Fatalf("submit renewal: %v", err)
 	}
-	if len(sub.Renewal.Validation.Challenges) != 0 {
-		t.Fatalf("born-ready renewal must carry no challenges, got %d", len(sub.Renewal.Validation.Challenges))
+	if len(sub.Renewal.Validation.Challenges) != 2 {
+		t.Fatalf("cached renewal must receive fresh RA challenges: %+v", sub.Renewal.Validation)
 	}
-
+	_, err = svc.VerifyRenewalACME(context.Background(), agentID)
+	mustErrCode(t, err, "ACME_CHALLENGE_MISSING")
+	svc = rebuildWithIssuer(fx, bornReadyIssuer{real: fx.serverCA}, dns.NewNoopVerifier(), nil)
 	res, err := svc.VerifyRenewalACME(context.Background(), agentID)
-	if err != nil {
-		t.Fatalf("born-ready renewal verify-acme must finalize without a gate: %v", err)
-	}
-	if !res.Sync || res.Renewal.CompletedAt.IsZero() {
-		t.Fatalf("born-ready renewal must complete synchronously: sync=%v completed=%v",
-			res.Sync, !res.Renewal.CompletedAt.IsZero())
-	}
-	if res.TLSARecord == nil {
-		t.Error("completed renewal must carry the new TLSA record")
+	if err != nil || !res.Sync || res.TLSARecord == nil {
+		t.Fatalf("verified renewal must complete: result=%+v err=%v", res, err)
 	}
 }
 

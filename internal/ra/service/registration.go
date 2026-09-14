@@ -544,18 +544,15 @@ func (s *RegistrationService) resolveServerCertInput(
 	if err := s.validator.ValidateServerCSR(ctx, req.ServerCsrPEM, req.AnsName.FQDN()); err != nil {
 		return serverCertInput{}, domain.NewValidationError("INVALID_SERVER_CSR", err.Error())
 	}
-	created, err := s.serverCA.CreateOrder(ctx, req.AnsName.FQDN())
+	created, err := s.createServerOrder(ctx, req.OwnerID, req.AnsName.FQDN())
 	if err != nil {
 		return serverCertInput{}, domain.NewInternalError(
 			"CERT_ORDER_FAILED", "create certificate order", err,
 		)
 	}
-	order := *created
-	// Clamp the challenge window to the registration's own deadline
-	// when the provider's order outlives it — relaying an expiry the
-	// registration flow won't honor would mislead the operator.
-	if deadline := now.Add(registrationChallengeWindow); order.ExpiresAt.IsZero() || deadline.Before(order.ExpiresAt) {
-		order.ExpiresAt = deadline
+	order, err := orderWithOwnerProof(created, now.Add(registrationChallengeWindow))
+	if err != nil {
+		return serverCertInput{}, domain.NewInternalError("CERT_ORDER_FAILED", "prepare domain-control proof", err)
 	}
 	srvCSR := domain.NewServerCSR(uuid.NewString(), req.ServerCsrPEM, now)
 	return serverCertInput{serverCSR: &srvCSR, order: order}, nil

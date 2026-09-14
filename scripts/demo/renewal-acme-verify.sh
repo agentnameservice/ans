@@ -10,10 +10,9 @@
 #   scripts/demo/renewal.sh --v2 --csr --skip-verify-acme
 # Then run this script. It:
 #
-#   1. reads the pending renewal and shows the provider's challenge
-#      artifacts to publish (DNS-01 TXT / HTTP-01) — unless the
-#      provider reused a recent authorization, in which case there's
-#      nothing to publish and issuance proceeds directly,
+#   1. reads the pending renewal and shows the challenge artifacts
+#      to publish (DNS-01 TXT / HTTP-01); fresh owner proof is required
+#      even when the provider reuses a recent authorization,
 #   2. POSTs renewal verify-acme — the RA answers the provider and
 #      finalizes the order,
 #   3. re-POSTs while the provider reports the order still issuing
@@ -114,7 +113,7 @@ if [ -n "$TXT_NAME" ] || [ -n "$HTTP_PATH" ]; then
     fi
   fi
 else
-  note "renewal carries no challenges — the provider reused a recent authorization; issuance proceeds directly"
+  note "renewal carries no challenges; verification can continue only with owner proof already recorded by the RA"
 fi
 
 # ----- 2/3. verify-acme, re-driving while the order is issuing -----
