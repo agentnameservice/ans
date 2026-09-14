@@ -139,6 +139,9 @@ func run(cfgPath string) error {
 		DataDir:            cfg.Merkle.TileStorage.Filesystem.Path,
 		Origin:             cfg.Merkle.Origin,
 		CheckpointInterval: cfg.Merkle.CheckpointInterval,
+		// Ingest serializes check/append/index. Flush each accepted leaf
+		// immediately instead of waiting for a batch that cannot fill.
+		BatchSize: 1,
 	}, c2spSigner, logstore.WithAdditionalSigner(jwsCPSigner))
 	if err != nil {
 		return fmt.Errorf("open log: %w", err)
@@ -176,6 +179,9 @@ func run(cfgPath string) error {
 	// Drain in-flight checkpoint-persist goroutines before the
 	// underlying Tessera reader gets torn down.
 	defer logSvc.Close()
+	if err := logSvc.RecoverIndex(ctx); err != nil {
+		return fmt.Errorf("recover TL event index: %w", err)
+	}
 	badgeSvc := service.NewBadgeService(logSvc)
 	identityBadgeSvc := service.NewIdentityBadgeService(logSvc, badgeSvc)
 

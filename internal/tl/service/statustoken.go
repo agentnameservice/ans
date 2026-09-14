@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
-	"github.com/agentnameservice/ans/internal/tl/event"
 	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
@@ -60,14 +60,24 @@ func (s *StatusTokenService) ForAgent(ctx context.Context, agentID string) (*Sta
 		return nil, err
 	}
 
-	status := deriveAgentStatus(rec)
+	wrapper, err := parseEnvelopeWrapper(rec.RawEvent)
+	if err != nil {
+		return nil, err
+	}
+	now := s.log.nowFn()
+	status := string(currentAgentStatus(rec, wrapper.certExpiresAt(), now, 30*24*time.Hour))
 	if isTerminal(status) {
 		return nil, ErrStatusTokenNotIssued
 	}
 
-	claims, err := buildStatusClaims(rec, status)
+	claims, err := buildStatusClaimsAt(rec, status, now)
 	if err != nil {
 		return nil, fmt.Errorf("status-token: build claims: %w", err)
+	}
+	// Legacy leaves can carry expiresAt without per-certificate dates.
+	if expiry := wrapper.certExpiresAt(); !expiry.IsZero() &&
+		(claims.ValidUntil.IsZero() || expiry.Before(claims.ValidUntil)) {
+		claims.ValidUntil = expiry
 	}
 	bytes, err := s.generator.GenerateStatusToken(ctx, claims)
 	if err != nil {
@@ -77,41 +87,6 @@ func (s *StatusTokenService) ForAgent(ctx context.Context, agentID string) (*Sta
 		Bytes:       bytes,
 		ContentType: receipt.StatusTokenMediaType,
 	}, nil
-}
-
-// deriveAgentStatus maps the TL's latest event for an agent into the
-// wire-format agent status the token carries. Single-terminal-event
-// model (matches V1 and reference):
-//
-//	AGENT_REGISTERED → ACTIVE
-//	AGENT_RENEWED    → ACTIVE
-//	AGENT_REVOKED    → REVOKED
-//	AGENT_DEPRECATED → DEPRECATED
-//
-// WARNING and EXPIRED are NOT event-driven — the TL derives them at
-// read time from the attested cert expiry. Callers of deriveAgentStatus
-// must apply that expiry check on top when they need the badge-visible
-// status.
-//
-// Derived from the event type rather than looking up a registration
-// row because the TL is the authoritative source of truth for what
-// the log has witnessed — a status token asserting "this agent is
-// ACTIVE" must mean "the TL has seen an AGENT_REGISTERED event that
-// isn't superseded by a later revocation".
-func deriveAgentStatus(rec *sqlitetl.EventRecord) string {
-	switch event.Type(rec.EventType) {
-	case event.TypeAgentRevoked:
-		return "REVOKED"
-	case event.TypeAgentRegistered, event.TypeAgentRenewed:
-		return "ACTIVE"
-	case event.TypeAgentDeprecated:
-		return "DEPRECATED"
-	default:
-		// Unknown event types pass through verbatim — the token
-		// generator surfaces them so operator logs show the unexpected
-		// value rather than silently mapping to a wrong status.
-		return rec.EventType
-	}
 }
 
 // isTerminal returns true for statuses that should NOT receive status
@@ -133,7 +108,7 @@ func isTerminal(status string) bool {
 // `payload.producer.event.attestations`. Drilling that path manually
 // here keeps the function schema-agnostic — it does the same job for
 // V1 and V2 envelopes.
-func buildStatusClaims(rec *sqlitetl.EventRecord, status string) (*receipt.StatusTokenClaims, error) {
+func buildStatusClaimsAt(rec *sqlitetl.EventRecord, status string, now time.Time) (*receipt.StatusTokenClaims, error) {
 	var env map[string]any
 	if err := json.Unmarshal([]byte(rec.RawEvent), &env); err != nil {
 		return nil, fmt.Errorf("unmarshal raw_event: %w", err)
@@ -153,16 +128,75 @@ func buildStatusClaims(rec *sqlitetl.EventRecord, status string) (*receipt.Statu
 	//   V2 → `identityCerts[]` / `serverCerts[]` (unified arrays).
 	//   V1 → `validIdentityCerts[]` / `validServerCerts[]` (rotation arrays)
 	// Prefer V2; fall back to V1.
-	claims.ValidIdentityCerts = extractCertFingerprints(attest["identityCerts"])
-	if claims.ValidIdentityCerts == nil {
-		claims.ValidIdentityCerts = extractCertFingerprints(attest["validIdentityCerts"])
+	var expiry time.Time
+	var err error
+	claims.ValidIdentityCerts, expiry, err = currentCertFingerprints(certFamily(attest, "identityCerts", "validIdentityCerts", "identityCert"), now)
+	if err != nil {
+		return nil, err
 	}
-	claims.ValidServerCerts = extractCertFingerprints(attest["serverCerts"])
-	if claims.ValidServerCerts == nil {
-		claims.ValidServerCerts = extractCertFingerprints(attest["validServerCerts"])
+	claims.ValidUntil = expiry
+	claims.ValidServerCerts, expiry, err = currentCertFingerprints(certFamily(attest, "serverCerts", "validServerCerts", "serverCert"), now)
+	if err != nil {
+		return nil, err
+	}
+	if !expiry.IsZero() && (claims.ValidUntil.IsZero() || expiry.Before(claims.ValidUntil)) {
+		claims.ValidUntil = expiry
 	}
 	claims.MetadataHashes = extractMetadataHashes(attest["metadataHashes"])
 	return claims, nil
+}
+
+func certFamily(attest map[string]any, current, legacy, singleton string) any {
+	if value, ok := attest[current]; ok {
+		return value
+	}
+	if value, ok := attest[legacy]; ok {
+		return value
+	}
+	if value, ok := attest[singleton]; ok {
+		return []any{value}
+	}
+	return nil
+}
+
+// currentCertFingerprints removes expired overlap certificates and returns the
+// earliest remaining expiry. A token authorizing several certificates must
+// expire before any of those certificates does, even when replacements remain.
+func currentCertFingerprints(v any, now time.Time) ([]receipt.CertFingerprint, time.Time, error) {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, time.Time{}, nil
+	}
+	var out []receipt.CertFingerprint
+	var earliest time.Time
+	seen := make(map[string]bool, len(arr))
+	for _, el := range arr {
+		m, ok := el.(map[string]any)
+		if !ok {
+			continue
+		}
+		fp, _ := m["fingerprint"].(string)
+		ct, _ := m["type"].(string)
+		if fp == "" || seen[fp] {
+			continue
+		}
+		if raw, ok := m["notAfter"]; ok {
+			value, _ := raw.(string)
+			expiry, err := time.Parse(time.RFC3339, value)
+			if err != nil {
+				return nil, time.Time{}, fmt.Errorf("invalid certificate notAfter: %w", err)
+			}
+			if !now.Before(expiry) {
+				continue
+			}
+			if earliest.IsZero() || expiry.Before(earliest) {
+				earliest = expiry
+			}
+		}
+		seen[fp] = true
+		out = append(out, receipt.CertFingerprint{Fingerprint: fp, CertType: ct})
+	}
+	return out, earliest, nil
 }
 
 // drillAttestations walks the standard envelope nesting
@@ -184,34 +218,6 @@ func drillAttestations(env map[string]any) map[string]any {
 	}
 	attest, _ := evt["attestations"].(map[string]any)
 	return attest
-}
-
-// extractCertFingerprints pulls the {fingerprint, type} pairs out of
-// the attestation's identityCerts[] or serverCerts[] arrays. Invalid
-// entries are skipped silently — a malformed event shouldn't block
-// token issuance for a still-healthy agent.
-func extractCertFingerprints(v any) []receipt.CertFingerprint {
-	arr, ok := v.([]any)
-	if !ok {
-		return nil
-	}
-	out := make([]receipt.CertFingerprint, 0, len(arr))
-	for _, el := range arr {
-		m, ok := el.(map[string]any)
-		if !ok {
-			continue
-		}
-		fp, _ := m["fingerprint"].(string)
-		ct, _ := m["type"].(string)
-		if fp == "" {
-			continue
-		}
-		out = append(out, receipt.CertFingerprint{Fingerprint: fp, CertType: ct})
-	}
-	if len(out) == 0 {
-		return nil
-	}
-	return out
 }
 
 // extractMetadataHashes turns {"MCP": "SHA256:..."} into a map.

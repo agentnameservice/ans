@@ -67,7 +67,12 @@ paths:
         detached JWS (`X-Signature` header). Successful appends return
         the Tessera-assigned leaf index and hash; duplicate submissions
         (same SHA-256(inner event JCS)) return 200 with the original
-        leaf so outbox retries are idempotent.
+        leaf so outbox retries are idempotent. Repeating the latest
+        agent state with only timestamp/issuedAt changed also echoes
+        its original leaf. Conflicting agent bindings, repeated
+        registration, reversed terminal states, and older lifecycle
+        events are rejected before append. A renewal with changed
+        attestation state can append again for the same FQDN/version.
       operationId: appendEvent
       parameters:
         - name: X-Signature
@@ -95,6 +100,8 @@ paths:
             `duplicate: true` + the pre-existing leaf so retries are
             idempotent. Matches the reference TL's status-code and
             body shape.
+            A timestamp-only retry of the latest state is also a
+            duplicate; genuinely changed renewals receive a new leaf.
           content:
             application/json:
               schema:
@@ -110,7 +117,8 @@ paths:
             Body fails validation. Codes include
             `NO_PRODUCER_SIGNATURE`, `INVALID_SIGNATURE_HEADER`,
             `NOT_FOUND_PRODUCER_KEY`, `INVALID_PRODUCER_KEY`,
-            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`.
+            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`,
+            `AGENT_STATE_CONFLICT`, `STALE_AGENT_EVENT`.
           content:
             application/problem+json:
               schema:
