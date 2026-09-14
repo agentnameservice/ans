@@ -10,6 +10,7 @@ package service
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
 	v1event "github.com/agentnameservice/ans/internal/tl/event/v1"
@@ -36,28 +37,15 @@ func envelopeJSON(t *testing.T, attestations any) string {
 	return string(raw)
 }
 
-// ----- deriveAgentStatus -----
-//
-// The four-arm switch is the source of truth for the wire-format
-// agent status enum. Each arm matters because the status-token
-// generator uses it to populate the `agentStatus` claim and to gate
-// the ErrStatusTokenNotIssued branch (terminal states return 410).
-
-func TestDeriveAgentStatus_AllBranches(t *testing.T) {
-	cases := map[string]string{
-		"AGENT_REVOKED":     "REVOKED",
-		"AGENT_REGISTERED":  "ACTIVE",
-		"AGENT_RENEWED":     "ACTIVE",
-		"AGENT_DEPRECATED":  "DEPRECATED",
-		"SOMETHING_UNUSUAL": "SOMETHING_UNUSUAL", // default arm
-	}
-	for ev, want := range cases {
-		t.Run(ev, func(t *testing.T) {
-			got := deriveAgentStatus(&sqlitetl.EventRecord{EventType: ev})
-			if got != want {
-				t.Errorf("deriveAgentStatus(%q): got %q want %q", ev, got, want)
-			}
-		})
+// Current lifecycle status is shared by badge and status-token services.
+func TestCurrentAgentStatus_LifecycleStates(t *testing.T) {
+	for ev, want := range map[string]BadgeStatus{
+		"AGENT_REGISTERED": BadgeActive, "AGENT_RENEWED": BadgeActive,
+		"AGENT_REVOKED": BadgeRevoked, "AGENT_DEPRECATED": BadgeDeprecated,
+	} {
+		if got := currentAgentStatus(&sqlitetl.EventRecord{EventType: ev}, time.Time{}, time.Now(), 30*24*time.Hour); got != want {
+			t.Errorf("status of %s = %s, want %s", ev, got, want)
+		}
 	}
 }
 
@@ -149,17 +137,17 @@ func TestDrillAttestations_MissingAttestations(t *testing.T) {
 	}
 }
 
-// ----- extractCertFingerprints -----
+// ----- currentCertFingerprints -----
 
 func TestExtractCertFingerprints_NotArray(t *testing.T) {
-	if got := extractCertFingerprints("not an array"); got != nil {
+	if got, _, err := currentCertFingerprints("not an array", time.Now()); got != nil || err != nil {
 		t.Errorf("expected nil for non-array; got %v", got)
 	}
 }
 
 func TestExtractCertFingerprints_EntryNotMap(t *testing.T) {
 	// Skips non-map entries, returns nil if no valid entries remain.
-	if got := extractCertFingerprints([]any{"string", 42, true}); got != nil {
+	if got, _, err := currentCertFingerprints([]any{"string", 42, true}, time.Now()); got != nil || err != nil {
 		t.Errorf("expected nil when no entries are maps; got %v", got)
 	}
 }
@@ -170,7 +158,7 @@ func TestExtractCertFingerprints_SkipsEntriesMissingFingerprint(t *testing.T) {
 		map[string]any{"fingerprint": "", "type": "X509-OV"},
 		map[string]any{"type": "X509-OV-CLIENT"}, // missing fingerprint key
 	}
-	if got := extractCertFingerprints(in); got != nil {
+	if got, _, err := currentCertFingerprints(in, time.Now()); got != nil || err != nil {
 		t.Errorf("expected nil when no entries have fingerprint; got %v", got)
 	}
 }
@@ -182,7 +170,10 @@ func TestExtractCertFingerprints_GoodAndBadMixed(t *testing.T) {
 		map[string]any{"fingerprint": "SHA256:efgh"}, // type empty, still kept
 		map[string]any{"fingerprint": ""},            // skipped
 	}
-	got := extractCertFingerprints(in)
+	got, _, err := currentCertFingerprints(in, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(got) != 2 {
 		t.Fatalf("got %d entries, want 2", len(got))
 	}
@@ -240,7 +231,7 @@ func TestBuildStatusClaims_MalformedJSONReturnsError(t *testing.T) {
 		AnsName:  "ans://v1.0.0.a.example.com",
 		RawEvent: "{not-json",
 	}
-	if _, err := buildStatusClaims(rec, "ACTIVE"); err == nil {
+	if _, err := buildStatusClaimsAt(rec, "ACTIVE", time.Now()); err == nil {
 		t.Error("expected unmarshal error for malformed JSON")
 	}
 }
@@ -255,7 +246,7 @@ func TestBuildStatusClaims_MissingAttestationsStillSucceeds(t *testing.T) {
 		// Bare envelope shell — drillAttestations returns nil.
 		RawEvent: `{"payload":{"producer":{"event":{}}}}`,
 	}
-	got, err := buildStatusClaims(rec, "ACTIVE")
+	got, err := buildStatusClaimsAt(rec, "ACTIVE", time.Now())
 	if err != nil {
 		t.Fatalf("buildStatusClaims: %v", err)
 	}
@@ -294,7 +285,7 @@ func TestBuildStatusClaims_V1SchemaCertArrays(t *testing.T) {
 		AnsName:  "ans://v1.0.0.v1.example.com",
 		RawEvent: envelopeJSON(t, attest),
 	}
-	got, err := buildStatusClaims(rec, "ACTIVE")
+	got, err := buildStatusClaimsAt(rec, "ACTIVE", time.Now())
 	if err != nil {
 		t.Fatalf("buildStatusClaims: %v", err)
 	}
@@ -329,7 +320,7 @@ func TestBuildStatusClaims_V2KeysWinOverV1(t *testing.T) {
 		AnsName:  "ans://v1.0.0.mix.example.com",
 		RawEvent: envelopeJSON(t, attest),
 	}
-	got, err := buildStatusClaims(rec, "ACTIVE")
+	got, err := buildStatusClaimsAt(rec, "ACTIVE", time.Now())
 	if err != nil {
 		t.Fatalf("buildStatusClaims: %v", err)
 	}

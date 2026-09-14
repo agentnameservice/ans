@@ -21,8 +21,8 @@ import (
 //     matches Tessera's internal leaf. Used by an
 //     inclusion-proof verifier walking to the root.
 //   - EventHashHex — SHA-256 of the JCS-canonical inner-producer-event
-//     bytes. UNIQUE — the table rejects retries with
-//     the same inner event content.
+//     bytes. Ingestion checks this before append; historical duplicate leaves
+//     may share it because the index must faithfully mirror the Merkle tree.
 //
 // AgentID and IdentityID are the two read-index keys over the single
 // log: agent events carry AgentID (IdentityID empty), identity events
@@ -113,6 +113,41 @@ type EventStore struct{ db *DB }
 // NewEventStore returns a new SQLite-backed event store.
 func NewEventStore(db *DB) *EventStore { return &EventStore{db: db} }
 
+// FirstUnindexedLeaf returns the start of the first gap, including a gap before
+// later indexed leaves. MAX(leaf_index)+1 alone would miss such a failed write.
+func (s *EventStore) FirstUnindexedLeaf(ctx context.Context) (uint64, error) {
+	var next uint64
+	err := s.db.db.GetContext(ctx, &next, `
+		SELECT CASE
+			WHEN NOT EXISTS (SELECT 1 FROM tl_events WHERE leaf_index = 0) THEN 0
+			ELSE (SELECT MIN(a.leaf_index + 1)
+				FROM tl_events a LEFT JOIN tl_events b ON b.leaf_index = a.leaf_index + 1
+				WHERE b.leaf_index IS NULL)
+		END`)
+	return next, mapSQLErr(err)
+}
+
+// IndexedSize returns the tree size required to cover every indexed row,
+// including rows beyond a gap. Startup refuses an index ahead of its log.
+func (s *EventStore) IndexedSize(ctx context.Context) (uint64, error) {
+	var size uint64
+	err := s.db.db.GetContext(ctx, &size, `SELECT COALESCE(MAX(leaf_index) + 1, 0) FROM tl_events`)
+	return size, mapSQLErr(err)
+}
+
+// LatestAgentState finds a versioned FQDN's latest lifecycle event and guards
+// against moving an existing agent ID to a different ANS name.
+func (s *EventStore) LatestAgentState(ctx context.Context, ansName, agentID string) (*EventRecord, error) {
+	var r EventRecord
+	err := s.db.db.GetContext(ctx, &r, `SELECT `+eventCols+`
+		FROM tl_events WHERE identity_id IS NULL AND (ans_name = ? OR agent_id = ?)
+		ORDER BY leaf_index DESC LIMIT 1`, ansName, agentID)
+	if err != nil {
+		return nil, mapSQLErr(err)
+	}
+	return &r, nil
+}
+
 // ComputeEventHash returns the dedup hash for an inner producer event:
 // SHA-256 over the JCS-canonical bytes of the event (not the envelope).
 //
@@ -123,8 +158,9 @@ func ComputeEventHash(innerCanonical []byte) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// StoreEvent persists a freshly-appended event. Returns a domain
-// conflict error if event_hash already exists (idempotent retry).
+// StoreEvent mirrors an already-committed leaf. Leaf indices are unique,
+// while recovery may index historical leaves with identical event content.
+// Content deduplication belongs to the serialized pre-append check.
 // Takes an event.View so every envelope shape lands through the same
 // persistence path; the `schema_version` column holds `env.Version()`
 // for downstream read handlers to echo back.
@@ -440,12 +476,12 @@ func clampPage(limit, offset int) (int, int) {
 
 // ExistsByEventHash returns (true, leafIndex) if an event with the
 // given content hash has already been stored, enabling idempotent
-// retries at the service layer. The UNIQUE constraint on event_hash
-// also enforces this at insert time as a belt-and-braces guard.
+// retries at the service layer. Historical duplicate leaves resolve to the
+// earliest committed leaf, independent of the order in which they were indexed.
 func (s *EventStore) ExistsByEventHash(ctx context.Context, eventHashHex string) (bool, uint64, error) {
 	var leafIdx sql.NullInt64
 	err := s.db.db.GetContext(ctx, &leafIdx,
-		`SELECT leaf_index FROM tl_events WHERE event_hash = ?`, eventHashHex)
+		`SELECT leaf_index FROM tl_events WHERE event_hash = ? ORDER BY leaf_index LIMIT 1`, eventHashHex)
 	switch {
 	case err == nil && leafIdx.Valid:
 		// leaf_index is non-negative by construction (Tessera issues

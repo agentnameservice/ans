@@ -52,6 +52,10 @@ type LogService struct {
 	originRAID  string // RAID stamped into the TL's attestation JWS header.
 	nowFn       func() time.Time
 	uuidFn      func() (string, error)
+	// Serialize the database check, append, and mirror commit. Recovery runs
+	// before another append after any uncertain write and after restart.
+	ingestGate chan struct{}
+	indexReady bool
 
 	// shutdownCtx is cancelled when Close is called; the per-append
 	// awaiter goroutines watch it so they drain cleanly at shutdown
@@ -111,6 +115,7 @@ func NewLogService(
 		attestKM:       attestKM,
 		attestKeyID:    attestKeyID,
 		originRAID:     originRAID,
+		ingestGate:     make(chan struct{}, 1),
 		nowFn:          func() time.Time { return time.Now().UTC() },
 		// UUIDv7: time-ordered, per the logId contract in the TL API
 		// spec and the served event schemas.
@@ -187,6 +192,19 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 	//    key-reordering in in.RawBody would otherwise poison dedup.
 	eventHash := sqlitetl.ComputeEventHash(innerCanonical)
 
+	select {
+	case s.ingestGate <- struct{}{}:
+		defer func() { <-s.ingestGate }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if !s.indexReady {
+		if err := s.recoverIndex(ctx); err != nil {
+			return nil, fmt.Errorf("log: recover event index: %w", err)
+		}
+		s.indexReady = true
+	}
+
 	if dup, existingIdx, derr := s.events.ExistsByEventHash(ctx, eventHash); derr != nil {
 		return nil, derr
 	} else if dup {
@@ -210,6 +228,11 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 			Duplicate: true,
 			TreeSize:  s.currentTreeSize(ctx, existingIdx),
 		}, nil
+	}
+	if existing, err := s.checkAgentState(ctx, env, innerCanonical); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return s.duplicateResult(ctx, existing)
 	}
 
 	// 4. Sign the envelope — now the Signable is complete.
@@ -237,12 +260,14 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 	//    reflect the outer signature as well.
 	res, err := s.log.Append(ctx, env)
 	if err != nil {
+		s.indexReady = false
 		return nil, fmt.Errorf("log: tessera append: %w", err)
 	}
 
 	// 6. Persist the mirror row. The store takes event.View, so V1
 	//    and V2 both land through this single path.
 	if _, err := s.events.StoreEvent(ctx, res.LeafIndex, res.LeafHash, eventHash, env, res.Canonical); err != nil {
+		s.indexReady = false
 		return nil, fmt.Errorf("log: store event: %w", err)
 	}
 
@@ -262,7 +287,7 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 		LogID:     logID,
 		LeafIndex: res.LeafIndex,
 		LeafHash:  res.LeafHash,
-		Duplicate: false,
+		Duplicate: res.IsDuplicate,
 		TreeSize:  res.LeafIndex + 1,
 	}, nil
 }
@@ -290,27 +315,52 @@ func setOuterSignature(env event.Signable, sig string) error {
 
 // LatestEventByAgent returns the newest event mirrored for an agent.
 func (s *LogService) LatestEventByAgent(ctx context.Context, agentID string) (*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.GetLatestByAgentID(ctx, agentID, 0)
 }
 
 // EventsByAgent returns paginated events for an agent.
 func (s *LogService) EventsByAgent(ctx context.Context, agentID string, limit, offset int) ([]*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.GetByAgentID(ctx, agentID, limit, offset, 0)
 }
 
 // EventByLeafIndex returns the event at a specific leaf.
 func (s *LogService) EventByLeafIndex(ctx context.Context, idx uint64) (*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.GetEventByLeafIndex(ctx, idx)
 }
 
 // LatestEventByIdentity returns the newest event on an identity's
 // stream (the read index over the single log keyed by identityId).
 func (s *LogService) LatestEventByIdentity(ctx context.Context, identityID string) (*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.GetLatestByIdentityID(ctx, identityID)
 }
 
 // EventsByIdentity returns paginated events for an identity.
 func (s *LogService) EventsByIdentity(ctx context.Context, identityID string, limit, offset int) ([]*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.GetByIdentityID(ctx, identityID, limit, offset)
 }
 
@@ -319,6 +369,11 @@ func (s *LogService) EventsByIdentity(ctx context.Context, identityID string, li
 // carrying the current proven key set, which the badge join surfaces
 // as provenKeyThumbprints.
 func (s *LogService) LatestProofByIdentity(ctx context.Context, identityID string) (*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.GetLatestProofByIdentityID(ctx, identityID)
 }
 
@@ -326,24 +381,44 @@ func (s *LogService) LatestProofByIdentity(ctx context.Context, identityID strin
 // IDENTITY_REVOKED event — the terminal read-time rule (§5.6.3):
 // once revoked, no later leaf changes the answer.
 func (s *LogService) IdentityRevoked(ctx context.Context, identityID string) (bool, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer unlock()
 	return s.events.HasIdentityRevoked(ctx, identityID)
 }
 
 // LinkStatesByAgent returns the latest link/unlink fact per identity
 // that ever named this agent.
 func (s *LogService) LinkStatesByAgent(ctx context.Context, ansID string) ([]*sqlitetl.LinkState, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.LinkStatesByAgent(ctx, ansID)
 }
 
 // LinkStatesByIdentity returns the latest link/unlink fact per agent
 // this identity ever named.
 func (s *LogService) LinkStatesByIdentity(ctx context.Context, identityID string) ([]*sqlitetl.LinkState, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.LinkStatesByIdentity(ctx, identityID)
 }
 
 // LinkEventsByAgent returns the link/unlink events that ever named
 // this agent — the per-agent association history.
 func (s *LogService) LinkEventsByAgent(ctx context.Context, ansID string, limit, offset int) ([]*sqlitetl.EventRecord, error) {
+	unlock, err := s.lockIndexedRead(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	return s.events.LinkEventsByAgent(ctx, ansID, limit, offset)
 }
 

@@ -34,7 +34,7 @@ func parseEnvelopeWrapper(raw string) (*envelopeWrapper, error) {
 }
 
 // certExpiresAt returns the effective expiry for badge-status
-// derivation: the earlier of the identity-cert and server-cert
+// derivation: the earlier of the latest identity-cert and server-cert
 // notAfter timestamps attested on the event. This is what the TL
 // compares against `now` to flip badge status to WARNING (30 days
 // before) / EXPIRED (after).
@@ -48,8 +48,9 @@ func parseEnvelopeWrapper(raw string) (*envelopeWrapper, error) {
 //   - V2 collapses both shapes into `attestations.identityCerts[]` and
 //     `attestations.serverCerts[]` arrays.
 //
-// We union every cert entry both shapes can carry and take the
-// min(notAfter). Returns a zero time when no attested cert is
+// Each family remains usable while at least one allowed certificate is
+// unexpired. Expiry of an old overlap certificate must not expire its
+// replacement. Returns a zero time when no attested cert is
 // present (revocation events, deprecation events). Callers treat
 // zero as "no expiry to enforce, badge stays ACTIVE".
 func (w *envelopeWrapper) certExpiresAt() time.Time {
@@ -59,6 +60,7 @@ func (w *envelopeWrapper) certExpiresAt() time.Time {
 	var payload struct {
 		Producer struct {
 			Event struct {
+				ExpiresAt    string `json:"expiresAt"`
 				Attestations struct {
 					// V2 shape: unified arrays.
 					IdentityCerts []certInfoView `json:"identityCerts"`
@@ -76,30 +78,36 @@ func (w *envelopeWrapper) certExpiresAt() time.Time {
 		return time.Time{}
 	}
 
-	all := make([]certInfoView, 0, 8)
-	all = append(all, payload.Producer.Event.Attestations.IdentityCerts...)
-	all = append(all, payload.Producer.Event.Attestations.ServerCerts...)
-	all = append(all, payload.Producer.Event.Attestations.ValidIdentityCerts...)
-	all = append(all, payload.Producer.Event.Attestations.ValidServerCerts...)
-	if c := payload.Producer.Event.Attestations.IdentityCert; c != nil {
-		all = append(all, *c)
+	attest := payload.Producer.Event.Attestations
+	identity := attest.IdentityCerts
+	identity = append(identity, attest.ValidIdentityCerts...)
+	server := attest.ServerCerts
+	server = append(server, attest.ValidServerCerts...)
+	if len(identity) == 0 && attest.IdentityCert != nil {
+		identity = append(identity, *attest.IdentityCert)
 	}
-	if c := payload.Producer.Event.Attestations.ServerCert; c != nil {
-		all = append(all, *c)
+	if len(server) == 0 && attest.ServerCert != nil {
+		server = append(server, *attest.ServerCert)
 	}
-
+	fallback, _ := time.Parse(time.RFC3339, payload.Producer.Event.ExpiresAt)
 	var earliest time.Time
-	for _, c := range all {
-		if c.NotAfter == "" {
-			continue
+	for _, family := range [][]certInfoView{identity, server} {
+		var latest time.Time
+		for _, c := range family {
+			t, err := time.Parse(time.RFC3339, c.NotAfter)
+			if err != nil {
+				t = fallback
+			}
+			if t.After(latest) {
+				latest = t
+			}
 		}
-		t, err := time.Parse(time.RFC3339, c.NotAfter)
-		if err != nil {
-			continue
+		if !latest.IsZero() && (earliest.IsZero() || latest.Before(earliest)) {
+			earliest = latest
 		}
-		if earliest.IsZero() || t.Before(earliest) {
-			earliest = t
-		}
+	}
+	if earliest.IsZero() {
+		return fallback
 	}
 	return earliest
 }
