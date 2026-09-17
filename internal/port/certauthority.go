@@ -161,6 +161,9 @@ var ErrOrderFailed = errors.New("certificate order failed")
 // FinalizeOrderRequest carries everything an issuer needs to complete
 // a previously created order.
 type FinalizeOrderRequest struct {
+	// OwnerID is the authenticated RA owner. Account-scoped providers bind
+	// the opaque order reference to this owner before finalization.
+	OwnerID string
 	// OrderRef is the provider-opaque handle returned by CreateOrder
 	// (an ACME order URL, an internal id, …).
 	OrderRef string
@@ -227,4 +230,11 @@ type ServerCertificateIssuer interface {
 	// providers (ACME) return their chain root; it is informational
 	// there since relying parties already hold it in system stores.
 	GetCACertificate(ctx context.Context) (string, error)
+}
+
+// OwnerScopedServerCertificateIssuer isolates reusable provider authorizations
+// between RA owners. Providers that cache domain authorizations by account
+// implement this capability; the RA uses it for registrations and renewals.
+type OwnerScopedServerCertificateIssuer interface {
+	CreateOrderForOwner(ctx context.Context, ownerID, fqdn string) (*domain.CertificateOrder, error)
 }

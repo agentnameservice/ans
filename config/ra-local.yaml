@@ -42,6 +42,12 @@ ca:
   #     directory-url: "https://acme-staging-v02.api.letsencrypt.org/directory"
   #     email: "ops@example.com"
   #     data-dir: "./data/ra/acme"
+  #
+  # Server certificate chains are always verified. System roots are
+  # used by default; selecting the self issuer also trusts its own
+  # root. Explicitly add private BYOC or Let's Encrypt staging roots:
+  # validation:
+  #   roots-file: "/etc/ans/server-trust-roots.pem"
 
 dns:
   # "noop" (default) accepts any DNS state — the quickstart demo uses

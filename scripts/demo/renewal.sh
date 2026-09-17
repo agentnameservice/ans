@@ -15,14 +15,13 @@
 # scripts/demo/renewal-acme-verify.sh for that (the renewal-lane
 # counterpart to acme-verify.sh).
 #
-# ans is BYOC-only — we generate a self-signed server cert for the
-# agent's FQDN. The RA validator skips chain verification in the
-# demo stack (cmd/ans-ra/main.go uses WithSkipChainVerify), so the
-# self-signed cert is accepted.
+# Defaults to a CSR signed by the configured server issuer. --byoc
+# loads an existing server certificate and optional chain from the
+# environment; the RA verifies the chain against its trust roots.
 #
 # Usage:
-#   scripts/demo/renewal.sh --v1                             # BYOC, pick agent from last-agent-id-v1
-#   scripts/demo/renewal.sh --v2                             # BYOC, pick agent from last-agent-id
+#   scripts/demo/renewal.sh --v1                             # CSR, pick agent from last-agent-id-v1
+#   scripts/demo/renewal.sh --v2                             # CSR, pick agent from last-agent-id
 #   scripts/demo/renewal.sh --v1 --csr                       # CSR path (RA's server CA signs)
 #   scripts/demo/renewal.sh --v1 --agent <uuid>              # explicit agent
 #   scripts/demo/renewal.sh --v1 --skip-verify-acme          # submit only, stop before verify
@@ -30,6 +29,8 @@
 #
 # Env:
 #   AGENT_ID   override the agent id (takes precedence over --agent)
+#   ANS_SERVER_CERT_FILE   required for --byoc; PEM leaf certificate
+#   ANS_SERVER_CHAIN_FILE  optional for --byoc; PEM intermediate chain
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,7 +42,7 @@ LANE=""
 AGENT_ARG=""
 SKIP_VERIFY=0
 CANCEL=0
-PATH_MODE="byoc"   # byoc | csr
+PATH_MODE="csr"   # byoc | csr
 while [ $# -gt 0 ]; do
   case "$1" in
     --v1) LANE="v1"; shift ;;
@@ -133,9 +134,7 @@ fi
 ok "agentFqdn=$AGENT_FQDN"
 
 # ----- 1. Prepare the credential (CSR or BYOC cert) -----
-CERT_DIR="$DATA/cert-renewal"
-rm -rf "$CERT_DIR"
-mkdir -p "$CERT_DIR"
+CERT_DIR=$(mktemp -d "$DATA/cert-renewal.XXXXXX")
 cat >"$CERT_DIR/openssl.cnf" <<CNF
 [req]
 distinguished_name = req_dn
@@ -149,9 +148,8 @@ basicConstraints = CA:FALSE
 keyUsage = digitalSignature, keyEncipherment
 extendedKeyUsage = serverAuth
 CNF
-openssl ecparam -name prime256v1 -genkey -noout -out "$CERT_DIR/key.pem" 2>/dev/null
-
 if [ "$PATH_MODE" = "csr" ]; then
+  openssl ecparam -name prime256v1 -genkey -noout -out "$CERT_DIR/key.pem" 2>/dev/null
   # CSR path: produce a PEM CSR with DNS SAN matching the agent FQDN.
   # The RA's configured ServerCertificateIssuer finalizes the order
   # and returns the cert at renewal verify-acme.
@@ -162,16 +160,12 @@ if [ "$PATH_MODE" = "csr" ]; then
   CRED_FIELD="serverCsrPEM"
   ok "server CSR generated (DNS SAN = $AGENT_FQDN)"
 else
-  # BYOC path: self-signed cert (validator has chain verify off
-  # in the demo; production requires a real CA).
-  openssl req -new -x509 -key "$CERT_DIR/key.pem" \
-    -config "$CERT_DIR/openssl.cnf" \
-    -extensions v3_req \
-    -days 90 \
-    -out "$CERT_DIR/cert.pem" 2>/dev/null
+  [ -n "${ANS_SERVER_CERT_FILE:-}" ] && [ -r "$ANS_SERVER_CERT_FILE" ] ||
+    fail "--byoc requires ANS_SERVER_CERT_FILE pointing to a certificate from a trusted issuer"
+  cp "$ANS_SERVER_CERT_FILE" "$CERT_DIR/cert.pem"
   CRED_PEM=$(cat "$CERT_DIR/cert.pem")
   CRED_FIELD="serverCertificatePEM"
-  ok "self-signed server cert generated (90-day validity)"
+  ok "BYOC server certificate loaded"
 fi
 
 # ----- 1b. Clean up any stale PENDING renewal -----
@@ -194,7 +188,13 @@ fi
 
 # ----- 2. POST renewal -----
 header "POST $AGENT_BASE/$AGENT/certificates/server/renewal ($PATH_MODE path)"
-RENEWAL_REQ=$(jq -n --arg field "$CRED_FIELD" --arg pem "$CRED_PEM" '{($field): $pem}')
+CHAIN_PEM=""
+if [ "$PATH_MODE" = "byoc" ] && [ -n "${ANS_SERVER_CHAIN_FILE:-}" ]; then
+  [ -r "$ANS_SERVER_CHAIN_FILE" ] || fail "cannot read ANS_SERVER_CHAIN_FILE"
+  CHAIN_PEM=$(cat "$ANS_SERVER_CHAIN_FILE")
+fi
+RENEWAL_REQ=$(jq -n --arg field "$CRED_FIELD" --arg pem "$CRED_PEM" --arg chain "$CHAIN_PEM" \
+  '{($field): $pem} + (if $chain == "" then {} else {serverCertificateChainPEM: $chain} end)')
 RENEWAL_RESP=$(curl_json POST "$AGENT_BASE/$AGENT/certificates/server/renewal" "$RENEWAL_REQ")
 renewal_status=$(printf '%s' "$RENEWAL_RESP" | jq -r '.status // empty')
 renewal_type=$(printf '%s' "$RENEWAL_RESP" | jq -r '.renewalType // empty')
@@ -238,16 +238,23 @@ if [ "$SKIP_VERIFY" = "1" ]; then
 fi
 
 # ----- 4. POST verify-acme (BYOC → sync COMPLETED) -----
+if [ -n "${ANS_DNS_ZONE:-}" ]; then
+  CH_NAME=$(printf '%s' "$RENEWAL_RESP" | jq -r 'first(.challenges[]? | select(.type == "DNS_01")).dnsRecord.name // empty')
+  CH_VALUE=$(printf '%s' "$RENEWAL_RESP" | jq -r 'first(.challenges[]? | select(.type == "DNS_01")).dnsRecord.value // empty')
+  [ -n "$CH_NAME" ] && [ -n "$CH_VALUE" ] || fail "renewal response has no DNS-01 challenge"
+  jq --arg id "$AGENT-renewal" --arg name "$CH_NAME" --arg value "$CH_VALUE" \
+    '.records[$id] = [{name:$name, type:"TXT", value:$value, ttl:60}]' \
+    "$ANS_DNS_ZONE" >"$ANS_DNS_ZONE.tmp" && mv "$ANS_DNS_ZONE.tmp" "$ANS_DNS_ZONE"
+fi
 header "POST $AGENT_BASE/$AGENT/certificates/server/renewal/verify-acme"
-# BYOC verification completes synchronously → 200 + COMPLETED.
-# CSR-based renewals (not supported on this lane) would be 202 +
-# ISSUING_CERTIFICATE.
+# BYOC and the local CSR issuer complete synchronously. External ACME
+# issuers may need renewal-acme-verify.sh to finish asynchronously.
 VERIFY_RESP=$(curl_json POST "$AGENT_BASE/$AGENT/certificates/server/renewal/verify-acme")
 final_status=$(printf '%s' "$VERIFY_RESP" | jq -r '.status // empty')
 if [ "$final_status" != "COMPLETED" ]; then
   fail "verify-acme status: got '$final_status', want COMPLETED"
 fi
-ok "renewal COMPLETED synchronously (BYOC)"
+ok "renewal COMPLETED synchronously ($PATH_MODE)"
 
 # ----- 5. Confirm final state via GET -----
 header "GET $AGENT_BASE/$AGENT/certificates/server/renewal  (expect COMPLETED)"

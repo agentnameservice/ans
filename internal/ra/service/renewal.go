@@ -120,10 +120,14 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 		// challenges relayed to the operator — comes from the issuer
 		// port, so an ACME provider's own tokens flow through
 		// untouched.
-		order, err := s.serverCA.CreateOrder(ctx, reg.AnsName.FQDN())
+		order, err := s.createServerOrder(ctx, reg.OwnerID, reg.AnsName.FQDN())
 		if err != nil {
 			return nil, domain.NewInternalError(
 				"CERT_ORDER_FAILED", "create certificate order", err)
+		}
+		prepared, err := orderWithOwnerProof(order, now.Add(renewalChallengeWindow))
+		if err != nil {
+			return nil, domain.NewInternalError("CERT_ORDER_FAILED", "prepare renewal domain proof", err)
 		}
 		csrID = uuid.NewString()
 		newCSR, err := reg.SubmitServerCSR(csrID, in.ServerCsrPEM, now)
@@ -136,7 +140,7 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 		if err := s.certs.SaveCSR(ctx, agentID, newCSR); err != nil {
 			return nil, err
 		}
-		renewal = domain.NewCSRRenewal(agentID, reg.ID, csrID, *order, now)
+		renewal = domain.NewCSRRenewal(agentID, reg.ID, csrID, prepared, now)
 
 	case byocSet:
 		v, err := s.validator.ValidateServerCertificate(ctx,
@@ -284,8 +288,8 @@ type VerifyRenewalACMEResult struct {
 // which issuer adapter is wired. Asynchronous issuers may leave the
 // order pending; the renewal then stays in ISSUING_CERTIFICATE
 // (derived) and a re-POST of verify-acme re-attempts the finalize —
-// the gate is skipped on re-driven calls because the provider already
-// accepted the challenge answer.
+// re-driven calls skip the gate only after the RA's successful domain
+// proof has been persisted.
 func (s *RegistrationService) VerifyRenewalACME(ctx context.Context, agentID string) (*VerifyRenewalACMEResult, error) {
 	now := s.clock()
 
@@ -316,32 +320,16 @@ func (s *RegistrationService) VerifyRenewalACME(ctx context.Context, agentID str
 		return nil, err
 	}
 
-	// A CSR renewal whose provider order came back already-validated
-	// (Let's Encrypt authorization reuse — CreateOrder returned no
-	// challenges) has nothing for the owner to publish, so the gate is
-	// skipped and the order is finalized directly. This is unambiguous:
-	// BYOC renewals always carry the RA's two self-issued challenges,
-	// and legacy renewals synthesize a DNS-01/HTTP-01 pair from their
-	// token columns, so only a born-ready provider order has none.
-	// A born-ready provider order (Let's Encrypt authorization reuse —
-	// CreateOrder returned no challenges) has nothing to gate on, so
-	// the gate is skipped and the order finalized directly. Otherwise
-	// at least one relayed artifact must be published (any-of: DNS-01
-	// TXT or HTTP-01 resource).
-	var verified []domain.ChallengeType
-	bornReady := len(r.Validation.Challenges) == 0 && r.RenewalType == domain.RenewalTypeCSR
-	if !bornReady {
-		var verr error
-		verified, verr = s.verifyChallengeArtifacts(ctx, reg.AnsName.FQDN(), r.Validation.Challenges)
-		if len(verified) == 0 {
-			if verr != nil {
-				return nil, fmt.Errorf("renewal acme verify: %w", verr)
-			}
-			return nil, domain.NewValidationError(
-				"ACME_CHALLENGE_MISSING",
-				"no domain-control challenge artifact found — publish the DNS-01 TXT record or the HTTP-01 resource from challenges",
-			)
+	// Cached provider authorization is not proof by the current caller.
+	verified, verr := s.verifyChallengeArtifacts(ctx, reg.AnsName.FQDN(), r.Validation.Challenges)
+	if len(verified) == 0 {
+		if verr != nil {
+			return nil, fmt.Errorf("renewal acme verify: %w", verr)
 		}
+		return nil, domain.NewValidationError(
+			"ACME_CHALLENGE_MISSING",
+			"no domain-control challenge artifact found — publish the DNS-01 TXT record or the HTTP-01 resource from challenges",
+		)
 	}
 
 	verifiedValidation, err := r.Validation.MarkVerified(now)
@@ -407,6 +395,7 @@ func (s *RegistrationService) finalizeCSRRenewal(
 		return nil, err
 	}
 	issued, err := s.serverCA.FinalizeOrder(ctx, port.FinalizeOrderRequest{
+		OwnerID:  reg.OwnerID,
 		OrderRef: r.Validation.OrderRef,
 		CSRPEM:   csr.CSRContent,
 		FQDN:     reg.AnsName.FQDN(),
