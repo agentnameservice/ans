@@ -176,10 +176,25 @@ trusting the TL operator beyond the advertised verifier keys:
 # Fetch receipt + keys + verify
 ans-verify -url https://tl.example.com -agent <agentId>
 
+# Or by name — resolves _ans-badge.<fqdn> for the agentId:
+ans-verify -fqdn agent.example.com
+
 # Or, air-gapped (receipt already on disk, key pinned in CI):
 ans-verify -pubkey ./trusted-tl.pub -agent <agentId> \
   -url file://./receipt.cbor
 ```
+
+`-fqdn` only locates the registration. It resolves the
+`_ans-badge.<fqdn>` TXT record the RA provisions, reads the `agentId`
+out of its `url=`, and then runs the steps below unchanged. A name with
+no resolvable badge exits nonzero: there is no fallback to SVCB endpoint
+discovery, no agent-card fetch, and no verdict for a name that is
+reachable but not registered in ANS. The badge also names a log, but it
+is published by the same operator as the agent, so an explicit `-url`
+wins and a badge that disagrees is reported; the badge's log is adopted
+only when `-url` was left at its default. `-dns host:port` aims the
+lookup at a specific resolver, which is how the local `ans-dns` dev
+server is reached.
 
 The verifier:
 

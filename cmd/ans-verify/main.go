@@ -7,7 +7,18 @@
 //
 //	ans-verify -url http://localhost:18081 -agent <agentId>
 //
-// With the above invocation the tool:
+// The agent can also be named by its FQDN, which is resolved through
+// the `_ans-badge.<fqdn>` TXT record the RA provisions:
+//
+//	ans-verify -fqdn agent.example.com
+//
+// That step only locates the registration: it reads the agentId (and,
+// unless -url says otherwise, the log) out of the badge and then runs
+// exactly the checks below. It does not fall back to SVCB endpoint
+// discovery or to fetching an agent card, and there is no outcome for a
+// name that is reachable but not registered in ANS.
+//
+// With either invocation the tool:
 //
 //  1. Fetches the TL's verification keys from /root-keys
 //     in the sumdb-note verification format.
@@ -69,6 +80,9 @@ func main() {
 	var (
 		baseURL         string
 		agentID         string
+		fqdn            string
+		dnsServer       string
+		dnsTimeout      time.Duration
 		pubKeyPEM       string
 		verbose         bool
 		checkMetadata   bool
@@ -79,6 +93,12 @@ func main() {
 		"Base URL of the transparency log")
 	flag.StringVar(&agentID, "agent", "",
 		"Agent ID (UUID) to verify")
+	flag.StringVar(&fqdn, "fqdn", "",
+		"Agent FQDN to verify; resolves _ans-badge.<fqdn> for the agent ID (alternative to -agent)")
+	flag.StringVar(&dnsServer, "dns", "",
+		"Resolver host:port for the -fqdn badge lookup (default: system resolver)")
+	flag.DurationVar(&dnsTimeout, "dns-timeout", 5*time.Second,
+		"Timeout for the -fqdn badge lookup")
 	flag.StringVar(&pubKeyPEM, "pubkey", "",
 		"Path to a PEM public key file (optional; default fetches /root-keys)")
 	flag.BoolVar(&verbose, "v", false,
@@ -89,19 +109,33 @@ func main() {
 		"Per-request timeout for step 7 descriptor fetches")
 	flag.Parse()
 
-	if agentID == "" {
+	if fqdn != "" && (agentID != "" || flag.NArg() > 0) {
+		fatalf("-fqdn and -agent name the agent two ways: pass one, not both")
+	}
+	if fqdn == "" && agentID == "" {
 		if flag.NArg() > 0 {
 			agentID = flag.Arg(0)
 		} else {
-			fmt.Fprintln(os.Stderr, "usage: ans-verify [flags] <agent-id>")
+			fmt.Fprintln(os.Stderr, "usage: ans-verify [flags] <agent-id> | -fqdn <fqdn>")
 			flag.PrintDefaults()
 			os.Exit(1)
 		}
 	}
 
+	urlExplicit := flagWasSet(flag.CommandLine, "url")
 	baseURL = strings.TrimRight(baseURL, "/")
 
 	fmt.Println("=== ANS SCITT Receipt Verifier ===")
+	if fqdn != "" {
+		agentID, baseURL = badgeStep(context.Background(), badgeStepInput{
+			FQDN:          fqdn,
+			Resolver:      dnsServer,
+			Timeout:       dnsTimeout,
+			ConfiguredURL: baseURL,
+			URLExplicit:   urlExplicit,
+			Out:           os.Stdout,
+		})
+	}
 	fmt.Printf("TL Base URL: %s\n", baseURL)
 	fmt.Printf("Agent ID:    %s\n", agentID)
 	fmt.Println()
