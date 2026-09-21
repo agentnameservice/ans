@@ -7,6 +7,12 @@ NR == 1 { next }
     if ($3 > 0) hit[$1] = 1
 }
 END {
+    if (minimum !~ /^[0-9]+(\.[0-9]+)?$/ || minimum + 0 <= 0 || minimum + 0 > 100) {
+        print "FAIL: minimum must be a percentage greater than 0 and at most 100 (pass -v minimum=N)"
+        exit 1
+    }
+    domain_minimum = 100
+    crypto_minimum = 95
     for (block in statements) {
         if (file[block] !~ /\/internal\//) continue
         total += statements[block]
@@ -27,9 +33,9 @@ END {
     printf "Coverage: internal %.2f%%, domain %.2f%%, crypto %.2f%%\n", \
         100 * covered / total, 100 * domain_covered / domain_total, \
         100 * crypto_covered / crypto_total
-    if (100 * covered < minimum * total || domain_covered != domain_total || \
-        100 * crypto_covered < 95 * crypto_total) {
-        printf "FAIL: require internal >= %s%%, domain = 100%%, crypto >= 95%%\n", minimum
+    if (100 * covered < minimum * total || 100 * domain_covered < domain_minimum * domain_total || \
+        100 * crypto_covered < crypto_minimum * crypto_total) {
+        printf "FAIL: require internal >= %s%%, domain = %s%%, crypto >= %s%%\n", minimum, domain_minimum, crypto_minimum
         exit 1
     }
     print "Coverage thresholds passed."
