@@ -1,0 +1,30 @@
+# Template: follow README.md to install with a generated service secret.
+server:
+  host: "127.0.0.1"
+  port: 18081
+auth:
+  type: static
+  static:
+    api-key: "__TL_SERVICE_KEY__"
+  public-read: true
+keys:
+  type: file
+  file:
+    path: "/var/lib/ans-tl/keys"
+store:
+  type: sqlite
+  sqlite:
+    path: "/var/lib/ans-tl/tl.db"
+merkle:
+  origin: "tl.ans.example.com"
+  tile-storage:
+    type: filesystem
+    filesystem:
+      path: "/var/lib/ans-tl/tiles"
+  checkpoint-interval: 10s
+attestation:
+  keyId: "ans-tl-example-attestation"
+producerKeys: []
+log:
+  level: info
+  format: json
