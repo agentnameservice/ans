@@ -164,12 +164,13 @@ func TestEnvelopeWrapper_CertExpiresAt_MissingPaths(t *testing.T) {
 
 func TestEnvelopeWrapper_CertExpiresAt_MalformedPayload(t *testing.T) {
 	t.Parallel()
-	raw := `{"payload": "not-an-object"}`
-	w, err := parseEnvelopeWrapper(raw)
-	if err != nil {
-		t.Fatalf("parseEnvelopeWrapper: %v", err)
-	}
-	if got := w.certExpiresAt(); !got.IsZero() {
-		t.Errorf("certExpiresAt: got %v, want zero", got)
+	for _, raw := range []string{
+		`{"payload":"not-an-object"}`,
+		`{"payload":{"producer":{"event":{"attestations":{"identityCerts":[{"notAfter":"invalid"}]}}}}}`,
+		`{"payload":{"producer":{"event":{"attestations":{"validServerCerts":[{"notAfter":"invalid"}]}}}}}`,
+	} {
+		if _, err := parseEnvelopeWrapper(raw); err == nil {
+			t.Fatalf("malformed certificate evidence accepted: %s", raw)
+		}
 	}
 }

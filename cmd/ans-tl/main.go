@@ -154,6 +154,7 @@ func run(cfgPath string) error {
 		}
 	}()
 
+	logger.Info().Str("path", lg.DataDir()).Msg("TL single-writer lock acquired")
 	eventStore := sqlitetl.NewEventStore(db)
 	cpStore := sqlitetl.NewCheckpointStore(db)
 	receiptStore := sqlitetl.NewReceiptStore(db)
@@ -175,7 +176,7 @@ func run(cfgPath string) error {
 	logSvc := service.NewLogService(
 		lg, eventStore, cpStore,
 		producerSig, km, signingKeyID, cfg.Merkle.Origin,
-	)
+	).WithLogger(logger)
 	// Drain in-flight checkpoint-persist goroutines before the
 	// underlying Tessera reader gets torn down.
 	defer logSvc.Close()
@@ -227,8 +228,14 @@ func run(cfgPath string) error {
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"status":"ok"}`))
 	})
-	r.Get("/v2/admin/ready", func(w http.ResponseWriter, _ *http.Request) {
+	r.Get("/v2/admin/ready", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+		if err := logSvc.Ready(r.Context()); err != nil {
+			logger.Warn().Err(err).Msg("TL readiness failed")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = w.Write([]byte(`{"status":"not_ready"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"status":"ready"}`))
 	})
 

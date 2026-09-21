@@ -23,13 +23,19 @@ import (
 
 // RecoverIndex restores committed leaves before the executable serves reads or
 // accepts writes. Append also runs recovery after any uncertain write failure.
+const indexLockWeight int64 = 1 << 20
+
 func (s *LogService) RecoverIndex(ctx context.Context) error {
 	select {
-	case s.ingestGate <- struct{}{}:
-		defer func() { <-s.ingestGate }()
+	case s.writerGate <- struct{}{}:
+		defer func() { <-s.writerGate }()
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+	if err := s.indexGate.Acquire(ctx, indexLockWeight); err != nil {
+		return err
+	}
+	defer s.indexGate.Release(indexLockWeight)
 	s.indexReady = false
 	if err := s.recoverIndex(ctx); err != nil {
 		return err
@@ -38,24 +44,21 @@ func (s *LogService) RecoverIndex(ctx context.Context) error {
 	return nil
 }
 
-// lockIndexedRead linearizes current-state reads with append/index writes.
-// After a failed mirror write, a healthy SQLite read must not mint an ACTIVE
-// token from an older row while a revocation is already committed in Tessera.
+// Healthy readers share the index fence. A failed/uncertain mirror is repaired
+// only under exclusive ownership; no lock upgrade is attempted while reading.
 func (s *LogService) lockIndexedRead(ctx context.Context) (func(), error) {
-	select {
-	case s.ingestGate <- struct{}{}:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
-	unlock := func() { <-s.ingestGate }
-	if !s.indexReady {
-		if err := s.recoverIndex(ctx); err != nil {
-			unlock()
-			return nil, fmt.Errorf("log: recover event index before read: %w", err)
+	for {
+		if err := s.indexGate.Acquire(ctx, 1); err != nil {
+			return nil, err
 		}
-		s.indexReady = true
+		if s.indexReady {
+			return func() { s.indexGate.Release(1) }, nil
+		}
+		s.indexGate.Release(1)
+		if err := s.RecoverIndex(ctx); err != nil {
+			return nil, fmt.Errorf("recover index before read: %w", err)
+		}
 	}
-	return unlock, nil
 }
 
 func (s *LogService) duplicateResult(ctx context.Context, rec *sqlitetl.EventRecord) (*AppendResult, error) {
@@ -180,7 +183,17 @@ func innerEventBytes(raw []byte) ([]byte, error) {
 // accepting more writes. It includes unpublished but integrated leaves, so a
 // restart or failed mirror INSERT cannot turn a retry into another append.
 // It never regenerates a log ID, timestamp, signature, or canonical leaf.
-func (s *LogService) recoverIndex(ctx context.Context) error {
+func (s *LogService) recoverIndex(ctx context.Context) (resultErr error) {
+	start := time.Now()
+	var restored uint64
+	s.logger.Info().Msg("recovering event index")
+	defer func() {
+		if resultErr != nil {
+			s.logger.Error().Err(resultErr).Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovery failed")
+		} else {
+			s.logger.Info().Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovered")
+		}
+	}()
 	next, err := s.events.FirstUnindexedLeaf(ctx)
 	if err != nil {
 		return err
@@ -194,6 +207,7 @@ func (s *LogService) recoverIndex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	s.logger.Info().Uint64("firstUnindexedLeaf", next).Uint64("indexedSize", indexedSize).Uint64("logSize", size).Msg("event index recovery bounds")
 	if indexedSize > size {
 		return fmt.Errorf("index extends beyond the integrated log: index=%d log=%d", indexedSize, size)
 	}
@@ -216,6 +230,7 @@ func (s *LogService) recoverIndex(ctx context.Context) error {
 			if err := s.restoreIndexedLeaf(ctx, next, bundle.Entries[offset], hashes[hashOffset]); err != nil {
 				return fmt.Errorf("restore leaf %d: %w", next, err)
 			}
+			restored++
 			next++
 			offset++
 			hashOffset++

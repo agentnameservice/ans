@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog"
 	"github.com/transparency-dev/tessera"
+	"golang.org/x/sync/semaphore"
 
 	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
 	anscrypto "github.com/agentnameservice/ans/internal/crypto"
@@ -43,6 +45,7 @@ import (
 // The producer-key trust store and a KeyManager for the TL-attestation
 // key are injected so unit tests can substitute fakes.
 type LogService struct {
+	logger      zerolog.Logger
 	log         *logstore.Log
 	events      *sqlitetl.EventStore
 	checkpoints *sqlitetl.CheckpointStore
@@ -54,7 +57,8 @@ type LogService struct {
 	uuidFn      func() (string, error)
 	// Serialize the database check, append, and mirror commit. Recovery runs
 	// before another append after any uncertain write and after restart.
-	ingestGate chan struct{}
+	writerGate chan struct{}
+	indexGate  *semaphore.Weighted
 	indexReady bool
 
 	// shutdownCtx is cancelled when Close is called; the per-append
@@ -106,6 +110,7 @@ func NewLogService(
 ) *LogService {
 	shutdownCtx, shutdownCancel := context.WithCancel(context.Background())
 	return &LogService{
+		logger:         zerolog.Nop(),
 		shutdownCtx:    shutdownCtx,
 		shutdownCancel: shutdownCancel,
 		log:            log,
@@ -115,7 +120,8 @@ func NewLogService(
 		attestKM:       attestKM,
 		attestKeyID:    attestKeyID,
 		originRAID:     originRAID,
-		ingestGate:     make(chan struct{}, 1),
+		writerGate:     make(chan struct{}, 1),
+		indexGate:      semaphore.NewWeighted(indexLockWeight),
 		nowFn:          func() time.Time { return time.Now().UTC() },
 		// UUIDv7: time-ordered, per the logId contract in the TL API
 		// spec and the served event schemas.
@@ -127,6 +133,12 @@ func NewLogService(
 			return id.String(), nil
 		},
 	}
+}
+
+// WithLogger installs structured lifecycle diagnostics during construction.
+func (s *LogService) WithLogger(logger zerolog.Logger) *LogService {
+	s.logger = logger.With().Str("component", "tl-log").Logger()
+	return s
 }
 
 // WithClock overrides the time source (for tests). Not safe during
@@ -193,16 +205,26 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 	eventHash := sqlitetl.ComputeEventHash(innerCanonical)
 
 	select {
-	case s.ingestGate <- struct{}{}:
-		defer func() { <-s.ingestGate }()
+	case s.writerGate <- struct{}{}:
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+	releaseWriter := true
+	defer func() {
+		if releaseWriter {
+			<-s.writerGate
+		}
+	}()
 	if !s.indexReady {
-		if err := s.recoverIndex(ctx); err != nil {
+		if err := s.indexGate.Acquire(ctx, indexLockWeight); err != nil {
+			return nil, err
+		}
+		err := s.recoverIndex(ctx)
+		s.indexReady = err == nil
+		s.indexGate.Release(indexLockWeight)
+		if err != nil {
 			return nil, fmt.Errorf("log: recover event index: %w", err)
 		}
-		s.indexReady = true
 	}
 
 	if dup, existingIdx, derr := s.events.ExistsByEventHash(ctx, eventHash); derr != nil {
@@ -230,6 +252,7 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 		}, nil
 	}
 	if existing, err := s.checkAgentState(ctx, env, innerCanonical); err != nil {
+		s.logger.Warn().Err(err).Str("ansName", env.AnsName()).Str("eventType", env.EventType()).Msg("agent event rejected")
 		return nil, err
 	} else if existing != nil {
 		return s.duplicateResult(ctx, existing)
@@ -256,40 +279,68 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 		return nil, err
 	}
 
-	// 5. Append to Tessera — now the envelope is complete, so leaf bytes
-	//    reflect the outer signature as well.
-	res, err := s.log.Append(ctx, env)
-	if err != nil {
-		s.indexReady = false
-		return nil, fmt.Errorf("log: tessera append: %w", err)
+	// A submitted append may commit even after the request is cancelled. The
+	// bounded single writer owns the operation until its outcome is known;
+	// current-state reads remain fenced for that entire uncertain interval.
+	if err := s.indexGate.Acquire(ctx, indexLockWeight); err != nil {
+		return nil, err
 	}
-
-	// 6. Persist the mirror row. The store takes event.View, so V1
-	//    and V2 both land through this single path.
-	if _, err := s.events.StoreEvent(ctx, res.LeafIndex, res.LeafHash, eventHash, env, res.Canonical); err != nil {
-		s.indexReady = false
-		return nil, fmt.Errorf("log: store event: %w", err)
+	s.indexReady = false
+	type completion struct {
+		result *AppendResult
+		err    error
 	}
-
-	// 7. Persist the covering checkpoint asynchronously. Matches the
-	//    reference TL's `AwaitPublication` flow: block (in a
-	//    goroutine) until Tessera has signed + published a checkpoint
-	//    that covers this leaf, then upsert the DB mirror. The
-	//    goroutine watches the service's shutdown ctx so Close drains
-	//    it rather than leaking the persistence wait.
+	done := make(chan completion, 1)
+	releaseWriter = false
 	s.wg.Add(1)
 	go func() {
 		defer s.wg.Done()
-		s.awaitAndStoreCheckpoint(res.Future)
+		defer func() { <-s.writerGate }()
+		defer s.indexGate.Release(indexLockWeight)
+		result, err := s.completeAppend(s.shutdownCtx, env, eventHash, logID)
+		done <- completion{result, err}
 	}()
+	select {
+	case completed := <-done:
+		return completed.result, completed.err
+	case <-ctx.Done():
+		s.logger.Warn().Err(ctx.Err()).Str("logId", logID).Msg("request stopped waiting; append remains fenced until resolved")
+		return nil, ctx.Err()
+	}
+}
 
-	return &AppendResult{
-		LogID:     logID,
-		LeafIndex: res.LeafIndex,
-		LeafHash:  res.LeafHash,
-		Duplicate: res.IsDuplicate,
-		TreeSize:  res.LeafIndex + 1,
-	}, nil
+// completeAppend runs with both writer and exclusive index ownership. Returning
+// an error keeps indexReady false until a subsequent recovery succeeds.
+func (s *LogService) completeAppend(ctx context.Context, env event.Signable, eventHash, logID string) (*AppendResult, error) {
+	res, err := s.log.Append(ctx, env)
+	if err != nil {
+		s.logger.Error().Err(err).Str("logId", logID).Msg("append failed; index recovery required")
+		return nil, fmt.Errorf("log: tessera append: %w", err)
+	}
+	if res.IsDuplicate {
+		// Antispam is a defensive guard for byte-identical signed envelopes;
+		// normal producer retries are deduplicated before outer signing.
+		if err := s.recoverIndex(ctx); err != nil {
+			return nil, err
+		}
+		rec, err := s.events.GetEventByLeafIndex(ctx, res.LeafIndex)
+		if err != nil {
+			return nil, err
+		}
+		if rec.RawEvent != string(res.Canonical) {
+			return nil, errors.New("duplicate leaf bytes disagree with index")
+		}
+		s.indexReady = true
+		return s.duplicateResult(ctx, rec)
+	}
+	if _, err := s.events.StoreEvent(ctx, res.LeafIndex, res.LeafHash, eventHash, env, res.Canonical); err != nil {
+		s.logger.Error().Err(err).Str("logId", logID).Uint64("leafIndex", res.LeafIndex).Msg("event index write failed; current-state reads require recovery")
+		return nil, fmt.Errorf("log: store event: %w", err)
+	}
+	s.indexReady = true
+	s.wg.Add(1)
+	go func() { defer s.wg.Done(); s.awaitAndStoreCheckpoint(res.Future) }()
+	return &AppendResult{LogID: logID, LeafIndex: res.LeafIndex, LeafHash: res.LeafHash, TreeSize: res.LeafIndex + 1}, nil
 }
 
 // setOuterSignature populates the envelope's outer TL-attestation
