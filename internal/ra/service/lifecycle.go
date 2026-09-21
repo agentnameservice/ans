@@ -993,7 +993,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// is the single terminal transition that marks the agent live in the
 	// log; we submit it to the TL INLINE and report the agent ACTIVE only
 	// after the TL acknowledges the seal — mirroring the identity lane. A
-	// failed seal IS a failed activation: nothing is committed, the agent
+	// failed seal IS a failed activation: the prepared evidence persists, the agent
 	// stays PENDING_DNS, and the operator retries verify-dns once the TL is
 	// reachable. This is what makes a downstream catalog entry's
 	// SCITT-receipt/badge links point at TL records that actually exist.
@@ -1025,17 +1025,9 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// ACTIVE" and "activation is feed-visible" are the same fact; the
 	// worker never touches it (Claim skips sent rows).
 	//
-	// The seal round trip above is a window a commit failure or a lost
-	// race can land in: the agent then stays PENDING_DNS (or REVOKED, if
-	// a rival cancelled it) and its already-sealed AGENT_REGISTERED leaf
-	// is orphaned. A retry recomputes `now`, so its leaf carries fresh
-	// timestamps and a fresh content hash — TL dedup will not match,
-	// appending a second leaf (and, on commit, a second feed row). That
-	// is the intended benign residue, accepted exactly as on the
-	// identity lane: agent status keys on the store row by agentId,
-	// read-side status derives from any terminal leaf, and feed
-	// consumers apply events idempotently by agentId, so the residue is
-	// invisible to verifiers, badges, and discovery.
+	// The durable activation payload is prepared before submission. A retry
+	// after an uncertain seal or failed local commit replays its exact bytes
+	// and signature, even if current DNS observations have since changed.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
 		return s.commitActivation(txCtx, reg, sealed)
 	}); err != nil {
