@@ -262,3 +262,5 @@ install a backup schedule or certificate-installation automation.
 
 This guide covers RA/TL only. An A2A/MCP agent, its ANS authentication,
 metadata, and any application frontend are separate deployments.
+
+For existing installations, follow the [certificate lifecycle and TL recovery upgrade notes](../../docs/operations/deployment-fix-upgrade.md) before replacing binaries.
