@@ -293,8 +293,12 @@ func (s *RegistrationService) submitIdentityCSR(ctx context.Context, agentID, cs
 		}
 		return s.enqueueCertificateRenewal(txCtx, reg, evidence, schemaVersion)
 	}); err != nil {
+		s.logCertificateFailure(err, agentID, 0, schemaVersion, "identity rotation transaction failed")
 		return "", err
 	}
+	s.logger.Info().Str("agentId", agentID).Str("fqdn", reg.FQDN()).
+		Str("csrId", csrID).Str("schemaVersion", schemaVersion).
+		Msg("identity rotation and publication event committed")
 	return csrID, nil
 }
 

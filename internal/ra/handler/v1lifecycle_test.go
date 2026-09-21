@@ -412,3 +412,14 @@ func TestV1Revoke_NotOwned_403(t *testing.T) {
 		t.Fatalf("want 403, got %d body=%s", rec.Code, rec.Body)
 	}
 }
+
+func assertV1RenewalLane(t *testing.T, fx *handlerFixture) {
+	t.Helper()
+	rows, err := fx.outbox.Claim(t.Context(), 100)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("expected one renewal event: %v %v", rows, err)
+	}
+	if rows[0].SchemaVersion != "V1" || rows[0].EventType != "AGENT_RENEWED" {
+		t.Fatalf("V1 handler used wrong lane: %+v", rows[0])
+	}
+}

@@ -120,6 +120,8 @@ func TestV1SubmitIdentityCSR_AcceptsRotation(t *testing.T) {
 	if resp.CsrID == "" {
 		t.Error("csrId missing on 202")
 	}
+	assertV1RenewalLane(t, fx)
+
 }
 
 // TestV1SubmitServerCSR_AcceptsRegardlessOfStatus: the reference

@@ -247,7 +247,7 @@ func (s *RegistrationService) CancelServerCertRenewal(ctx context.Context, agent
 	// Bind cancellation to the renewal observed on entry, then recheck its
 	// state under the same transaction that rejects the CSR and removes it.
 	// Completion or replacement between those reads must not be erased.
-	return s.uow.Run(ctx, func(txCtx context.Context) error {
+	err = s.uow.Run(ctx, func(txCtx context.Context) error {
 		current, err := s.renewals.FindByAgentID(txCtx, agentID)
 		if err != nil {
 			return err
@@ -263,6 +263,13 @@ func (s *RegistrationService) CancelServerCertRenewal(ctx context.Context, agent
 		}
 		return s.renewals.Delete(txCtx, current.ID)
 	})
+	if err != nil {
+		s.logCertificateFailure(err, agentID, r.ID, "", "renewal cancellation failed")
+		return err
+	}
+	s.logger.Info().Str("agentId", agentID).Int64("renewalId", r.ID).Msg("pending renewal cancellation committed")
+	return nil
+
 }
 
 func (s *RegistrationService) rejectRenewalCSR(ctx context.Context, agentID string, r *domain.ServerCertificateRenewal) error {
@@ -411,6 +418,10 @@ func (s *RegistrationService) finalizeCSRRenewal(
 	if err != nil {
 		return nil, err
 	}
+	evidence, err := s.observeRenewalDNS(ctx, reg)
+	if err != nil {
+		return nil, err
+	}
 	issued, err := s.serverCA.FinalizeOrder(ctx, port.FinalizeOrderRequest{
 		OwnerID:  reg.OwnerID,
 		OrderRef: r.Validation.OrderRef,
@@ -459,7 +470,7 @@ func (s *RegistrationService) finalizeCSRRenewal(
 	if err != nil {
 		return nil, err
 	}
-	if err := s.commitCertificateRenewal(ctx, reg, r, newCert, &signedCSR, schemaVersion, now); err != nil {
+	if err := s.commitCertificateRenewal(ctx, reg, r, newCert, &signedCSR, evidence, schemaVersion, now); err != nil {
 		return nil, err
 	}
 	tlsa := domain.TLSARecordForCert(reg.AnsName.FQDN(), v.Fingerprint)
@@ -470,6 +481,10 @@ func (s *RegistrationService) finalizeBYOCRenewal(
 	ctx context.Context, reg *domain.AgentRegistration, r *domain.ServerCertificateRenewal,
 	schemaVersion string, now time.Time,
 ) (*VerifyRenewalACMEResult, error) {
+	evidence, err := s.observeRenewalDNS(ctx, reg)
+	if err != nil {
+		return nil, err
+	}
 	v, err := s.validator.ValidateServerCertificate(ctx, r.ByocCertPEM, r.ByocChainPEM, reg.FQDN())
 	if err != nil {
 		return nil, domain.NewCertificateError("INVALID_BYOC_CERT", "renewal certificate validation failed: "+err.Error())
@@ -480,7 +495,7 @@ func (s *RegistrationService) finalizeBYOCRenewal(
 		IssuerDN: v.IssuerDN, ValidFromTimestamp: v.ValidFrom,
 		ValidToTimestamp: v.ValidTo, Fingerprint: v.Fingerprint,
 	}
-	if err := s.commitCertificateRenewal(ctx, reg, r, newCert, nil, schemaVersion, now); err != nil {
+	if err := s.commitCertificateRenewal(ctx, reg, r, newCert, nil, evidence, schemaVersion, now); err != nil {
 		return nil, err
 	}
 	tlsa := domain.TLSARecordForCert(reg.FQDN(), v.Fingerprint)
@@ -492,16 +507,12 @@ func (s *RegistrationService) finalizeBYOCRenewal(
 func (s *RegistrationService) commitCertificateRenewal(
 	ctx context.Context, reg *domain.AgentRegistration, r *domain.ServerCertificateRenewal,
 	cert *domain.ByocServerCertificate, signedCSR *domain.AgentCSR,
-	schemaVersion string, now time.Time,
+	evidence *renewalEvidence, schemaVersion string, now time.Time,
 ) error {
-	evidence, err := s.observeRenewalDNS(ctx, reg)
-	if err != nil {
-		return err
-	}
 	if err := r.MarkCompleted(now); err != nil {
 		return err
 	}
-	return s.uow.Run(ctx, func(txCtx context.Context) error {
+	err := s.uow.Run(ctx, func(txCtx context.Context) error {
 		current, err := s.agents.FindByAgentID(txCtx, reg.AgentID)
 		if err != nil {
 			return err
@@ -533,6 +544,17 @@ func (s *RegistrationService) commitCertificateRenewal(
 		}
 		return s.enqueueCertificateRenewal(txCtx, reg, evidence, schemaVersion)
 	})
+	if err != nil {
+		s.logCertificateFailure(err, reg.AgentID, r.ID, schemaVersion, "certificate renewal transaction failed")
+		return err
+	}
+	s.logger.Info().Str("agentId", reg.AgentID).Str("fqdn", reg.FQDN()).
+		Int64("renewalId", r.ID).Str("fingerprint", cert.Fingerprint).
+		Time("notAfter", cert.ValidToTimestamp).Str("schemaVersion", schemaVersion).
+		Int("dnsRecordsAttested", len(evidence.records)).
+		Msg("certificate renewal and publication event committed")
+	return nil
+
 }
 
 // generateChallengeTokens returns a pair of base64url-encoded random

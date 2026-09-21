@@ -3,7 +3,6 @@ package service
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/agentnameservice/ans/internal/domain"
@@ -38,16 +37,37 @@ func (s *RegistrationService) observeRenewalDNS(ctx context.Context, reg *domain
 	}
 	expected := s.ComputeRequiredDNSRecords(reg)
 	result, err := s.dnsVerifier.VerifyRecords(ctx, reg.FQDN(), expected)
-	if err != nil {
-		return nil, fmt.Errorf("observe renewal DNS: %w", err)
-	}
-	if result == nil {
-		return nil, errors.New("observe renewal DNS: verifier returned no result")
+	// Observation is not fresh domain proof. A resolver outage does not
+	// prohibit rotation, but must never become positive DNS attestation.
+	if err != nil || result == nil {
+		s.logger.Warn().Err(err).Str("agentId", reg.AgentID).Str("fqdn", reg.FQDN()).
+			Msg("renewal DNS observation unavailable; no DNS records attested")
+		evidence.results = []port.RecordVerification{}
+		return evidence, nil
 	}
 	evidence.results = result.Results
-	for _, r := range result.Results {
-		if r.Found {
-			evidence.records = append(evidence.records, r.Record)
+	if evidence.results == nil {
+		evidence.results = []port.RecordVerification{}
+	}
+	attested, dropped := attestedDNSRecords(expected, evidence.results)
+	evidence.records = attested
+	if len(dropped) > 0 {
+		ev := s.logger.Info()
+		if droppedForLookupError(dropped) {
+			ev = s.logger.Warn()
+		}
+		ev.Str("agentId", reg.AgentID).Str("fqdn", reg.FQDN()).
+			Int("expectedCount", len(expected)).Int("attestedCount", len(attested)).
+			Interface("droppedRecords", dropped).
+			Msg("omitting unverified DNS records from renewal attestation")
+	}
+	for _, result := range evidence.results {
+		if result.DNSSECVerified && !result.Found && result.Actual != "" {
+			// Renewal may repair DNS/certificate drift. Surface the authenticated
+			// mismatch without sealing the expected value or blocking rotation.
+			s.logger.Error().Str("agentId", reg.AgentID).Str("fqdn", reg.FQDN()).
+				Interface("record", result.Record).Str("actual", result.Actual).
+				Msg("authenticated DNS mismatch during renewal observation")
 		}
 	}
 	return evidence, nil
@@ -137,4 +157,13 @@ func serverCertsForAttestation(certs []*domain.ByocServerCertificate, now time.T
 		return []*domain.ByocServerCertificate{lastExpired}
 	}
 	return valid
+}
+
+// Logging belongs outside the transaction so success means a committed change.
+func (s *RegistrationService) logCertificateFailure(err error, agentID string, renewalID int64, lane, message string) {
+	ev := s.logger.Error()
+	if errors.Is(err, domain.ErrValidation) || errors.Is(err, domain.ErrInvalidState) || errors.Is(err, domain.ErrConflict) {
+		ev = s.logger.Warn()
+	}
+	ev.Err(err).Str("agentId", agentID).Int64("renewalId", renewalID).Str("schemaVersion", lane).Msg(message)
 }
