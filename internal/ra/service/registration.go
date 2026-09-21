@@ -35,6 +35,11 @@ import (
 // picks it up automatically. No explicit `*sql.Tx` parameter — that
 // would leak SQL details into the port.
 type OutboxEnqueuer interface {
+	// Activation uses durable evidence but still seals synchronously. These
+	// records are never claimable by the asynchronous delivery worker.
+	LoadActivationSeal(ctx context.Context, agentID string) (string, []byte, error)
+	PrepareActivationSeal(ctx context.Context, agentID, schemaVersion string, payload []byte) (string, []byte, error)
+
 	Enqueue(ctx context.Context, eventType, agentID, schemaVersion string, payload []byte, earliestAttempt time.Time) (int64, error)
 	// RecordSealed inserts a row that is already delivered (sent + logId
 	// set at insert), invisible to the worker's Claim. Used by the inline
@@ -335,6 +340,12 @@ func (s *RegistrationService) WithDNSVerifier(v port.DNSVerifier) *RegistrationS
 	return s
 }
 
+// WithClock sets the clock during construction, before concurrent use.
+func (s *RegistrationService) WithClock(clock func() time.Time) *RegistrationService {
+	s.clock = clock
+	return s
+}
+
 // RegisterAgent implements the V2 registration flow:
 //  1. Validate the request shape via domain constructors.
 //  2. Check ANS name uniqueness.
@@ -546,9 +557,7 @@ func (s *RegistrationService) resolveServerCertInput(
 	}
 	created, err := s.createServerOrder(ctx, req.OwnerID, req.AnsName.FQDN())
 	if err != nil {
-		return serverCertInput{}, domain.NewInternalError(
-			"CERT_ORDER_FAILED", "create certificate order", err,
-		)
+		return serverCertInput{}, certificateProviderError(err, "CERT_ORDER_FAILED", "create certificate order")
 	}
 	order, err := orderWithOwnerProof(created, now.Add(registrationChallengeWindow))
 	if err != nil {
@@ -801,7 +810,7 @@ type sealedActivation struct {
 // signs it once, and submits it to the TL inline, returning only on the
 // seal acknowledgment — seal-before-success for activation (ANS-1 §12.3,
 // mirroring the identity lane). A failed seal is a failed activation:
-// nothing is committed and the agent stays PENDING_DNS for the operator to
+// signed evidence remains durable and the agent stays PENDING_DNS for the operator to
 // retry. A nil sealer fails closed with TL_UNAVAILABLE — there is no "seal
 // later" mode for the ACTIVE transition.
 //
@@ -819,15 +828,46 @@ func (s *RegistrationService) sealActivationEvent(
 			"agent sealing is not configured; activation cannot report success without a sealed event")
 	}
 
-	schemaVer, innerCanonical, err := s.buildActivationLeaf(ctx, reg, expected, perRecord, schemaVersion, now)
-	if err != nil {
-		return nil, err
+	if s.outbox == nil {
+		return nil, domain.NewUnavailableError("TL_UNAVAILABLE", "durable activation evidence storage is not configured")
 	}
-
-	producerSig, err := s.signCanonical(ctx, innerCanonical, now)
+	schemaVer, payload, err := s.outbox.LoadActivationSeal(ctx, reg.AgentID)
 	if err != nil {
-		return nil, fmt.Errorf("sign agent event: %w", err)
+		return nil, fmt.Errorf("load activation evidence: %w", err)
 	}
+	if payload == nil {
+		lane, canonical, err := s.buildActivationLeaf(ctx, reg, expected, perRecord, schemaVersion, now)
+		if err != nil {
+			return nil, err
+		}
+		signature, err := s.signCanonical(ctx, canonical, now)
+		if err != nil {
+			return nil, fmt.Errorf("sign agent event: %w", err)
+		}
+		candidate, err := json.Marshal(OutboxPayload{InnerEventCanonical: json.RawMessage(canonical), ProducerSignature: signature})
+		if err != nil {
+			return nil, fmt.Errorf("marshal activation evidence: %w", err)
+		}
+		schemaVer, payload, err = s.outbox.PrepareActivationSeal(ctx, reg.AgentID, lane, candidate)
+		if err != nil {
+			return nil, fmt.Errorf("persist activation evidence: %w", err)
+		}
+	}
+	requestedLane := "V2"
+	if isV1Lane(schemaVersion) {
+		requestedLane = "V1"
+	}
+	if schemaVer != requestedLane {
+		return nil, domain.NewConflictError("ACTIVATION_LANE_CONFLICT", "retry activation using the API version that prepared its signed evidence")
+	}
+	var persisted OutboxPayload
+	if err := json.Unmarshal(payload, &persisted); err != nil {
+		return nil, fmt.Errorf("decode persisted activation evidence: %w", err)
+	}
+	if len(persisted.InnerEventCanonical) == 0 || persisted.ProducerSignature == "" {
+		return nil, errors.New("persisted activation evidence is incomplete")
+	}
+	innerCanonical, producerSig := []byte(persisted.InnerEventCanonical), persisted.ProducerSignature
 
 	sealCtx, cancel := context.WithTimeout(ctx, s.sealTimeout)
 	defer cancel()
@@ -861,16 +901,8 @@ func (s *RegistrationService) sealActivationEvent(
 		Dur("sealDuration", s.clock().Sub(sealStart)).
 		Msg("agent activation event sealed")
 
-	// Persist exactly the bytes the TL verified — the same
-	// {innerEventCanonical, producerSignature} wrapper worker-delivered
-	// rows carry, so the feed's projection parses both identically.
-	payload, err := json.Marshal(OutboxPayload{
-		InnerEventCanonical: json.RawMessage(innerCanonical),
-		ProducerSignature:   producerSig,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("marshal sealed activation payload: %w", err)
-	}
+	// The original payload was durably prepared before the first seal attempt.
+
 	return &sealedActivation{SchemaVersion: schemaVer, Payload: payload, LogID: logID}, nil
 }
 

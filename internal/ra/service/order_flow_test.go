@@ -127,8 +127,8 @@ type asyncIssuer struct {
 	lastVerified []domain.ChallengeType
 }
 
-func (a *asyncIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
-	return a.real.CreateOrder(ctx, fqdn)
+func (a *asyncIssuer) CreateOrder(ctx context.Context, req port.CreateOrderRequest) (*domain.CertificateOrder, error) {
+	return a.real.CreateOrder(ctx, req)
 }
 
 func (a *asyncIssuer) FinalizeOrder(ctx context.Context, req port.FinalizeOrderRequest) (*port.IssuedCert, error) {
@@ -751,8 +751,8 @@ func TestVerifyACME_ACMEIssuer_EndToEnd(t *testing.T) {
 // succeeds straight away (no challenge was ever published locally).
 type bornReadyIssuer struct{ real port.ServerCertificateIssuer }
 
-func (b bornReadyIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
-	o, err := b.real.CreateOrder(ctx, fqdn)
+func (b bornReadyIssuer) CreateOrder(ctx context.Context, req port.CreateOrderRequest) (*domain.CertificateOrder, error) {
+	o, err := b.real.CreateOrder(ctx, req)
 	if err != nil {
 		return nil, err
 	}
@@ -801,8 +801,8 @@ func TestVerifyACME_BornReadyOrder_RequiresOwnerProof(t *testing.T) {
 // the SERVER_CERT_SELFVERIFY_FAILED guard on both lanes.
 type badCertIssuer struct{ real port.ServerCertificateIssuer }
 
-func (b badCertIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
-	return b.real.CreateOrder(ctx, fqdn)
+func (b badCertIssuer) CreateOrder(ctx context.Context, req port.CreateOrderRequest) (*domain.CertificateOrder, error) {
+	return b.real.CreateOrder(ctx, req)
 }
 func (b badCertIssuer) FinalizeOrder(_ context.Context, _ port.FinalizeOrderRequest) (*port.IssuedCert, error) {
 	return &port.IssuedCert{CertPEM: "-----BEGIN CERTIFICATE-----\nbogus\n-----END CERTIFICATE-----\n"}, nil
@@ -1113,8 +1113,8 @@ type refOnlyIssuer struct {
 	finalizeCalls int
 }
 
-func (r *refOnlyIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
-	return r.real.CreateOrder(ctx, fqdn)
+func (r *refOnlyIssuer) CreateOrder(ctx context.Context, req port.CreateOrderRequest) (*domain.CertificateOrder, error) {
+	return r.real.CreateOrder(ctx, req)
 }
 func (r *refOnlyIssuer) FinalizeOrder(ctx context.Context, req port.FinalizeOrderRequest) (*port.IssuedCert, error) {
 	r.finalizeCalls++
@@ -1331,7 +1331,7 @@ func TestVerifyDNS_UnrecordedGateMethod_OmitsDomainValidation(t *testing.T) {
 // Compile-time interface checks for the fakes and the ACME adapter.
 var (
 	_ port.ServerCertificateIssuer = (*asyncIssuer)(nil)
-	_ port.ServerCertificateIssuer = (*cert.ACMEIssuer)(nil)
+	_ port.ServerCertificateIssuer = (*cert.OwnerScopedACMEIssuer)(nil)
 	_ port.DNSVerifier             = failingDNSVerifier{}
 	_ port.DNSVerifier             = challengeBlindDNSVerifier{}
 	_ port.HTTPChallengeVerifier   = staticHTTPVerifier{}

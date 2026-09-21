@@ -442,3 +442,10 @@ func parseTestURI(t *testing.T, s string) []*url.URL {
 	}
 	return []*url.URL{u}
 }
+
+func (failingOutbox) LoadActivationSeal(context.Context, string) (string, []byte, error) {
+	return "", nil, errors.New("activation storage failure")
+}
+func (failingOutbox) PrepareActivationSeal(context.Context, string, string, []byte) (string, []byte, error) {
+	return "", nil, errors.New("activation storage failure")
+}

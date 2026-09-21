@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"fmt"
+	"github.com/agentnameservice/ans/internal/domain"
 	"time"
 )
 
@@ -29,6 +30,35 @@ func parseEnvelopeWrapper(raw string) (*envelopeWrapper, error) {
 	var w envelopeWrapper
 	if err := json.Unmarshal([]byte(raw), &w); err != nil {
 		return nil, fmt.Errorf("service: parse envelope wrapper: %w", err)
+	}
+	var payload struct {
+		Producer struct {
+			Event struct {
+				ExpiresAt    string `json:"expiresAt"`
+				Attestations struct {
+					Identity       []certInfoView `json:"identityCerts"`
+					Server         []certInfoView `json:"serverCerts"`
+					LegacyIdentity []certInfoView `json:"validIdentityCerts"`
+					LegacyServer   []certInfoView `json:"validServerCerts"`
+				} `json:"attestations"`
+			} `json:"event"`
+		} `json:"producer"`
+	}
+	if len(w.Payload) > 0 {
+		if err := json.Unmarshal(w.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode attested certificate dates: %w", err)
+		}
+		event := payload.Producer.Event
+		if _, err := domain.ParseAttestedExpiry(event.ExpiresAt); err != nil {
+			return nil, err
+		}
+		for _, family := range [][]certInfoView{event.Attestations.Identity, event.Attestations.Server, event.Attestations.LegacyIdentity, event.Attestations.LegacyServer} {
+			for _, cert := range family {
+				if _, err := domain.ParseAttestedExpiry(cert.NotAfter); err != nil {
+					return nil, err
+				}
+			}
+		}
 	}
 	return &w, nil
 }
@@ -89,13 +119,13 @@ func (w *envelopeWrapper) certExpiresAt() time.Time {
 	if len(server) == 0 && attest.ServerCert != nil {
 		server = append(server, *attest.ServerCert)
 	}
-	fallback, _ := time.Parse(time.RFC3339, payload.Producer.Event.ExpiresAt)
+	fallback, _ := domain.ParseAttestedExpiry(payload.Producer.Event.ExpiresAt)
 	var earliest time.Time
 	for _, family := range [][]certInfoView{identity, server} {
 		var latest time.Time
 		for _, c := range family {
-			t, err := time.Parse(time.RFC3339, c.NotAfter)
-			if err != nil {
+			t, err := domain.ParseAttestedExpiry(c.NotAfter)
+			if err != nil || t.IsZero() {
 				t = fallback
 			}
 			if t.After(latest) {

@@ -2,6 +2,7 @@ package cert
 
 import (
 	"errors"
+	"github.com/agentnameservice/ans/internal/adapter/cert/acmetest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,11 +19,11 @@ func TestACMEIssuer_OwnerAccountsIsolatePendingAuthorizationsAndPersist(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := issuer.CreateOrderForOwner(t.Context(), "owner-a", "agent.example.com")
+	first, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-a", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := issuer.CreateOrderForOwner(t.Context(), "owner-b", "agent.example.com")
+	second, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-b", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +34,7 @@ func TestACMEIssuer_OwnerAccountsIsolatePendingAuthorizationsAndPersist(t *testi
 	if a.Token != b.Token || a.DNSRecordValue == b.DNSRecordValue || a.KeyAuthorization == b.KeyAuthorization {
 		t.Fatal("pending provider authorization is shared across owners")
 	}
-	repeated, err := issuer.CreateOrderForOwner(t.Context(), "owner-a", "agent.example.com")
+	repeated, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-a", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +47,7 @@ func TestACMEIssuer_OwnerAccountsIsolatePendingAuthorizationsAndPersist(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	afterRestart, err := restarted.CreateOrderForOwner(t.Context(), "owner-a", "agent.example.com")
+	afterRestart, err := restarted.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-a", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,18 +75,18 @@ func TestACMEIssuer_OwnerAccountsIsolatePendingAuthorizationsAndPersist(t *testi
 
 func TestACMEIssuer_OwnerOrderValidation(t *testing.T) {
 	f := newFakeACME(t)
-	issuer := newTestACMEIssuer(t, f)
+	issuer := newTestOwnerIssuer(t, f)
 	for _, ref := range []string{
 		f.OrderURL(), // An old shared-account order cannot establish owner proof.
 		scopedOrderPrefix + ownerAccountID("different-owner") + ":" + f.OrderURL(),
 	} {
 		if _, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
 			OwnerID: "owner-a", OrderRef: ref,
-		}); !errors.Is(err, port.ErrOrderFailed) {
+		}); !(errors.Is(err, port.ErrOrderOwnerMismatch) || errors.Is(err, port.ErrLegacyOrder)) {
 			t.Fatalf("unbound owner order accepted: %v", err)
 		}
 	}
-	if _, err := issuer.CreateOrderForOwner(t.Context(), "", "agent.example.com"); err == nil {
+	if _, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "", FQDN: "agent.example.com"}); err == nil {
 		t.Fatal("empty owner accepted")
 	}
 	for _, ref := range []string{
@@ -97,20 +98,66 @@ func TestACMEIssuer_OwnerOrderValidation(t *testing.T) {
 			t.Fatalf("invalid order reference accepted: %q", ref)
 		}
 	}
-	if _, err := issuer.CreateOrderForOwner(t.Context(), "owner-a", ""); err == nil {
+	if _, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-a", FQDN: ""}); err == nil {
 		t.Fatal("empty fqdn accepted")
 	}
 	// A broken account directory must fail before contacting the provider.
-	broken := newTestACMEIssuer(t, f)
+	broken := newTestOwnerIssuer(t, f)
 	if err := os.WriteFile(filepath.Join(broken.dataDir, "owners"), []byte("not a directory"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := broken.CreateOrderForOwner(t.Context(), "owner-a", "agent.example.com"); err == nil {
+	if _, err := broken.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-a", FQDN: "agent.example.com"}); err == nil {
 		t.Fatal("account storage failure swallowed")
 	}
 	if _, err := broken.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: scopedOrderPrefix + strings.Repeat("0", 64) + ":" + f.OrderURL(),
 	}); err == nil {
 		t.Fatal("finalize account storage failure swallowed")
+	}
+}
+
+func TestACMEIssuer_ScopedFinalizeRequiresOwner(t *testing.T) {
+	issuer := newTestOwnerIssuer(t, newFakeACME(t))
+	order, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner-a", FQDN: "agent.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, owner := range []string{"", "owner-b"} {
+		_, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{OwnerID: owner, OrderRef: order.OrderRef})
+		if !(errors.Is(err, port.ErrOrderOwnerMismatch) || errors.Is(err, port.ErrLegacyOrder)) {
+			t.Fatalf("owner %q accepted for a scoped order: %v", owner, err)
+		}
+	}
+}
+
+func newTestOwnerIssuer(t *testing.T, f *acmetest.Server) *OwnerScopedACMEIssuer {
+	t.Helper()
+	issuer, err := NewACMEIssuer(f.DirectoryURL(), "ops@example.com", t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return issuer
+}
+
+func TestOwnerRegistryDoesNotCreateUnusedParentAccount(t *testing.T) {
+	dir := t.TempDir()
+	f := newFakeACME(t)
+	issuer, err := NewACMEIssuer(f.DirectoryURL(), "", dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, acmeAccountKeyFile)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("unused parent account exists: %v", err)
+	}
+	calls := 0
+	factory := issuer.newAccount
+	issuer.newAccount = func(path string) (*ACMEIssuer, error) { calls++; return factory(path) }
+	for range 2 {
+		if _, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "same-owner", FQDN: "agent.example.com"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("owner account not reused: %d loads", calls)
 	}
 }

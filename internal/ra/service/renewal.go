@@ -125,8 +125,7 @@ func (s *RegistrationService) SubmitServerCertRenewal(
 		// untouched.
 		order, err := s.createServerOrder(ctx, reg.OwnerID, reg.AnsName.FQDN())
 		if err != nil {
-			return nil, domain.NewInternalError(
-				"CERT_ORDER_FAILED", "create certificate order", err)
+			return nil, certificateProviderError(err, "CERT_ORDER_FAILED", "create certificate order")
 		}
 		prepared, err := orderWithOwnerProof(order, now.Add(renewalChallengeWindow))
 		if err != nil {
@@ -352,6 +351,10 @@ func (s *RegistrationService) verifyRenewalACME(ctx context.Context, agentID, sc
 		return nil, err
 	}
 
+	if len(r.Validation.Challenges) == 0 {
+		s.logger.Warn().Str("agentId", agentID).Int64("renewalId", r.ID).Msg("pending renewal has no owner proof after upgrade")
+		return nil, domain.NewConflictError("CERT_ORDER_UPGRADE_REQUIRED", "renewal has no persisted owner proof; cancel it and submit a new renewal")
+	}
 	// Cached provider authorization is not proof by the current caller.
 	verified, verr := s.verifyChallengeArtifacts(ctx, reg.AnsName.FQDN(), r.Validation.Challenges)
 	if len(verified) == 0 {
@@ -434,8 +437,7 @@ func (s *RegistrationService) finalizeCSRRenewal(
 		return nil, domain.NewValidationError("CERT_ORDER_FAILED",
 			"certificate provider reported a terminal order failure; submit a new renewal")
 	case err != nil:
-		return nil, domain.NewInternalError("SERVER_CERT_ISSUE_FAILED",
-			"failed to issue server cert for renewal", err)
+		return nil, certificateProviderError(err, "SERVER_CERT_ISSUE_FAILED", "failed to issue server cert for renewal")
 	}
 	v, err := s.validator.ValidateServerCertificate(ctx,
 		issued.CertPEM, issued.ChainPEM, reg.AnsName.FQDN())
