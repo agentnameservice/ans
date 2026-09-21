@@ -11,10 +11,15 @@ import (
 )
 
 func (s *RegistrationService) createServerOrder(ctx context.Context, ownerID, fqdn string) (*domain.CertificateOrder, error) {
-	if scoped, ok := s.serverCA.(port.OwnerScopedServerCertificateIssuer); ok {
-		return scoped.CreateOrderForOwner(ctx, ownerID, fqdn)
+	order, err := s.serverCA.CreateOrder(ctx, port.CreateOrderRequest{OwnerID: ownerID, FQDN: fqdn})
+	if err != nil {
+		s.logger.Warn().Err(err).Str("fqdn", fqdn).Msg("certificate order creation unavailable")
+		return nil, err
 	}
-	return s.serverCA.CreateOrder(ctx, fqdn)
+	if order != nil && len(order.Challenges) == 0 {
+		s.logger.Info().Str("fqdn", fqdn).Msg("provider authorization has no challenge; fresh RA owner proof required")
+	}
+	return order, nil
 }
 
 // orderWithOwnerProof separates provider authorization from this registration's
