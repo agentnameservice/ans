@@ -1,0 +1,52 @@
+# Template: follow README.md to install with a generated service secret.
+server:
+  host: "127.0.0.1"
+  port: 18080
+auth:
+  type: oidc
+  oidc:
+    issuer-url: "https://YOUR_INSTANCE.clerk.accounts.dev"
+    audience: "ans-ra"
+    client-id: ""
+    admin-groups: []
+ca:
+  type: self
+  self:
+    org: "ANS Staging Identity CA"
+    validity-days: 365
+    data-dir: "/var/lib/ans-ra/ca"
+  server:
+    type: acme
+    acme:
+      directory-url: "https://acme-staging-v02.api.letsencrypt.org/directory"
+      data-dir: "/var/lib/ans-ra/acme-staging"
+  validation:
+    roots-file: "/etc/ans/le-staging-roots.pem"
+dns:
+  type: lookup
+  server: "1.1.1.1:53"
+identity:
+  resolver:
+    type: web
+  challenge-ttl: 5m
+vlei:
+  type: "off"
+keys:
+  type: file
+  file:
+    path: "/var/lib/ans-ra/keys"
+store:
+  type: sqlite
+  sqlite:
+    path: "/var/lib/ans-ra/ans.db"
+tl-client:
+  base-url: "http://127.0.0.1:18081"
+  public-base-url: "https://tl.ans.example.com"
+  api-key: "__TL_SERVICE_KEY__"
+  timeout: 10s
+signer:
+  keyId: "ans-ra-example-signer"
+  raId: "ans-ra-example"
+log:
+  level: info
+  format: json

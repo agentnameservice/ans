@@ -1,0 +1,32 @@
+{
+	# Use Let's Encrypt explicitly for RA/TL service HTTPS.
+	acme_ca https://acme-v02.api.letsencrypt.org/directory
+}
+
+ra.ans.example.com {
+	redir /docs/ /docs 308
+	# Keep authenticated API responses out of shared proxy caches.
+	header Cache-Control "no-store"
+	# Keep operational endpoints accessible only through localhost.
+	@private path /v2/admin /v2/admin/*
+	respond @private 404
+	reverse_proxy 127.0.0.1:18080
+}
+
+tl.ans.example.com {
+	redir /docs/ /docs 308
+	# Fresh status/revocation evidence must not be served from an edge cache.
+	header Cache-Control "no-store"
+	# Public TL access is read-only. Ingestion and producer-key admin
+	# stay on the private backend, including both API versions.
+	@public {
+		method GET HEAD
+		path /docs /docs/* /root-keys /checkpoint /tile/* /v1/agents/* /v1/identities/* /v1/log/*
+	}
+	handle @public {
+		reverse_proxy 127.0.0.1:18081
+	}
+	handle {
+		respond 404
+	}
+}

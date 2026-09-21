@@ -1,0 +1,29 @@
+[Unit]
+Description=ANS Transparency Log
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=ans-tl
+Group=ans-tl
+ExecStart=/usr/local/bin/ans-tl --config /etc/ans/tl.yaml
+WorkingDirectory=/var/lib/ans-tl
+StateDirectory=ans-tl
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

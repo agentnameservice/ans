@@ -1,0 +1,29 @@
+[Unit]
+Description=ANS Registration Authority
+Wants=network-online.target ans-tl.service
+After=network-online.target ans-tl.service
+
+[Service]
+Type=simple
+User=ans-ra
+Group=ans-ra
+ExecStart=/usr/local/bin/ans-ra --config /etc/ans/ra.yaml
+WorkingDirectory=/var/lib/ans-ra
+StateDirectory=ans-ra
+StateDirectoryMode=0700
+UMask=0077
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
