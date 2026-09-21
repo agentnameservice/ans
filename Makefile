@@ -77,21 +77,14 @@ test-cover:
 	@# is a test double (an in-process fake RFC 8555 server) imported
 	@# only by _test.go files and never built into a binary; its fault-
 	@# injection knobs are exercised selectively per test. Counting any
-	@# of these unexercised statements toward the 90% gate would only
+	@# of these unexercised statements toward the internal/domain/crypto gates would only
 	@# penalize real logic coverage. The library packages under
 	@# internal/ are where the gate has teeth.
-	@pkgs=$$(go list ./... | grep -v -e '/cmd/' -e '/scripts/' -e '/acmetest' | tr '\n' ',' | sed 's/,$$//'); \
+	@pkgs=$$(go list ./... | grep -v -e '/cmd/' -e '/scripts' -e '/acmetest' | tr '\n' ',' | sed 's/,$$//'); \
 	go test ./... -count=1 -coverpkg=$$pkgs -coverprofile=coverage.out -covermode=atomic
 	@go tool cover -func=coverage.out
 	@echo ""
-	@echo "Checking coverage threshold ($(COVERAGE_THRESHOLD)%)..."
-	@total=$$(go tool cover -func=coverage.out | grep total | awk '{print $$3}' | tr -d '%'); \
-	if [ "$$(echo "$$total < $(COVERAGE_THRESHOLD)" | bc -l)" = "1" ]; then \
-		echo "FAIL: Coverage $$total% is below $(COVERAGE_THRESHOLD)% threshold"; \
-		exit 1; \
-	else \
-		echo "OK: Coverage $$total% meets $(COVERAGE_THRESHOLD)% threshold"; \
-	fi
+	@awk -v minimum=$(COVERAGE_THRESHOLD) -f scripts/check-coverage.awk coverage.out
 
 test-race:
 	@echo "Running tests with race detector..."

@@ -92,6 +92,9 @@ func TestNewRegistration_Validations(t *testing.T) {
 		{"display name too long", "a", "o", validName, strings.Repeat("x", 65), "", validEndpoints, nil, &validCSR, "DISPLAY_NAME_TOO_LONG"},
 		{"description too long", "a", "o", validName, "displayName", strings.Repeat("x", 151), validEndpoints, nil, &validCSR, "DESCRIPTION_TOO_LONG"},
 		{"no endpoints", "a", "o", validName, "displayName", "", nil, nil, &validCSR, "MISSING_ENDPOINTS"},
+		{"endpoint host mismatch", "a", "o", validName, "displayName", "",
+			[]AgentEndpoint{{Protocol: ProtocolMCP, AgentURL: "https://different.example.com/"}},
+			nil, &validCSR, "ENDPOINT_HOST_MISMATCH"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -282,9 +285,10 @@ func TestNewRegistration_InvalidEndpoint(t *testing.T) {
 	badEndpoints := []AgentEndpoint{
 		{Protocol: ProtocolMCP, AgentURL: "https://other.example.com/mcp"},
 	}
-	_, err := NewRegistration("a", "o", ansName, "", "", badEndpoints, nil, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "agent", "", badEndpoints, nil, &csr, time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrValidation)
+	assert.Contains(t, err.Error(), "ENDPOINT_HOST_MISMATCH")
 }
 
 func TestAgentRegistration_Revoke_FromTerminal(t *testing.T) {
