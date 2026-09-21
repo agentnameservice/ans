@@ -459,6 +459,8 @@ func mapCSRStatus(c *domain.AgentCSR) csrStatusResponse {
 
 // ----- AgentStatus (matches V2 spec §1133) -----
 
+const phaseCertificateIssuance = "CERTIFICATE_ISSUANCE"
+
 type agentStatus struct {
 	Status         string   `json:"status"`
 	Phase          string   `json:"phase,omitempty"`
@@ -480,7 +482,7 @@ func phaseFor(reg *domain.AgentRegistration) string {
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		if reg.CertOrder.State == domain.OrderStateIssuing {
-			return "CERTIFICATE_ISSUANCE"
+			return phaseCertificateIssuance
 		}
 		return "DOMAIN_VALIDATION"
 	case domain.StatusPendingDNS:
@@ -499,9 +501,9 @@ func completedStepsFor(reg *domain.AgentRegistration) []string {
 	case reg.Status == domain.StatusPendingDNS:
 		// The cert exists by PENDING_DNS — issuance completes in the
 		// same transaction that advances the lifecycle.
-		return []string{"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE"}
+		return []string{"DOMAIN_VALIDATION", phaseCertificateIssuance}
 	case reg.Status == domain.StatusActive:
-		return []string{"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE", "DNS_PROVISIONING"}
+		return []string{"DOMAIN_VALIDATION", phaseCertificateIssuance, "DNS_PROVISIONING"}
 	default:
 		return nil
 	}
@@ -510,7 +512,7 @@ func completedStepsFor(reg *domain.AgentRegistration) []string {
 func pendingStepsFor(reg *domain.AgentRegistration) []string {
 	switch {
 	case reg.Status == domain.StatusPendingValidation && reg.CertOrder.State == domain.OrderStateIssuing:
-		return []string{"CERTIFICATE_ISSUANCE"}
+		return []string{phaseCertificateIssuance}
 	case reg.Status == domain.StatusPendingValidation:
 		return []string{"DOMAIN_VALIDATION"}
 	case reg.Status == domain.StatusPendingDNS:
