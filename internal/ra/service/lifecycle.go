@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
@@ -373,8 +372,8 @@ type VerifyACMEResult struct {
 // Idempotent: if the registration is already past PENDING_VALIDATION,
 // return the current state without erroring — matches the reference's
 // "if already progressed, succeed silently" semantics. Re-driven
-// calls on an ISSUING order skip the gate (the provider already
-// accepted the challenge answer) and only re-attempt the finalize.
+// calls on an ISSUING order skip the gate only when an earlier RA
+// verification was persisted, and only re-attempt the finalize.
 func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in VerifyInput) (*VerifyACMEResult, error) {
 	now := s.clock()
 	reg, err := s.agents.FindByAgentID(ctx, agentID)
@@ -543,10 +542,9 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 //     verified as published (DNS-01 TXT or HTTP-01 resource);
 //     otherwise 422 ACME_CHALLENGE_MISSING. Expired challenge
 //     windows are 422 ACME_CHALLENGE_EXPIRED.
-//   - ISSUING order → gate skipped: the provider already accepted a
-//     challenge answer on an earlier call, and the operator may have
-//     legitimately removed the artifact since. The re-driven call
-//     only re-attempts the finalize.
+//   - ISSUING order → gate skipped only when the RA has persisted a
+//     verified challenge from an earlier call. Provider authorization
+//     alone never substitutes for the current owner's proof.
 //   - FAILED order → 422 CERT_ORDER_FAILED; the operator cancels and
 //     re-registers.
 //
@@ -557,18 +555,19 @@ func (s *RegistrationService) VerifyACME(ctx context.Context, agentID string, in
 // attestation's `domainValidation` method token is derived from it in
 // a later call (verify-dns), so it must survive on the aggregate.
 //
-// NOTE: zero-value orders (registrations predating order persistence)
-// skip the gate — no challenge was ever issued to the operator, so
-// there is nothing that could be verified. Every registration created
-// since order persistence carries one.
+// Legacy zero-value orders fail closed because no proof can be checked.
 func (s *RegistrationService) gateOrderChallenges(
 	ctx context.Context, reg *domain.AgentRegistration, now time.Time,
 ) ([]domain.ChallengeType, error) {
 	order := reg.CertOrder
 	switch {
 	case order.IsZero():
-		return nil, nil
-	case order.State == domain.OrderStateIssuing:
+		return nil, domain.NewValidationError("ACME_CHALLENGE_MISSING",
+			"registration has no persisted domain-control proof; register a new version")
+	case len(order.Challenges) == 0 && !order.VerifiedChallenge.IsValid():
+		s.logger.Warn().Str("agentId", reg.AgentID).Msg("legacy certificate order lacks persisted owner proof")
+		return nil, domain.NewConflictError("CERT_ORDER_UPGRADE_REQUIRED", "registration has no reusable owner proof; cancel where supported or let it expire, then register a new version")
+	case order.State == domain.OrderStateIssuing && order.VerifiedChallenge.IsValid():
 		return nil, nil
 	case order.State == domain.OrderStateFailed:
 		// 422 (validation), not 409: the spec documents only 422 on
@@ -577,11 +576,9 @@ func (s *RegistrationService) gateOrderChallenges(
 		// ANS name is immutable once used.
 		return nil, domain.NewValidationError("CERT_ORDER_FAILED",
 			"certificate order failed terminally; cancel this registration (POST /revoke) and register a new version")
-	case order.State != domain.OrderStatePending:
-		// COMPLETED while still PENDING_VALIDATION is unreachable —
-		// the order completes in the same transaction that advances
-		// the lifecycle. Tolerate rather than brick the row.
-		return nil, nil
+	case order.State != domain.OrderStatePending && order.State != domain.OrderStateIssuing:
+		return nil, domain.NewValidationError("ACME_CHALLENGE_MISSING",
+			"registration has no pending order with verifiable domain-control proof")
 	}
 	if order.IsExpired(now) {
 		// A lapsed-window order stays PENDING (expiry doesn't change
@@ -599,7 +596,7 @@ func (s *RegistrationService) gateOrderChallenges(
 		// (verify-dns) where this gate result is out of scope — without
 		// persisting it here the event builder could only guess.
 		reg.CertOrder.RecordVerifiedChallenge(verified[0])
-		log.Info().
+		s.logger.Info().
 			Str("agentId", reg.AgentID).
 			Str("fqdn", reg.FQDN()).
 			Str("challengeType", string(verified[0])).
@@ -710,6 +707,7 @@ func (s *RegistrationService) finalizeServerOrder(
 			"server CSR pending but no certificate issuer configured — inconsistent state", nil)
 	}
 	issued, err := s.serverCA.FinalizeOrder(ctx, port.FinalizeOrderRequest{
+		OwnerID:  reg.OwnerID,
 		OrderRef: reg.CertOrder.OrderRef,
 		CSRPEM:   serverCSR.CSRContent,
 		FQDN:     reg.FQDN(),
@@ -731,8 +729,7 @@ func (s *RegistrationService) finalizeServerOrder(
 		return serverOrderOutcome{}, domain.NewValidationError("CERT_ORDER_FAILED",
 			"certificate provider reported a terminal order failure; cancel this registration (POST /revoke) and register a new version")
 	case err != nil:
-		return serverOrderOutcome{}, domain.NewInternalError("SERVER_CERT_ISSUE_FAILED",
-			"failed to issue server cert", err)
+		return serverOrderOutcome{}, certificateProviderError(err, "SERVER_CERT_ISSUE_FAILED", "failed to issue server cert")
 	}
 	v, err := s.validator.ValidateServerCertificate(ctx,
 		issued.CertPEM, issued.ChainPEM, reg.FQDN())
@@ -915,7 +912,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		// on-call can grep the agent and FQDN that wedged. agentID is in
 		// scope here but not inside verifyDNSRecords, so this is the one
 		// WARN site for the verifier error.
-		log.Warn().
+		s.logger.Warn().
 			Str("agentId", agentID).
 			Str("fqdn", reg.FQDN()).
 			Err(err).
@@ -938,7 +935,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 			recs[i].Type = string(m.Expected.Type)
 			recs[i].Code = m.Code
 		}
-		log.Info().
+		s.logger.Info().
 			Str("agentId", agentID).
 			Str("fqdn", reg.FQDN()).
 			Int("mismatchCount", len(mismatches)).
@@ -978,9 +975,9 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		// choice. A failed lookup is an upstream fault that just narrowed
 		// an append-only signed attestation, so it goes out at WARN and
 		// carries the resolver's own message.
-		ev := log.Info()
+		ev := s.logger.Info()
 		if droppedForLookupError(dropped) {
-			ev = log.Warn()
+			ev = s.logger.Warn()
 		}
 		ev.
 			Str("agentId", agentID).
