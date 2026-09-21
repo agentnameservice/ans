@@ -546,9 +546,7 @@ func (s *RegistrationService) resolveServerCertInput(
 	}
 	created, err := s.createServerOrder(ctx, req.OwnerID, req.AnsName.FQDN())
 	if err != nil {
-		return serverCertInput{}, domain.NewInternalError(
-			"CERT_ORDER_FAILED", "create certificate order", err,
-		)
+		return serverCertInput{}, certificateProviderError(err, "CERT_ORDER_FAILED", "create certificate order")
 	}
 	order, err := orderWithOwnerProof(created, now.Add(registrationChallengeWindow))
 	if err != nil {
