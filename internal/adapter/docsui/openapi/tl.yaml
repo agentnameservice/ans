@@ -30,8 +30,8 @@ info:
         expose single-record lookup).
 
 servers:
-  - url: http://localhost:18081
-    description: local dev (quickstart)
+  - url: /
+    description: This Transparency Log (current service origin)
 
 # ────────────────────────────────────────────────────────────────
 # Tags group routes in generated docs by audience.

@@ -43,12 +43,8 @@ info:
     url: https://www.apache.org/licenses/LICENSE-2.0.html
 
 servers:
-  - url: http://localhost:18080/v2
-    description: Local dev — quickstart ra-local.yaml
-  - url: https://api.ans.example.org/v2
-    description: Main ANS API server (v2)
-  - url: https://test.ans.example.org/v2
-    description: Test server (v2)
+  - url: /v2
+    description: This Registration Authority (current service origin)
 
 tags:
   - name: Management
@@ -96,10 +92,8 @@ paths:
   # ──────────────────────────────────────────────────────────────────
   /v1/agents/events:
     servers:
-      - url: http://localhost:18080
-        description: Local dev — quickstart ra-local.yaml (feed is not under /v2)
-      - url: https://api.ans.example.org
-        description: Main ANS API server
+      - url: /
+        description: This Registration Authority (current service origin)
     get:
       tags:
         - Events
@@ -2810,38 +2804,6 @@ components:
         - type
         - title
         - status
-
-    Problem:
-      type: object
-      description: |
-        RFC 7807 Problem Details — the actual error shape every RA failure
-        path emits, served as `application/problem+json`. Clients read
-        `code` for programmatic handling and `detail` for the
-        human-readable explanation.
-
-        (The legacy `ErrorResponse` schema below is retained only for the
-        pre-existing routes still declared against it; new routes point
-        here. Migrating the remaining declarations is tracked separately.)
-      properties:
-        type:
-          type: string
-          description: URI reference identifying the problem type.
-        title:
-          type: string
-          description: Short, human-readable summary of the problem type.
-        status:
-          type: integer
-          description: HTTP status code.
-        detail:
-          type: string
-          description: Human-readable explanation specific to this occurrence.
-        code:
-          type: string
-          description: Stable, machine-readable error code for programmatic handling.
-      required:
-        - title
-        - status
-        - code
 
     ErrorResponse:
       type: object
