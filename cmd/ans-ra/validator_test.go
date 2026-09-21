@@ -79,7 +79,7 @@ func issueValidatorTestCert(t *testing.T, issuer port.ServerCertificateIssuer) *
 	if err != nil {
 		t.Fatal(err)
 	}
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.CreateOrder(t.Context(), port.CreateOrderRequest{OwnerID: "owner", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -285,9 +285,10 @@ func TestNewRegistration_InvalidEndpoint(t *testing.T) {
 	badEndpoints := []AgentEndpoint{
 		{Protocol: ProtocolMCP, AgentURL: "https://other.example.com/mcp"},
 	}
-	_, err := NewRegistration("a", "o", ansName, "", "", badEndpoints, nil, &csr, time.Now())
+	_, err := NewRegistration("a", "o", ansName, "agent", "", badEndpoints, nil, &csr, time.Now())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrValidation)
+	assert.Contains(t, err.Error(), "ENDPOINT_HOST_MISMATCH")
 }
 
 func TestAgentRegistration_Revoke_FromTerminal(t *testing.T) {
