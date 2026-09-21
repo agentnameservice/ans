@@ -181,6 +181,12 @@ type FinalizeOrderRequest struct {
 	Verified []domain.ChallengeType
 }
 
+// CreateOrderRequest binds issuance to the authenticated registration owner.
+type CreateOrderRequest struct {
+	OwnerID string
+	FQDN    string
+}
+
 // ServerCertificateIssuer issues server-auth TLS certificates through
 // a certificate-order lifecycle:
 //
@@ -213,7 +219,7 @@ type ServerCertificateIssuer interface {
 	// required yet (matching ACME, where the CSR is presented at
 	// finalize). The returned order is persisted on the registration
 	// or renewal aggregate.
-	CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error)
+	CreateOrder(ctx context.Context, req CreateOrderRequest) (*domain.CertificateOrder, error)
 
 	// FinalizeOrder completes the order: the issuer validates domain
 	// control by its own rules (or trusts the RA's gate, for the
@@ -232,9 +238,15 @@ type ServerCertificateIssuer interface {
 	GetCACertificate(ctx context.Context) (string, error)
 }
 
-// OwnerScopedServerCertificateIssuer isolates reusable provider authorizations
-// between RA owners. Providers that cache domain authorizations by account
-// implement this capability; the RA uses it for registrations and renewals.
-type OwnerScopedServerCertificateIssuer interface {
-	CreateOrderForOwner(ctx context.Context, ownerID, fqdn string) (*domain.CertificateOrder, error)
+// ErrLegacyOrder requires an upgrade action rather than a provider retry.
+var ErrLegacyOrder = errors.New("legacy ACME order has no authenticated owner binding")
+var ErrOrderOwnerMismatch = errors.New("ACME order owner mismatch")
+
+// ProviderThrottled is retryable; RetryAfter is an optional validated HTTP value.
+type ProviderThrottled struct {
+	RetryAfter string
+	Cause      error
 }
+
+func (e *ProviderThrottled) Error() string { return "certificate provider throttled the request" }
+func (e *ProviderThrottled) Unwrap() error { return e.Cause }

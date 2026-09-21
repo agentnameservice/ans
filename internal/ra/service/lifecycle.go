@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/rs/zerolog/log"
 
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
@@ -294,8 +293,12 @@ func (s *RegistrationService) submitIdentityCSR(ctx context.Context, agentID, cs
 		}
 		return s.enqueueCertificateRenewal(txCtx, reg, evidence, schemaVersion)
 	}); err != nil {
+		s.logCertificateFailure(err, agentID, 0, schemaVersion, "identity rotation transaction failed")
 		return "", err
 	}
+	s.logger.Info().Str("agentId", agentID).Str("fqdn", reg.FQDN()).
+		Str("csrId", csrID).Str("schemaVersion", schemaVersion).
+		Msg("identity rotation and publication event committed")
 	return csrID, nil
 }
 
@@ -589,6 +592,9 @@ func (s *RegistrationService) gateOrderChallenges(
 	case order.IsZero():
 		return nil, domain.NewValidationError("ACME_CHALLENGE_MISSING",
 			"registration has no persisted domain-control proof; register a new version")
+	case len(order.Challenges) == 0 && !order.VerifiedChallenge.IsValid():
+		s.logger.Warn().Str("agentId", reg.AgentID).Msg("legacy certificate order lacks persisted owner proof")
+		return nil, domain.NewConflictError("CERT_ORDER_UPGRADE_REQUIRED", "registration has no reusable owner proof; cancel where supported or let it expire, then register a new version")
 	case order.State == domain.OrderStateIssuing && order.VerifiedChallenge.IsValid():
 		return nil, nil
 	case order.State == domain.OrderStateFailed:
@@ -618,7 +624,7 @@ func (s *RegistrationService) gateOrderChallenges(
 		// (verify-dns) where this gate result is out of scope — without
 		// persisting it here the event builder could only guess.
 		reg.CertOrder.RecordVerifiedChallenge(verified[0])
-		log.Info().
+		s.logger.Info().
 			Str("agentId", reg.AgentID).
 			Str("fqdn", reg.FQDN()).
 			Str("challengeType", string(verified[0])).
@@ -751,8 +757,7 @@ func (s *RegistrationService) finalizeServerOrder(
 		return serverOrderOutcome{}, domain.NewValidationError("CERT_ORDER_FAILED",
 			"certificate provider reported a terminal order failure; cancel this registration (POST /revoke) and register a new version")
 	case err != nil:
-		return serverOrderOutcome{}, domain.NewInternalError("SERVER_CERT_ISSUE_FAILED",
-			"failed to issue server cert", err)
+		return serverOrderOutcome{}, certificateProviderError(err, "SERVER_CERT_ISSUE_FAILED", "failed to issue server cert")
 	}
 	v, err := s.validator.ValidateServerCertificate(ctx,
 		issued.CertPEM, issued.ChainPEM, reg.FQDN())
@@ -935,7 +940,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		// on-call can grep the agent and FQDN that wedged. agentID is in
 		// scope here but not inside verifyDNSRecords, so this is the one
 		// WARN site for the verifier error.
-		log.Warn().
+		s.logger.Warn().
 			Str("agentId", agentID).
 			Str("fqdn", reg.FQDN()).
 			Err(err).
@@ -958,7 +963,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 			recs[i].Type = string(m.Expected.Type)
 			recs[i].Code = m.Code
 		}
-		log.Info().
+		s.logger.Info().
 			Str("agentId", agentID).
 			Str("fqdn", reg.FQDN()).
 			Int("mismatchCount", len(mismatches)).
@@ -998,9 +1003,9 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 		// choice. A failed lookup is an upstream fault that just narrowed
 		// an append-only signed attestation, so it goes out at WARN and
 		// carries the resolver's own message.
-		ev := log.Info()
+		ev := s.logger.Info()
 		if droppedForLookupError(dropped) {
-			ev = log.Warn()
+			ev = s.logger.Warn()
 		}
 		ev.
 			Str("agentId", agentID).
@@ -1016,7 +1021,7 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// is the single terminal transition that marks the agent live in the
 	// log; we submit it to the TL INLINE and report the agent ACTIVE only
 	// after the TL acknowledges the seal — mirroring the identity lane. A
-	// failed seal IS a failed activation: nothing is committed, the agent
+	// failed seal IS a failed activation: the prepared evidence persists, the agent
 	// stays PENDING_DNS, and the operator retries verify-dns once the TL is
 	// reachable. This is what makes a downstream catalog entry's
 	// SCITT-receipt/badge links point at TL records that actually exist.
@@ -1048,17 +1053,9 @@ func (s *RegistrationService) VerifyDNS(ctx context.Context, agentID string, in 
 	// ACTIVE" and "activation is feed-visible" are the same fact; the
 	// worker never touches it (Claim skips sent rows).
 	//
-	// The seal round trip above is a window a commit failure or a lost
-	// race can land in: the agent then stays PENDING_DNS (or REVOKED, if
-	// a rival cancelled it) and its already-sealed AGENT_REGISTERED leaf
-	// is orphaned. A retry recomputes `now`, so its leaf carries fresh
-	// timestamps and a fresh content hash — TL dedup will not match,
-	// appending a second leaf (and, on commit, a second feed row). That
-	// is the intended benign residue, accepted exactly as on the
-	// identity lane: agent status keys on the store row by agentId,
-	// read-side status derives from any terminal leaf, and feed
-	// consumers apply events idempotently by agentId, so the residue is
-	// invisible to verifiers, badges, and discovery.
+	// The durable activation payload is prepared before submission. A retry
+	// after an uncertain seal or failed local commit replays its exact bytes
+	// and signature, even if current DNS observations have since changed.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
 		return s.commitActivation(txCtx, reg, sealed)
 	}); err != nil {

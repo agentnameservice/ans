@@ -73,7 +73,84 @@ paths:
         registration, reversed terminal states, and older lifecycle
         events are rejected before append. A renewal with changed
         attestation state can append again for the same FQDN/version.
+        The versioned ANS name remains bound to its first agent ID, including
+        after revocation. Current agent-state policy also requires the original
+        raId; additional signing keys for that raId are governed by producer-key trust.
+        These agent lifecycle checks are separate from content-hash deduplication.
       operationId: appendEvent
+      parameters:
+        - name: X-Signature
+          in: header
+          required: true
+          description: |
+            Detached JWS compact serialization over the raw request
+            body. Header shape:
+            `{alg:ES256, kid:<producer-keyId>, typ:JWT, timestamp:<unix-seconds>, raid:<raId>}`.
+            The `raid` value must match the `raId` in the body.
+          schema:
+            type: string
+      requestBody:
+        required: true
+        description: JCS-canonicalized inner producer event (≤ 256 KiB).
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProducerEvent'
+      responses:
+        '200':
+          description: |
+            Event logged. On a duplicate submission (identical
+            inner-event JCS hash) the response carries
+            `duplicate: true` + the pre-existing leaf so retries are
+            idempotent. Matches the reference TL's status-code and
+            body shape.
+            A timestamp-only retry of the latest state is also a
+            duplicate; genuinely changed renewals receive a new leaf.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AppendResponse'
+        '413':
+          description: Request body exceeds 256 KiB.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+        '422':
+          description: |
+            Body fails validation. Codes include
+            `NO_PRODUCER_SIGNATURE`, `INVALID_SIGNATURE_HEADER`,
+            `NOT_FOUND_PRODUCER_KEY`, `INVALID_PRODUCER_KEY`,
+            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`,
+            `AGENT_STATE_CONFLICT`, `STALE_AGENT_EVENT`.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+
+  # ──────────────────────────────────────────────────────────────
+  # Transparency Log — verifier reads (public under public-read)
+  # ──────────────────────────────────────────────────────────────
+  /v2/internal/agents/event:
+    post:
+      tags: [Transparency Log]
+      summary: Append a signed V2 agent event to the log
+      description: |
+        Accepts a V2 JCS-canonicalized producer-event body signed with a
+        detached JWS (`X-Signature` header). Successful appends return
+        the Tessera-assigned leaf index and hash; duplicate submissions
+        (same SHA-256(inner event JCS)) return 200 with the original
+        leaf so outbox retries are idempotent. Repeating the latest
+        agent state with only timestamp/issuedAt changed also echoes
+        its original leaf. Conflicting agent bindings, repeated
+        registration, reversed terminal states, and older lifecycle
+        events are rejected before append. A renewal with changed
+        attestation state can append again for the same FQDN/version.
+        The versioned ANS name remains bound to its first agent ID, including
+        after revocation. Current agent-state policy also requires the original
+        raId; additional signing keys for that raId are governed by producer-key trust.
+        These agent lifecycle checks are separate from content-hash deduplication.
+      operationId: appendEventV2
       parameters:
         - name: X-Signature
           in: header
@@ -290,8 +367,10 @@ paths:
         The identity-family ingest lane. Identical wire contract to
         `/v1/internal/agents/event` — JCS-canonicalized inner event
         body + detached-JWS `X-Signature`, same producer-key trust
-        store, same dedup — with the identity payload schema (keyed
-        by `identityId`, closed `IDENTITY_*` eventType enum). The
+        store, and content-hash deduplication, with the identity payload schema (keyed
+        by `identityId`, closed `IDENTITY_*` eventType enum). Agent semantic
+        deduplication, timestamp-order checks, and agent lifecycle conflict
+        codes do not apply to this lane. The
         closed enums are the cross-lane guard: an `AGENT_*` body on
         this route (or an `IDENTITY_*` body on an agent route) fails
         validation with 422 `INVALID_EVENT`.

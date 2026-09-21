@@ -64,7 +64,7 @@ func renewalInput(t *testing.T, fx *regFixture, kind string) service.SubmitRenew
 		return service.SubmitRenewalInput{ServerCsrPEM: csr}
 	}
 	ctx := context.Background()
-	order, err := fx.serverCA.CreateOrder(ctx, fx.req.AnsName.FQDN())
+	order, err := fx.serverCA.CreateOrder(ctx, port.CreateOrderRequest{OwnerID: fx.req.OwnerID, FQDN: fx.req.AnsName.FQDN()})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -252,5 +252,33 @@ func assertNoRenewalOutbox(t *testing.T, store *sqlite.OutboxStore) {
 	}
 	if len(rows) != 0 {
 		t.Fatal("failed renewal published an event")
+	}
+}
+
+func TestIdentityRotation_DNSFailureDoesNotInventAttestations(t *testing.T) {
+	fx := newRegFixture(t)
+	id := registerAndActivate(t, fx, fx.svc)
+	svc := rebuildWithIssuer(fx, fx.serverCA, failingDNSVerifier{}, nil)
+	if _, err := svc.SubmitIdentityCSR(t.Context(), id, testCSR(t, fx.req.AnsName.String())); err != nil {
+		t.Fatalf("DNS observation must not become a fresh identity proof gate: %v", err)
+	}
+	rows, err := fx.outboxStore.Claim(t.Context(), 100)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rotation event missing: %v %v", rows, err)
+	}
+	var payload service.OutboxPayload
+	if err := json.Unmarshal(rows[0].PayloadJSON, &payload); err != nil {
+		t.Fatal(err)
+	}
+	var event struct {
+		Attestations struct {
+			DNS []json.RawMessage `json:"dnsRecordsProvisioned"`
+		} `json:"attestations"`
+	}
+	if err := json.Unmarshal(payload.InnerEventCanonical, &event); err != nil {
+		t.Fatal(err)
+	}
+	if len(event.Attestations.DNS) != 0 {
+		t.Fatal("unverified records were attested")
 	}
 }

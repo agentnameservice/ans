@@ -11,8 +11,10 @@ import (
 
 	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
 	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/tl/event"
 	"github.com/agentnameservice/ans/internal/tl/logstore"
+	"github.com/agentnameservice/ans/internal/tl/producerkey"
 	"github.com/agentnameservice/ans/internal/tl/receipt"
 	"github.com/agentnameservice/ans/internal/tl/service"
 )
@@ -116,8 +118,15 @@ func TestLogService_RejectsConflictingStatesAllowsChangedRenewals(t *testing.T) 
 			tb.inner.Agent = &agent
 			scenario.edit()
 			body, signature := tb.signedFixtureBody(t)
-			if _, err := tb.logSvc.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: signature}); err == nil {
-				t.Fatal("conflicting state accepted")
+			_, err := tb.logSvc.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: signature})
+			want := "AGENT_STATE_CONFLICT"
+			switch scenario.name {
+			case "version-mismatch", "host-mismatch", "noncanonical-name":
+				want = "INVALID_EVENT"
+			}
+			var de *domain.Error
+			if !errors.As(err, &de) || de.Code != want {
+				t.Fatalf("%s: got %v, want %s", scenario.name, err, want)
 			}
 			assertTreeSize(t, tb, 1)
 		})
@@ -340,4 +349,63 @@ func TestLogService_FailedRevocationIndexCannotMintStaleActiveToken(t *testing.T
 		t.Fatalf("read did not recover the revocation before serving status: %v", err)
 	}
 	assertTreeSize(t, tb, 2)
+}
+
+func TestLogService_RejectsOlderNonterminalSnapshotWithSpecificCode(t *testing.T) {
+	tb := newReceiptTestbed(t)
+	appendFixture(t, tb)
+	tb.inner.EventType = event.TypeAgentRenewed
+	tb.inner.Timestamp = "2000-01-01T00:00:00Z"
+	tb.inner.Agent.Name = "older renewal"
+	body, sig := tb.signedFixtureBody(t)
+	_, err := tb.logSvc.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: sig})
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "STALE_AGENT_EVENT" {
+		t.Fatalf("wanted stale-event code: %v", err)
+	}
+	assertTreeSize(t, tb, 1)
+}
+
+func TestLogService_DeprecationCannotBeReversedByRenewal(t *testing.T) {
+	tb := newReceiptTestbed(t)
+	appendFixture(t, tb)
+	tb.inner.EventType = event.TypeAgentDeprecated
+	tb.inner.Timestamp = "2030-01-01T00:00:00Z"
+	appendFixture(t, tb)
+	tb.inner.EventType = event.TypeAgentRenewed
+	tb.inner.Timestamp = "2030-01-02T00:00:00Z"
+	body, sig := tb.signedFixtureBody(t)
+	_, err := tb.logSvc.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: sig})
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "AGENT_STATE_CONFLICT" {
+		t.Fatalf("wanted lifecycle conflict: %v", err)
+	}
+	assertTreeSize(t, tb, 2)
+	tb.inner.EventType = event.TypeAgentRevoked
+	appendFixture(t, tb)
+	assertTreeSize(t, tb, 3)
+}
+
+func TestLogService_RejectsTrustedForeignProducerWithSpecificCode(t *testing.T) {
+	tb := newReceiptTestbed(t)
+	appendFixture(t, tb)
+	km, pub := newTestKM(t, "foreign-key")
+	keys, err := producerkey.NewMemoryStoreFromEntries([]producerkey.Entry{{RaID: "foreign-ra", KeyID: "foreign-key", Algorithm: "ES256", PublicKeyPEM: pub}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	log := service.NewLogService(tb.log, sqlitetl.NewEventStore(tb.db), sqlitetl.NewCheckpointStore(tb.db), service.NewProducerSigVerifier(keys), tb.tlKM, "tl-attest", "ans-test")
+	t.Cleanup(log.Close)
+	tb.inner.RaID = "foreign-ra"
+	tb.inner.EventType = event.TypeAgentRenewed
+	tb.raID = "foreign-ra"
+	tb.producerID = "foreign-key"
+	tb.producerKM = km
+	body, sig := tb.signedFixtureBody(t)
+	_, err = log.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: sig})
+	var de *domain.Error
+	if !errors.As(err, &de) || de.Code != "AGENT_STATE_CONFLICT" {
+		t.Fatalf("foreign producer was not rejected by state binding: %v", err)
+	}
+	assertTreeSize(t, tb, 1)
 }
