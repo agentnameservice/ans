@@ -92,10 +92,8 @@ paths:
   # ──────────────────────────────────────────────────────────────────
   /v1/agents/events:
     servers:
-      - url: http://localhost:18080
-        description: Local dev — quickstart ra-local.yaml (feed is not under /v2)
-      - url: https://api.ans.example.org
-        description: Main ANS API server
+      - url: /
+        description: This Registration Authority (current service origin)
     get:
       tags:
         - Events
