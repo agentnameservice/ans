@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/agentnameservice/ans/internal/domain"
 	"time"
 
 	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
@@ -182,9 +183,14 @@ func currentCertFingerprints(v any, now time.Time) ([]receipt.CertFingerprint, t
 		}
 		if raw, ok := m["notAfter"]; ok {
 			value, _ := raw.(string)
-			expiry, err := time.Parse(time.RFC3339, value)
+			expiry, err := domain.ParseAttestedExpiry(value)
 			if err != nil {
 				return nil, time.Time{}, fmt.Errorf("invalid certificate notAfter: %w", err)
+			}
+			if expiry.IsZero() {
+				seen[fp] = true
+				out = append(out, receipt.CertFingerprint{Fingerprint: fp, CertType: ct})
+				continue
 			}
 			if !now.Before(expiry) {
 				continue

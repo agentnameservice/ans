@@ -191,6 +191,19 @@ func (e *Event) Validate() error {
 	if e.RevocationReasonCode != "" && !domain.RevocationReason(e.RevocationReasonCode).IsValid() {
 		return fmt.Errorf("event/v1: invalid revocationReasonCode %q", e.RevocationReasonCode)
 	}
+
+	if _, err := domain.ParseAttestedExpiry(e.ExpiresAt); err != nil {
+		return err
+	}
+	if e.Attestations != nil {
+		for _, family := range [][]CertificateInfoExtended{e.Attestations.ValidIdentityCerts, e.Attestations.ValidServerCerts} {
+			for _, cert := range family {
+				if _, err := domain.ParseAttestedExpiry(cert.NotAfter); err != nil {
+					return err
+				}
+			}
+		}
+	}
 	return nil
 }
 

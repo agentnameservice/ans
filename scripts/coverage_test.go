@@ -75,3 +75,22 @@ func coverageProfile(domainCovered, domainMissed, cryptoCovered, cryptoMissed, o
 	}
 	return profile.String()
 }
+
+func TestCoverageGateRejectsInvalidMinimum(t *testing.T) {
+	for _, value := range []string{"", "invalid", "0", "-1", "101"} {
+		t.Run("value="+value, func(t *testing.T) {
+			cmd := exec.CommandContext(t.Context(), "awk", "-v", "minimum="+value, "-f", "check-coverage.awk")
+			cmd.Stdin = strings.NewReader(coverageProfile(1, 0, 19, 1, 70, 9))
+			output, err := cmd.CombinedOutput()
+			if err == nil || !strings.Contains(string(output), "FAIL: minimum") {
+				t.Fatalf("invalid threshold accepted: %v %s", err, output)
+			}
+		})
+	}
+	cmd := exec.CommandContext(t.Context(), "awk", "-f", "check-coverage.awk")
+	cmd.Stdin = strings.NewReader(coverageProfile(1, 0, 19, 1, 70, 9))
+	output, err := cmd.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "FAIL: minimum") {
+		t.Fatalf("missing threshold accepted: %v %s", err, output)
+	}
+}
