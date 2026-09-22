@@ -457,3 +457,73 @@ func TestCheckCertificateValidity(t *testing.T) {
 		}
 	})
 }
+
+// ----- SPKIFingerprint / SPKIFingerprintFromPEM -----
+
+func TestSPKIFingerprint(t *testing.T) {
+	t.Parallel()
+	_, a := issueSelfSigned(t, "a", nil, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+	_, b := issueSelfSigned(t, "b", nil, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+
+	fpA := anscrypto.SPKIFingerprint(a)
+	fpB := anscrypto.SPKIFingerprint(b)
+
+	// SHA-256 in hex is always 64 characters.
+	if len(fpA) != 64 {
+		t.Errorf("SPKI fingerprint length: got %d, want 64 (hex-encoded SHA-256)", len(fpA))
+	}
+
+	// Two different certs with different keys produce different SPKI fingerprints.
+	if fpA == fpB {
+		t.Errorf("distinct certs should have distinct SPKI fingerprints")
+	}
+
+	// Deterministic: fingerprinting the same cert twice returns the same value.
+	if fpA != anscrypto.SPKIFingerprint(a) {
+		t.Errorf("SPKIFingerprint is non-deterministic")
+	}
+
+	// SPKI fingerprint must differ from the full-cert fingerprint —
+	// they hash different byte ranges of the same structure.
+	certFP := anscrypto.CertificateFingerprint(a)
+	if fpA == certFP {
+		t.Errorf("SPKI fingerprint must differ from full-cert fingerprint for the same cert")
+	}
+}
+
+func TestSPKIFingerprintFromPEM(t *testing.T) {
+	t.Parallel()
+	pemStr, cert := issueSelfSigned(t, "a", nil, time.Now().Add(-time.Hour), time.Now().Add(time.Hour))
+
+	t.Run("matches SPKIFingerprint on the parsed cert", func(t *testing.T) {
+		got, err := anscrypto.SPKIFingerprintFromPEM(pemStr)
+		if err != nil {
+			t.Fatalf("SPKIFingerprintFromPEM: %v", err)
+		}
+		want := anscrypto.SPKIFingerprint(cert)
+		if got != want {
+			t.Errorf("SPKIFingerprintFromPEM = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("error on empty PEM", func(t *testing.T) {
+		_, err := anscrypto.SPKIFingerprintFromPEM("")
+		if !errors.Is(err, anscrypto.ErrPEMParse) {
+			t.Errorf("want ErrPEMParse, got %v", err)
+		}
+	})
+
+	t.Run("error on non-certificate PEM", func(t *testing.T) {
+		_, err := anscrypto.SPKIFingerprintFromPEM("-----BEGIN PRIVATE KEY-----\nYQ==\n-----END PRIVATE KEY-----\n")
+		if !errors.Is(err, anscrypto.ErrPEMParse) {
+			t.Errorf("want ErrPEMParse, got %v", err)
+		}
+	})
+
+	t.Run("error on invalid DER inside certificate block", func(t *testing.T) {
+		_, err := anscrypto.SPKIFingerprintFromPEM("-----BEGIN CERTIFICATE-----\nYQ==\n-----END CERTIFICATE-----\n")
+		if !errors.Is(err, anscrypto.ErrCertParse) {
+			t.Errorf("want ErrCertParse, got %v", err)
+		}
+	})
+}

@@ -131,6 +131,11 @@ type ExpectedDNSRecord struct {
 // fingerprint — a SHA-256 over the full DER cert (internal/crypto/x509.go
 // CertificateFingerprint) — so selector 0 is what matches those bytes.
 //
+// Note: selector 0 does NOT survive cert rotation when the key is
+// reused. For auto-renewing CAs (Let's Encrypt, short-lived issuers)
+// prefer TLSARecordForCertSPKI, which emits `3 1 1` and survives
+// rollover without a DNS change as long as the key pair is held steady.
+//
 // Required=false: a TLSA record is only trustworthy in a DNSSEC-signed
 // zone, which the domain layer cannot know. The verify layer enforces
 // the stricter rule at query time: a DNSSEC-validated TLSA response MUST
@@ -140,6 +145,36 @@ func TLSARecordForCert(fqdn, fingerprint string) ExpectedDNSRecord {
 		Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
 		Type:     DNSRecordTLSA,
 		Value:    fmt.Sprintf("3 0 1 %s", fingerprint),
+		Purpose:  PurposeCertificateBinding,
+		Required: false,
+		TTL:      3600,
+	}
+}
+
+// TLSARecordForCertSPKI builds a DANE-EE TLSA record using selector 1
+// (SubjectPublicKeyInfo) and matching-type 1 (SHA-256). The record
+// format is `3 1 1 <hex>` where hex is the SHA-256 of the certificate's
+// SPKI DER encoding (RFC 6698 §2.1).
+//
+// Unlike TLSARecordForCert (`3 0 1`), a `3 1 1` record is bound to the
+// public key, not the full certificate. A cert renewal that reuses the
+// same key pair — the normal behavior for auto-renewing CAs such as
+// Let's Encrypt — produces the same SPKI fingerprint, so the DNS record
+// does not need to change on rotation. This makes `3 1 1` the
+// appropriate default for any registration backed by an auto-renewing
+// CA.
+//
+// `spkiFingerprint` is the lowercase hex SHA-256 of the certificate's
+// SubjectPublicKeyInfo DER bytes. Compute it with
+// internal/crypto.SPKIFingerprint(*x509.Certificate) or
+// internal/crypto.SPKIFingerprintFromPEM(leafPEM) at the call site.
+//
+// Required=false follows the same DNSSEC-zone caveat as TLSARecordForCert.
+func TLSARecordForCertSPKI(fqdn, spkiFingerprint string) ExpectedDNSRecord {
+	return ExpectedDNSRecord{
+		Name:     fmt.Sprintf("_443._tcp.%s", fqdn),
+		Type:     DNSRecordTLSA,
+		Value:    fmt.Sprintf("3 1 1 %s", spkiFingerprint),
 		Purpose:  PurposeCertificateBinding,
 		Required: false,
 		TTL:      3600,
