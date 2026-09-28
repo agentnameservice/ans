@@ -121,7 +121,15 @@ func resolveBadge(ctx context.Context, lookup txtLookupFunc, fqdn string) (badge
 	if name == "" {
 		return badge{}, errors.New("empty FQDN")
 	}
-	owner := badgeOwnerPrefix + name
+	// Query the owner as an absolute name. Trimming the caller's
+	// trailing dot above normalizes the input, but leaving the query
+	// relative hands it to the system resolver's search list: with a
+	// search domain configured and no badge at the name asked for,
+	// `_ans-badge.example.test.<search-domain>.` can answer instead,
+	// and the tool would report that it found example.test's badge. A
+	// registration is anchored to one absolute name, so re-root the
+	// owner and let a missing badge be a missing badge.
+	owner := badgeOwnerPrefix + name + "."
 	txts, err := lookup(ctx, owner)
 	if err != nil {
 		return badge{}, fmt.Errorf("lookup TXT %s: %w", owner, err)
@@ -320,6 +328,15 @@ func badgeStep(ctx context.Context, in badgeStepInput) (string, string) {
 	switch {
 	case !in.URLExplicit:
 		fmt.Fprintf(out, "    log:     %s (named by the badge; -url not set)\n", baseURL)
+		// Say what adopting the badge's log does and does not
+		// establish. Verifying against keys that same log advertises
+		// proves the receipt is internally consistent with it; it says
+		// nothing about whether the log is one the reader trusts. A
+		// reader who wants to choose that authority has to name it.
+		fmt.Fprintln(out,
+			"    note:    keys come from this log, so success proves consistency with it,")
+		fmt.Fprintln(out,
+			"             not that the log is independently trusted — pass -url or -pubkey to choose.")
 	case sameBaseURL(in.ConfiguredURL, b.TLBaseURL):
 		baseURL = in.ConfiguredURL
 		fmt.Fprintf(out, "    log:     %s (badge names the same log)\n", baseURL)

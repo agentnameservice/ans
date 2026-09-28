@@ -180,10 +180,15 @@ func TestResolveBadge_QueriesTheBadgeOwnerName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("resolveBadge: %v", err)
 	}
-	if want := "_ans-badge.agent.example.com"; asked != want {
+	// Rooted, with the trailing dot restored after normalization. A
+	// relative query would be subject to the system resolver's search
+	// list, so a name with no badge of its own could be answered by
+	// `_ans-badge.agent.example.com.<search-domain>.` and reported as
+	// this name's registration.
+	if want := "_ans-badge.agent.example.com."; asked != want {
 		t.Errorf("queried %q, want %q", asked, want)
 	}
-	if b.Owner != "_ans-badge.agent.example.com" {
+	if b.Owner != "_ans-badge.agent.example.com." {
 		t.Errorf("Owner = %q", b.Owner)
 	}
 	if b.AgentID != testAgentID {

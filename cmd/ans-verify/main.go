@@ -63,6 +63,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/tl/receipt"
 )
 
@@ -183,6 +184,23 @@ func main() {
 	// --- Step 4: Cryptographic verification ------------------------
 	fmt.Println("── Step 4: Cryptographic verification ──")
 	verifyReceiptStep(receiptBytes, keys, keysByHash)
+	// In -fqdn mode the signature alone does not answer the question
+	// that was asked: bind the verified registration back to the
+	// hostname the caller named before anything reports success.
+	if fqdn != "" {
+		signedPayload, err := receipt.ExtractPayload(receiptBytes)
+		if err != nil {
+			// Cannot read what was signed, so cannot say it belongs to
+			// the requested host. In -fqdn mode that is a failure, not
+			// a skipped check.
+			fatalf("extract the signed event to bind %s: %v", normalizeHost(fqdn), err)
+		}
+		if err := bindRequestedFQDN(fqdn, signedPayload); err != nil {
+			fatalf("%v", err)
+		}
+		fmt.Printf("  ✓ signed registration names the requested host (%s)\n",
+			normalizeHost(fqdn))
+	}
 	fmt.Println()
 
 	// --- Step 5: Status token (COSE_Sign1 OCSP-style stapled token) --
@@ -380,15 +398,7 @@ func printEventSummary(payload []byte) {
 	if err := json.Unmarshal(payload, &env); err != nil {
 		return
 	}
-	p, ok := env["payload"].(map[string]any)
-	if !ok {
-		return
-	}
-	prod, ok := p["producer"].(map[string]any)
-	if !ok {
-		return
-	}
-	evt, ok := prod["event"].(map[string]any)
+	evt, ok := signedEvent(env)
 	if !ok {
 		return
 	}
@@ -446,6 +456,92 @@ func compareBadge(ctx context.Context, baseURL, agentID string, receiptBytes []b
 		fmt.Printf("  ✓ receipt leafHash: %s (derived from attached event bytes)\n",
 			hex.EncodeToString(receiptLeaf))
 	}
+}
+
+// signedEvent walks a decoded receipt envelope down to the producer
+// event object — `payload.producer.event` — the part of the receipt the
+// TL's signature actually covers. Shared by the readout and by the
+// requested-host binding so both read the same field from the same
+// place.
+func signedEvent(env map[string]any) (map[string]any, bool) {
+	p, ok := env["payload"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	prod, ok := p["producer"].(map[string]any)
+	if !ok {
+		return nil, false
+	}
+	evt, ok := prod["event"].(map[string]any)
+	return evt, ok
+}
+
+// hostFromEventPayload returns the FQDN the signed event names,
+// preferring `agent.host` and falling back to the host segment of
+// `ansName` (parsed with the registry's own parser rather than a
+// hand-rolled split, so a versioned name is never mis-sliced). The
+// second result is false when the event names no host at all.
+func hostFromEventPayload(payload []byte) (string, bool) {
+	var env map[string]any
+	if err := json.Unmarshal(payload, &env); err != nil {
+		return "", false
+	}
+	evt, ok := signedEvent(env)
+	if !ok {
+		return "", false
+	}
+	if agent, ok := evt["agent"].(map[string]any); ok {
+		if host, ok := agent["host"].(string); ok && strings.TrimSpace(host) != "" {
+			return host, true
+		}
+	}
+	if raw, ok := evt["ansName"].(string); ok {
+		if parsed, err := domain.ParseAnsName(raw); err == nil {
+			return parsed.FQDN(), true
+		}
+	}
+	return "", false
+}
+
+// normalizeHost puts a hostname in the one form host comparisons are
+// made in: no trailing root dot, lowercased. DNS names are
+// case-insensitive, and the requested name may or may not be rooted.
+func normalizeHost(host string) string {
+	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+}
+
+// bindRequestedFQDN asserts that the registration just verified is the
+// registration for the hostname the caller asked about.
+//
+// Without this the signature checks prove only that SOME registration
+// was signed by the log — not that it is this host's. `_ans-badge` is
+// a TXT record under the queried name, and nothing stops a name that
+// holds no registration from publishing a badge pointing at another
+// host's agentId: the receipt and status token then verify perfectly,
+// name that other host throughout, and the tool would print VERIFIED
+// and exit 0 for a hostname with no registration of its own. An
+// unregistered name could borrow a valid proof without breaking a
+// single signature. Pinning -url and -pubkey does not help, because
+// the forged link is the badge, not the log.
+//
+// A mismatch is fatal, not a warning. The question this tool answers
+// in -fqdn mode is "is this host registered in ANS", and a receipt for
+// a different host is a no, not a qualified yes.
+// Returns the error rather than exiting so the rejection is testable;
+// main turns a non-nil result into the fatal exit.
+func bindRequestedFQDN(requested string, payload []byte) error {
+	want := normalizeHost(requested)
+	host, ok := hostFromEventPayload(payload)
+	if !ok {
+		return fmt.Errorf("signed event names no host (neither agent.host nor a parsable "+
+			"ansName), so the registration cannot be bound to the requested %s", want)
+	}
+	if got := normalizeHost(host); got != want {
+		return fmt.Errorf("requested host %s but the signed registration names %s — "+
+			"the badge at %s%s points at another host's registration",
+			want, got, badgeOwnerPrefix, want)
+	}
+	return nil
 }
 
 // kidFromReceipt best-effort extracts the 4-byte key ID from the
