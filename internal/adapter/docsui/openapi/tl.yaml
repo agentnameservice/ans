@@ -20,8 +20,10 @@ info:
         verifier backwards compatibility (never emitted).
       - Receipts are SCITT COSE_Sign1 (RFC 8152 tag 18) with VDS 1
         (RFC 9162_SHA256) and the VDP inclusion proof in the
-        unprotected header (label 396). See
-        `internal/tl/receipt/constants.go` for the concrete labels.
+        unprotected header (label 396). The signature covers the
+        protected header and the attached event; the inclusion proof
+        is not signed. See `internal/tl/receipt/constants.go` for the
+        concrete labels.
       - `/root-keys` emits the sumdb-note verification format
         byte-for-byte compatible with the reference.
       - `/internal/v1/producer-keys` admin routes match the reference
@@ -178,6 +180,25 @@ paths:
         SHA-256 prefix of the signing SPKI-DER — cross-reference it
         with `/root-keys` to identify the verifier key.
         Response body is binary CBOR; do not attempt to parse as JSON.
+
+        What a verified receipt proves: the key named by `kid` signed
+        the protected header and the attached event. The tree size,
+        leaf index and inclusion path in the VDP header are not
+        signed. Walking the path yields a root hash; the receipt
+        proves inclusion in the published tree only once that root
+        is compared with a checkpoint the log signed for the same
+        tree size.
+
+        Tree size: a receipt is minted against a checkpoint that
+        covers its leaf, and a log may return that receipt unchanged
+        after the tree has grown. Verifiers must not expect the
+        receipt's tree size to equal the size served at `/checkpoint`;
+        a smaller value is normal and does not invalidate the receipt.
+        To relate the two heads, fetch the checkpoint signed at the
+        receipt's tree size from `/v1/log/checkpoint/history`
+        (`fromSize` and `toSize` equal to that size), or verify an
+        RFC 6962 consistency proof from the receipt's tree size to
+        the current checkpoint using the tiles under `/tile/`.
       operationId: getReceipt
       parameters:
         - $ref: '#/components/parameters/AgentIdPath'
@@ -576,12 +597,26 @@ paths:
       tags: [Tlog Tiles]
       summary: Latest signed checkpoint (sumdb note format)
       description: |
-        Signed checkpoint note produced by Tessera using the
-        ed25519 signer in `note.pub`. Format matches
-        `golang.org/x/mod/sumdb/note` — clients verify with the
-        key advertised at `/root-keys` (or pulled from the
-        `note.pub` file the operator publishes). Matches C2SP
-        tlog-tiles spec exactly.
+        Signed checkpoint note for the latest tree head in the C2SP
+        signed-note format: origin, decimal tree size, base64 root
+        hash, a blank line, then one or more signature lines. Each
+        signature line names the signer and carries the 4-byte key
+        hash followed by the signature. The key hash is the same
+        SHA-256(SPKI-DER) prefix that `/root-keys` lists and that
+        receipts carry as `kid`, so the checkpoint verifies with the
+        keys a verifier already pins; no separate `note.pub` key is
+        involved. The primary signature is ECDSA P-256 (ASN.1 DER)
+        over SHA-256 of the note body. The log may append further
+        signature lines under the same key hash, such as a compact
+        JWS carrying the same tree head. `golang.org/x/mod/sumdb/note`
+        cannot verify these notes: it accepts Ed25519 signers only
+        and derives a different key hash.
+
+        A verified checkpoint proves that the log signed this tree
+        head. It does not by itself prove that the head extends the
+        log's earlier heads, which an RFC 6962 consistency proof
+        built from `/tile/` establishes, or that other clients are
+        shown the same head, which needs a witness.
       operationId: getCheckpoint
       responses:
         '200':
