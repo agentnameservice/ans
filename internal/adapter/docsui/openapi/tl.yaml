@@ -182,20 +182,25 @@ paths:
         Response body is binary CBOR; do not attempt to parse as JSON.
 
         What a verified receipt proves: the key named by `kid` signed
-        the protected header and the attached event. The tree size,
-        leaf index and inclusion path in the VDP header are not
-        signed. Walking the path yields a root hash; the receipt
-        proves inclusion in the published tree only once that root
-        is compared with a checkpoint the log signed for the same
-        tree size.
+        the protected header and the attached event, so the receipt is
+        the log's authenticated statement that it sealed that event.
+        For a relying party acting on the log's assertions, that
+        signature is the check. The tree size, leaf index and
+        inclusion path in the VDP header are not signed; walking the
+        path yields a root hash that supports a separate, optional
+        publication check: comparing it with the checkpoint the log
+        signed for the same tree size confirms that the log published
+        a tree head containing the leaf. That check does not establish
+        the log's honesty, since the same log signs both artifacts.
 
         Tree size: a receipt is minted against a checkpoint that
         covers its leaf, and a log may return that receipt unchanged
         after the tree has grown. Verifiers must not expect the
         receipt's tree size to equal the size served at `/checkpoint`;
-        a smaller value is normal and does not invalidate the receipt.
-        To relate the two heads, fetch the checkpoint signed at the
-        receipt's tree size from `/v1/log/checkpoint/history`
+        a smaller value is normal and does not invalidate the receipt,
+        the identity, or the signature. For the publication check on
+        such a receipt, fetch the checkpoint signed at the receipt's
+        tree size from `/v1/log/checkpoint/history`
         (`fromSize` and `toSize` equal to that size), or verify an
         RFC 6962 consistency proof from the receipt's tree size to
         the current checkpoint using the tiles under `/tile/`.
