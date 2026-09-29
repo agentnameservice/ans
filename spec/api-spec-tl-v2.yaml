@@ -609,8 +609,11 @@ paths:
         over SHA-256 of the note body. The log may append further
         signature lines under the same key hash, such as a compact
         JWS carrying the same tree head. `golang.org/x/mod/sumdb/note`
-        cannot verify these notes: it accepts Ed25519 signers only
-        and derives a different key hash.
+        verifies these notes only through a caller-supplied
+        `note.Verifier` (ECDSA over the note body, `KeyHash` equal to
+        the 4-byte key hash read as a big-endian uint32); its built-in
+        `note.NewVerifier` parser accepts Ed25519 keys only and derives
+        a different key hash, so it cannot consume `/root-keys` lines.
 
         A verified checkpoint proves that the log signed this tree
         head. It does not by itself prove that the head extends the
