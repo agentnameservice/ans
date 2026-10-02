@@ -277,8 +277,9 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
             acme_challenge_expires_at_ms = ?,
             discovery_profiles = ?,
             updated_at_ms = ?
-        WHERE id = ?`
-	_, err = s.db.extx(ctx).ExecContext(ctx, q,
+        WHERE id = ? AND (status != 'REVOKED' OR ? = 'REVOKED')
+          AND (status != 'DEPRECATED' OR ? IN ('DEPRECATED', 'REVOKED'))`
+	res, err := s.db.extx(ctx).ExecContext(ctx, q,
 		string(agent.Status),
 		agent.Details.DisplayName,
 		agent.Details.Description,
@@ -289,9 +290,19 @@ func (s *AgentStore) Save(ctx context.Context, agent *domain.AgentRegistration) 
 		order.expiresMs,
 		nullableString(encodeDiscoveryProfiles(agent.DiscoveryProfiles)),
 		now,
-		agent.ID,
+		agent.ID, string(agent.Status), string(agent.Status),
 	)
-	return mapSQLErr(err)
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "registration is terminal or no longer exists")
+	}
+	return nil
 }
 
 // FindByID looks up a registration by primary key.

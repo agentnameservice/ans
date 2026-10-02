@@ -324,10 +324,20 @@ func (s *RegistrationService) SubmitServerCSR(ctx context.Context, agentID, csrP
 	if err != nil {
 		return "", err
 	}
-	if err := s.agents.Save(ctx, reg); err != nil {
-		return "", err
-	}
-	if err := s.certs.SaveCSR(ctx, agentID, newCSR); err != nil {
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.agents.FindByAgentID(txCtx, agentID)
+		if err != nil {
+			return err
+		}
+		if current.Status.IsTerminal() || current.Status == domain.StatusDeprecated {
+			return domain.NewConflictError("AGENT_STATE_CONFLICT", "terminal or deprecated registration cannot accept a server CSR")
+		}
+		current.ServerCSR = newCSR
+		if err := s.agents.Save(txCtx, current); err != nil {
+			return err
+		}
+		return s.certs.SaveCSR(txCtx, agentID, newCSR)
+	}); err != nil {
 		return "", err
 	}
 	return csrID, nil
@@ -1450,6 +1460,34 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 	// plus the DNS records the operator should tear down (map-typed
 	// `dnsRecordsProvisioned`). V2 uses the unified cert arrays.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.agents.FindByAgentID(txCtx, reg.AgentID)
+		if err != nil {
+			return err
+		}
+		if current.Status == domain.StatusRevoked {
+			reg = current
+			return nil
+		}
+		current.Endpoints = reg.Endpoints
+		current.ServerCert = reg.ServerCert
+		if err := current.Revoke(in.Reason, now); err != nil {
+			return err
+		}
+		latestCerts, err := s.certs.FindIdentityCertificatesByAgent(txCtx, reg.AgentID)
+		if err != nil {
+			return err
+		}
+		// Every valid certificate must have reached the CA revocation step.
+		// A concurrent rotation commits before this transaction or is rejected
+		// after it. Retry the revoke if it committed while the CA was called.
+		if !revocationCertsCovered(certs, latestCerts) {
+			return domain.NewConflictError("CERTIFICATES_CHANGED", "identity certificates changed during revocation; retry the revocation")
+		}
+		reg = current
+		certs = latestCerts
+		if err := s.cancelAgentModifications(txCtx, reg.AgentID, now); err != nil {
+			return err
+		}
 		if err := s.agents.Save(txCtx, reg); err != nil {
 			return err
 		}
@@ -1477,11 +1515,9 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return nil, err
 	}
 
-	return &RevokeResult{
-		Registration:       reg,
-		RevokedAt:          now,
-		DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
-	}, nil
+	s.logger.Info().Str("agentId", reg.AgentID).Str("schemaVersion", in.SchemaVersion).
+		Msg("revocation and pending-work cancellation committed; TL publication queued")
+	return &RevokeResult{Registration: reg, RevokedAt: now, DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg)}, nil
 }
 
 // buildAgentRevokedV2Event assembles the V2 AGENT_REVOKED inner

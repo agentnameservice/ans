@@ -239,7 +239,7 @@ func TestVerifyDNS_SealFailure_FailsClosed(t *testing.T) {
 	if n := len(fx.sealer.sealed()); n != 0 {
 		t.Errorf("no event should be recorded as sealed on failure; got %d", n)
 	}
-	if rows, _ := fx.outboxStore.Claim(ctx, 100); len(rows) != 0 {
+	if rows, _ := fx.outboxStore.Ready(ctx, 100); len(rows) != 0 {
 		t.Errorf("activation must not enqueue to the outbox; got %d rows", len(rows))
 	}
 
@@ -344,7 +344,7 @@ func TestVerifyDNS_SealedActivationIsFeedVisible(t *testing.T) {
 	}
 
 	// The worker must never see the row: it is delivered at insert.
-	if rows, _ := fx.outboxStore.Claim(ctx, 100); len(rows) != 0 {
+	if rows, _ := fx.outboxStore.Ready(ctx, 100); len(rows) != 0 {
 		t.Fatalf("sealed activation must not be claimable by the outbox worker; got %d rows", len(rows))
 	}
 

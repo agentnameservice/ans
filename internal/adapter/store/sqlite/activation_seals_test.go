@@ -20,7 +20,7 @@ func TestActivationSealPersistsFirstSignedPayloadAcrossRestart(t *testing.T) {
 	if err != nil || lane != "V1" || !bytes.Equal(saved, first) {
 		t.Fatalf("prepare: %s %s %v", lane, saved, err)
 	}
-	rows, err := store.Claim(t.Context(), 100)
+	rows, err := store.Ready(t.Context(), 100)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("synchronous evidence was queued for worker: %v %v", rows, err)
 	}

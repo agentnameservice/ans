@@ -82,7 +82,7 @@ func renewalInput(t *testing.T, fx *regFixture, kind string) service.SubmitRenew
 
 func assertRenewalSnapshot(t *testing.T, fx *regFixture, lane string, identities, servers int) {
 	t.Helper()
-	rows, err := fx.outboxStore.Claim(context.Background(), 100)
+	rows, err := fx.outboxStore.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,11 +132,11 @@ func assertRenewalSnapshot(t *testing.T, fx *regFixture, lane string, identities
 		}
 	}
 	// A worker retry must read identical bytes/signatures before acknowledging.
-	retry, err := fx.outboxStore.Claim(context.Background(), 100)
+	retry, err := fx.outboxStore.Ready(context.Background(), 100)
 	if err != nil || len(retry) != 1 || !bytes.Equal(row.PayloadJSON, retry[0].PayloadJSON) {
 		t.Fatalf("retry changed the signed outbox payload: %v", err)
 	}
-	if err := fx.outboxStore.MarkSent(context.Background(), row.ID, "test-renewal-log"); err != nil {
+	if err := fx.outboxStore.MarkSent(context.Background(), row.ID, "", "test-renewal-log"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -198,7 +198,7 @@ func TestBYOCRenewal_ChallengeAndCancellationDoNotChangeLiveCertificate(t *testi
 	if len(live) != 1 || live[0].Fingerprint != before.Fingerprint {
 		t.Fatal("unverified or canceled certificate entered the live certificate set")
 	}
-	rows, err := fx.outboxStore.Claim(ctx, 100)
+	rows, err := fx.outboxStore.Ready(ctx, 100)
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("canceled renewal published: rows=%d error=%v", len(rows), err)
 	}
@@ -246,7 +246,7 @@ func TestCertificateRenewal_OutboxFailureRollsBackCertificateAndRenewal(t *testi
 
 func assertNoRenewalOutbox(t *testing.T, store *sqlite.OutboxStore) {
 	t.Helper()
-	rows, err := store.Claim(context.Background(), 100)
+	rows, err := store.Ready(context.Background(), 100)
 	if err != nil && !errors.Is(err, domain.ErrNotFound) {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestIdentityRotation_DNSFailureDoesNotInventAttestations(t *testing.T) {
 	if _, err := svc.SubmitIdentityCSR(t.Context(), id, testCSR(t, fx.req.AnsName.String())); err != nil {
 		t.Fatalf("DNS observation must not become a fresh identity proof gate: %v", err)
 	}
-	rows, err := fx.outboxStore.Claim(t.Context(), 100)
+	rows, err := fx.outboxStore.Ready(t.Context(), 100)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("rotation event missing: %v %v", rows, err)
 	}
