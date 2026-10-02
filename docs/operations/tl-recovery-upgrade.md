@@ -40,4 +40,3 @@ Malformed supplied certificate-expiry timestamps are rejected at ingest.
 Historical malformed evidence fails consistently when serving badges/status
 rather than falling back to ACTIVE for one endpoint and erroring in another.
 Absent dates in legacy records remain supported.
-
