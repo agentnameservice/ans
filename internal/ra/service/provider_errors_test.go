@@ -2,14 +2,15 @@ package service
 
 import (
 	"errors"
+	"testing"
+
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
-	"testing"
 )
 
 func TestCertificateProviderFailureClassification(t *testing.T) {
 	var de *domain.Error
-	err := certificateProviderError(&port.ProviderThrottled{RetryAfter: "120"}, "ISSUE_FAILED", "failed")
+	err := certificateProviderError(&port.ProviderThrottledError{RetryAfter: "120"}, "ISSUE_FAILED", "failed")
 	if !errors.As(err, &de) || de.Code != "CERT_PROVIDER_THROTTLED" || de.RetryAfter != "120" || !errors.Is(err, domain.ErrUnavailable) {
 		t.Fatalf("throttle mapping: %v", err)
 	}

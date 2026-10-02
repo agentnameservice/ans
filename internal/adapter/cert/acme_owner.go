@@ -6,11 +6,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/rs/zerolog"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/rs/zerolog"
 
 	lru "github.com/hashicorp/golang-lru/v2"
 
