@@ -459,6 +459,15 @@ func mapCSRStatus(c *domain.AgentCSR) csrStatusResponse {
 
 // ----- AgentStatus (matches V2 spec §1133) -----
 
+// AgentStatus phase and step vocabulary (spec/api-spec-v2.yaml, AgentStatus.phase).
+const (
+	phaseInitialization      = "INITIALIZATION"
+	phaseDomainValidation    = "DOMAIN_VALIDATION"
+	phaseCertificateIssuance = "CERTIFICATE_ISSUANCE"
+	phaseDNSProvisioning     = "DNS_PROVISIONING"
+	phaseCompleted           = "COMPLETED"
+)
+
 type agentStatus struct {
 	Status         string   `json:"status"`
 	Phase          string   `json:"phase,omitempty"`
@@ -480,28 +489,28 @@ func phaseFor(reg *domain.AgentRegistration) string {
 	switch reg.Status {
 	case domain.StatusPendingValidation:
 		if reg.CertOrder.State == domain.OrderStateIssuing {
-			return "CERTIFICATE_ISSUANCE"
+			return phaseCertificateIssuance
 		}
-		return "DOMAIN_VALIDATION"
+		return phaseDomainValidation
 	case domain.StatusPendingDNS:
-		return "DNS_PROVISIONING"
+		return phaseDNSProvisioning
 	case domain.StatusActive:
-		return renewalStatusCompleted
+		return phaseCompleted
 	default:
-		return "INITIALIZATION"
+		return phaseInitialization
 	}
 }
 
 func completedStepsFor(reg *domain.AgentRegistration) []string {
 	switch {
 	case reg.Status == domain.StatusPendingValidation && reg.CertOrder.State == domain.OrderStateIssuing:
-		return []string{"DOMAIN_VALIDATION"}
+		return []string{phaseDomainValidation}
 	case reg.Status == domain.StatusPendingDNS:
 		// The cert exists by PENDING_DNS — issuance completes in the
 		// same transaction that advances the lifecycle.
-		return []string{"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE"}
+		return []string{phaseDomainValidation, phaseCertificateIssuance}
 	case reg.Status == domain.StatusActive:
-		return []string{"DOMAIN_VALIDATION", "CERTIFICATE_ISSUANCE", "DNS_PROVISIONING"}
+		return []string{phaseDomainValidation, phaseCertificateIssuance, phaseDNSProvisioning}
 	default:
 		return nil
 	}
@@ -510,11 +519,11 @@ func completedStepsFor(reg *domain.AgentRegistration) []string {
 func pendingStepsFor(reg *domain.AgentRegistration) []string {
 	switch {
 	case reg.Status == domain.StatusPendingValidation && reg.CertOrder.State == domain.OrderStateIssuing:
-		return []string{"CERTIFICATE_ISSUANCE"}
+		return []string{phaseCertificateIssuance}
 	case reg.Status == domain.StatusPendingValidation:
-		return []string{"DOMAIN_VALIDATION"}
+		return []string{phaseDomainValidation}
 	case reg.Status == domain.StatusPendingDNS:
-		return []string{"DNS_PROVISIONING"}
+		return []string{phaseDNSProvisioning}
 	default:
 		return nil
 	}
