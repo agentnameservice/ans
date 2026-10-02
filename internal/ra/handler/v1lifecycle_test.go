@@ -24,7 +24,7 @@ func TestV1VerifyACME_AdvancesStateNoTLEmit(t *testing.T) {
 	agentID, _ := fx.v1RegisterAgent(t, "alice", "agent.example.com", "1.0.0")
 
 	// Snapshot outbox before verify-acme so we can diff afterwards.
-	rowsBefore, err := fx.outbox.Claim(context.Background(), 100)
+	rowsBefore, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,7 @@ func TestV1VerifyACME_AdvancesStateNoTLEmit(t *testing.T) {
 	}
 
 	// No new outbox rows — V1 verify-acme is a no-op on the TL.
-	rowsAfter, err := fx.outbox.Claim(context.Background(), 100)
+	rowsAfter, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -104,7 +104,7 @@ func TestV1VerifyDNS_EmitsAgentRegistered(t *testing.T) {
 	if registered != 1 {
 		t.Errorf("V1 lifecycle must seal exactly one AGENT_REGISTERED leaf; got %d", registered)
 	}
-	rows, err := fx.outbox.Claim(context.Background(), 100)
+	rows, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -228,7 +228,7 @@ func TestV1Revoke_EmitsAttestations(t *testing.T) {
 		t.Fatalf("revoke: %d %s", rec.Code, rec.Body)
 	}
 
-	rows, err := fx.outbox.Claim(context.Background(), 100)
+	rows, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +342,7 @@ func TestV1Revoke_EmitsAgentRevoked(t *testing.T) {
 	}
 
 	// Outbox: AGENT_REVOKED V1 envelope present.
-	rows, err := fx.outbox.Claim(context.Background(), 100)
+	rows, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestV1Revoke_NotOwned_403(t *testing.T) {
 
 func assertV1RenewalLane(t *testing.T, fx *handlerFixture) {
 	t.Helper()
-	rows, err := fx.outbox.Claim(t.Context(), 100)
+	rows, err := fx.outbox.Ready(t.Context(), 100)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("expected one renewal event: %v %v", rows, err)
 	}

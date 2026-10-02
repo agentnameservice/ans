@@ -24,13 +24,13 @@ func TestOutbox_RetryBackoffPreservesPerAgentOrder(t *testing.T) {
 		return id
 	}
 	first := enqueue("agent-a", time.Now().Add(-time.Minute))
-	if err := store.MarkFailed(t.Context(), first, 8, "temporary TL outage", time.Hour); err != nil {
+	if err := store.MarkFailed(t.Context(), first, "", 8, "temporary TL outage", time.Hour, false); err != nil {
 		t.Fatal(err)
 	}
 	second := enqueue("agent-a", time.Now().Add(-time.Minute))
 	other := enqueue("agent-b", time.Now().Add(-time.Minute))
 	assertClaimedOutboxIDs(t, store, other)
-	if err := store.MarkSent(t.Context(), first, "first-log-id"); err != nil {
+	if err := store.MarkSent(t.Context(), first, "", "first-log-id"); err != nil {
 		t.Fatal(err)
 	}
 	assertClaimedOutboxIDs(t, store, second, other)
@@ -38,7 +38,7 @@ func TestOutbox_RetryBackoffPreservesPerAgentOrder(t *testing.T) {
 
 func assertClaimedOutboxIDs(t *testing.T, store *sqlite.OutboxStore, want ...int64) {
 	t.Helper()
-	rows, err := store.Claim(t.Context(), 100)
+	rows, err := store.Ready(t.Context(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}

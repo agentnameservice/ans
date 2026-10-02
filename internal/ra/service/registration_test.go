@@ -46,7 +46,7 @@ func TestRegistration_NoOutboxEmit(t *testing.T) {
 		t.Fatalf("status: got %q want PENDING_VALIDATION", resp.Registration.Status)
 	}
 
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
+	rows, err := fx.outboxStore.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestRegistration_NoSigner(t *testing.T) {
 		t.Fatalf("RegisterAgent unsigned: %v", err)
 	}
 	// No outbox rows at register time — terminal-only event model.
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
+	rows, err := fx.outboxStore.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -449,3 +449,5 @@ func (failingOutbox) LoadActivationSeal(context.Context, string) (string, []byte
 func (failingOutbox) PrepareActivationSeal(context.Context, string, string, []byte) (string, []byte, error) {
 	return "", nil, errors.New("activation storage failure")
 }
+
+func (failingOutbox) CancelPending(context.Context, string) error { return nil }

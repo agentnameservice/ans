@@ -188,7 +188,7 @@ func (s renewalTestSnapshot) certificates(lane, family string) []renewalTestCert
 func publishRenewalTestOutbox(t *testing.T, fx *regFixture, log *tlservice.LogService) renewalTestSnapshot {
 	t.Helper()
 	ctx := context.Background()
-	rows, err := fx.outboxStore.Claim(ctx, 100)
+	rows, err := fx.outboxStore.Ready(ctx, 100)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("renewal outbox rows=%d, err=%v", len(rows), err)
 	}
@@ -205,7 +205,7 @@ func publishRenewalTestOutbox(t *testing.T, fx *regFixture, log *tlservice.LogSe
 		t.Fatalf("renewal completion event = %+v", snapshot)
 	}
 	logID := appendRenewalTestEvent(t, log, row.SchemaVersion, payload.InnerEventCanonical, payload.ProducerSignature)
-	if err := fx.outboxStore.MarkSent(ctx, row.ID, logID); err != nil {
+	if err := fx.outboxStore.MarkSent(ctx, row.ID, "", logID); err != nil {
 		t.Fatal(err)
 	}
 	return snapshot

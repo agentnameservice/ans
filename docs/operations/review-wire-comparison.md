@@ -24,8 +24,8 @@ success and returns 503 {"status":"not_ready"} when its index is unavailable.
 No public route is added. Signed event fields, algorithms, and receipt/checkpoint
 shapes are unchanged. Durable activation evidence is an internal storage change.
 
-The current agent lifecycle acceptance policy is retained while its revocation
-and cancellation contract is explicitly deferred. Agent state/timestamp errors
-are validation errors (422), not the generic domain conflict mapping (409).
-Identity ingest does not run those agent-state rules. Both V1 and V2 agent
-ingest routes are now documented explicitly.
+The TL lifecycle changes are described in [the contract comparison](tl-feedback-contract.md).
+State/timestamp conflicts use 409; revocation bypasses timestamp ordering after
+ownership checks. See [revocation delivery](revocation-delivery.md) for atomic
+pending-work cancellation, token-fenced claims, dead-letter handling, and the
+shared transactional database requirement. Wire response fields are unchanged.

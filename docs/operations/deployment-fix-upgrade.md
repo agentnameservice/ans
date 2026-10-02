@@ -86,5 +86,7 @@ atomically. Success is logged only after transaction commit. V1 HTTP renewal
 and rotation handlers are pinned to V1 outbox events by handler regressions.
 
 Post-renewal DNS re-verification/resealing remains a separate protocol change.
-Current TL lifecycle rejection and RA outbox ordering are not changed by these
-follow-ups while the multi-pod revocation-cancellation contract is being decided.
+Revocation now atomically cancels pending modifications and bypasses them for
+TL delivery. Stop old RA workers before applying migration 015 and see
+[revocation delivery](revocation-delivery.md) for retry/dead-letter operation and
+[TL acceptance policy](tl-feedback-contract.md) for terminal-state protection.
