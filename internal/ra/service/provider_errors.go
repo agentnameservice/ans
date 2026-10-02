@@ -3,12 +3,13 @@ package service
 import (
 	"errors"
 	"fmt"
+
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
 )
 
 func certificateProviderError(err error, fallbackCode, detail string) error {
-	var throttled *port.ProviderThrottled
+	var throttled *port.ProviderThrottledError
 	if errors.As(err, &throttled) {
 		return &domain.Error{Code: "CERT_PROVIDER_THROTTLED", Message: "certificate provider is temporarily rate limited; retry later",
 			RetryAfter: throttled.RetryAfter, Cause: fmt.Errorf("%w: %w", domain.ErrUnavailable, err)}
