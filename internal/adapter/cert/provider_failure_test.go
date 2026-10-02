@@ -2,22 +2,23 @@ package cert
 
 import (
 	"errors"
-	"github.com/agentnameservice/ans/internal/port"
-	"golang.org/x/crypto/acme"
 	"net/http"
 	"testing"
+
+	"github.com/agentnameservice/ans/internal/port"
+	"golang.org/x/crypto/acme"
 )
 
 func TestProviderFailurePreservesRetryHint(t *testing.T) {
 	for _, status := range []int{429, 503} {
 		original := &acme.Error{StatusCode: status, Header: http.Header{"Retry-After": []string{"120"}}}
-		var retry *port.ProviderThrottled
+		var retry *port.ProviderThrottledError
 		if err := providerFailure(original); !errors.As(err, &retry) || retry.RetryAfter != "120" || !errors.Is(err, original) {
 			t.Fatalf("throttle classification failed: %v", err)
 		}
 	}
 	normal := errors.New("transport failure")
-	if providerFailure(normal) != normal {
+	if !errors.Is(providerFailure(normal), normal) {
 		t.Fatal("non-throttle error changed")
 	}
 	if providerFailure(nil) != nil {
