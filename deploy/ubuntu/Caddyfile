@@ -5,6 +5,7 @@
 
 ra.ans.example.com {
 	redir /docs/ /docs 308
+	header Strict-Transport-Security "max-age=31536000"
 	# Keep authenticated API responses out of shared proxy caches.
 	header Cache-Control "no-store"
 	# Keep operational endpoints accessible only through localhost.
@@ -15,8 +16,11 @@ ra.ans.example.com {
 
 tl.ans.example.com {
 	redir /docs/ /docs 308
-	# Fresh status/revocation evidence must not be served from an edge cache.
-	header Cache-Control "no-store"
+	header Strict-Transport-Security "max-age=31536000"
+	# Mutable status and revocation evidence stays fresh. Leave tile and
+	# checkpoint cache policy to the TL instead of overriding every route.
+	@current path /v1/agents/* /v1/identities/* /v1/log/*
+	header @current Cache-Control "no-store"
 	# Public TL access is read-only. Ingestion and producer-key admin
 	# stay on the private backend, including both API versions.
 	@public {

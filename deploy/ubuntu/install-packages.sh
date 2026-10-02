@@ -30,18 +30,22 @@ install -m 0644 "$work/caddy.list" /etc/apt/sources.list.d/caddy-stable.list
 apt-get update
 apt-get install -y caddy
 
-# Ubuntu's golang-go may be older than the project's Go 1.26 minimum.
-# Stay on the project's Go 1.26 line: the pinned linter must understand
-# the compiler's export format. Verify the selected patch release SHA-256.
+# Build with the release line declared by this checkout; checksum the archive.
+ans_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
+ans_go_line=$(awk '$1 == "go" {split($2, v, "."); print v[1] "." v[2]; exit}' "$ans_repo/go.mod")
+if [[ ! $ans_go_line =~ ^[0-9]+\.[0-9]+$ ]]; then
+  echo "Cannot determine the Go release line from go.mod." >&2
+  exit 1
+fi
 case "$(dpkg --print-architecture)" in
   amd64) ans_arch=amd64 ;;
   arm64) ans_arch=arm64 ;;
   *) echo "Supported server architectures: amd64 and arm64" >&2; exit 1 ;;
 esac
-curl -fsSL --retry 3 'https://go.dev/dl/?mode=json' -o "$work/releases.json"
-ans_version=$(jq -er '[.[] | select(.stable == true and (.version | startswith("go1.26.")))][0].version' "$work/releases.json")
-if [[ ! $ans_version =~ ^go1\.26\.[0-9]+$ ]]; then
-  echo "No supported Go 1.26 patch release found in the upstream release index." >&2
+curl -fsSL --retry 3 'https://go.dev/dl/?mode=json&include=all' -o "$work/releases.json"
+ans_version=$(jq -er --arg prefix "go${ans_go_line}." '[.[] | select(.stable == true and (.version | startswith($prefix)))][0].version' "$work/releases.json")
+if [[ $ans_version != "go${ans_go_line}."* ]]; then
+  echo "No stable Go ${ans_go_line} patch release found in the upstream release index." >&2
   exit 1
 fi
 ans_archive=$(jq -er --arg v "$ans_version" --arg a "$ans_arch" \
