@@ -71,9 +71,16 @@ type AuthOIDC struct {
 // server certs. The identity CA (`Self`) is always required — every
 // agent gets an RA-issued identity cert.
 type CA struct {
-	Type   string    `koanf:"type"`
-	Self   *CASelf   `koanf:"self"`
-	Server *CAServer `koanf:"server"`
+	Type       string                `koanf:"type"`
+	Self       *CASelf               `koanf:"self"`
+	Server     *CAServer             `koanf:"server"`
+	Validation CertificateValidation `koanf:"validation"`
+}
+
+// CertificateValidation adds explicitly trusted private/staging roots to the
+// system pool. Chain verification is always enabled in executable wiring.
+type CertificateValidation struct {
+	RootsFile string `koanf:"roots-file"`
 }
 
 // CASelf configures the in-process self-signed identity CA.

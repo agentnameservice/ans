@@ -123,8 +123,8 @@ func NewServerSelfCA(dataDir, org string, validityDays int, opts ...ServerSelfCA
 // is identical to external providers'. Both DNS-01 and HTTP-01
 // challenges are offered; the owner satisfies whichever is easier to
 // publish, exactly as with an ACME provider.
-func (c *ServerSelfCA) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
-	if fqdn == "" {
+func (c *ServerSelfCA) CreateOrder(ctx context.Context, req port.CreateOrderRequest) (*domain.CertificateOrder, error) {
+	if req.FQDN == "" {
 		return nil, errors.New("cert: create order: fqdn is required")
 	}
 	dns01, err := randomToken()

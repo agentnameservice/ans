@@ -292,6 +292,8 @@ paths:
             schema:
               $ref: '#/components/schemas/AgentRegistrationRequest'
       responses:
+        '503':
+          $ref: '#/components/responses/CertificateProviderThrottled'
         '202':
           description: Registration accepted, pending validation
           content:
@@ -548,6 +550,8 @@ paths:
       parameters:
         - $ref: '#/components/parameters/AgentIdPath'
       responses:
+        '503':
+          $ref: '#/components/responses/CertificateProviderThrottled'
         '202':
           description: Validation successful, certificates pending
           content:
@@ -574,6 +578,8 @@ paths:
                 $ref: '#/components/schemas/ErrorResponse'
         '409':
           description: |
+            `CERT_ORDER_UPGRADE_REQUIRED` and `CERT_ORDER_OWNER_MISMATCH` identify
+            non-retryable owner/order conflicts that require a new order.
             `AGENT_HOST_TAKEN` — a different operator now holds this FQDN
             live (it activated first). This registration lost the host and
             was cancelled; it can no longer progress.
@@ -859,6 +865,8 @@ paths:
             schema:
               $ref: '#/components/schemas/ServerCertificateRenewalRequest'
       responses:
+        '503':
+          $ref: '#/components/responses/CertificateProviderThrottled'
         '202':
           description: Renewal accepted
           content:
@@ -996,6 +1004,10 @@ paths:
       parameters:
         - $ref: '#/components/parameters/AgentIdPath'
       responses:
+        '503':
+          $ref: '#/components/responses/CertificateProviderThrottled'
+        '409':
+          $ref: '#/components/responses/CertificateOrderConflict'
         '200':
           description: BYOC renewal completed synchronously
           content:
@@ -1668,6 +1680,29 @@ paths:
 
 
 components:
+  responses:
+    CertificateProviderThrottled:
+      description: >-
+        CERT_PROVIDER_THROTTLED — certificate provider returned a rate-limit or
+        temporary-capacity response. Retry later; the order is not marked failed.
+      headers:
+        Retry-After:
+          description: Validated provider delay in seconds or HTTP date, when supplied.
+          schema:
+            type: string
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+    CertificateOrderConflict:
+      description: >-
+        CERT_ORDER_UPGRADE_REQUIRED — a legacy order lacks persisted owner binding
+        or domain proof; cancel and recreate where supported. CERT_ORDER_OWNER_MISMATCH
+        — the order is bound to a different owner. No provider failure is recorded.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
   # ──────────────────────────────────────────────────────────────────
   # Security schemes — both providers (static API key + OIDC) accept
   # the same `Authorization: Bearer <token>` shape on the wire, so

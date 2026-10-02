@@ -36,6 +36,8 @@
 #                            production directory only when you mean
 #                            it — its rate limits are unforgiving
 #   ANS_ACME_EMAIL           optional account contact for expiry mail
+#   ANS_SERVER_ROOTS_FILE    additional trusted roots PEM; required
+#                            for Let's Encrypt staging certificates
 #
 # Prerequisites: go, curl, jq, openssl (openssl only needed by
 # run-lifecycle.sh, but checked here for early-failure UX).
@@ -89,6 +91,11 @@ fi
 
 ACME_DIRECTORY_URL="${ANS_ACME_DIRECTORY_URL:-https://acme-staging-v02.api.letsencrypt.org/directory}"
 ACME_EMAIL="${ANS_ACME_EMAIL:-}"
+# Optional additional server trust roots, e.g. Let's Encrypt staging.
+SERVER_ROOTS_FILE="${ANS_SERVER_ROOTS_FILE:-}"
+if [ -n "$SERVER_ROOTS_FILE" ] && [ ! -r "$SERVER_ROOTS_FILE" ]; then
+  fail "ANS_SERVER_ROOTS_FILE is not readable"
+fi
 if [ "$WITH_ACME" -eq 1 ]; then
   # The RA's challenge gate must check the real records the owner
   # publishes — a noop gate would answer the provider's challenge
@@ -202,6 +209,8 @@ auth:
 
 ca:
   type: self
+  validation:
+    roots-file: "$SERVER_ROOTS_FILE"
   self:
     org: "ANS Demo CA"
     validity-days: 365
@@ -251,6 +260,7 @@ store:
 
 tl-client:
   base-url: "$TL_URL"
+  public-base-url: "$TL_PUBLIC_URL"
   api-key: "tl-internal-key"
   timeout: 10s
 

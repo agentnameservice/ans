@@ -65,7 +65,12 @@ func WriteJSON(w http.ResponseWriter, status int, value any) {
 // path every handler uses (handlers embed responder).
 func (re responder) writeError(w http.ResponseWriter, err error) {
 	p := mapError(err)
-	if p.Status >= http.StatusInternalServerError {
+	writeRetryHint(w, err, p.Status)
+	if p.Status == http.StatusServiceUnavailable {
+		re.logger.Warn().Err(err).Str("code", p.Code).
+			Str("retryAfter", w.Header().Get("Retry-After")).Int("status", p.Status).
+			Msg("request failed because a dependency is unavailable")
+	} else if p.Status >= http.StatusInternalServerError {
 		// Non-domain fault — the client-facing detail is sanitized to a
 		// generic string, so record the real cause server-side or it is
 		// lost entirely (the RA has no request-logging middleware).
@@ -83,7 +88,9 @@ func (re responder) writeError(w http.ResponseWriter, err error) {
 // of a non-domain 500. WriteError still sanitizes the 500 branch, so
 // even a misuse cannot leak internal text — it would only fail to log.
 func WriteError(w http.ResponseWriter, err error) {
-	writeProblem(w, mapError(err))
+	p := mapError(err)
+	writeRetryHint(w, err, p.Status)
+	writeProblem(w, p)
 }
 
 // writeProblem serializes a Problem as application/problem+json.
@@ -155,5 +162,12 @@ func titleForCause(cause error) string {
 		return "Service Unavailable"
 	default:
 		return "Internal Server Error"
+	}
+}
+
+func writeRetryHint(w http.ResponseWriter, err error, status int) {
+	var de *domain.Error
+	if status == http.StatusServiceUnavailable && errors.As(err, &de) && de.RetryAfter != "" {
+		w.Header().Set("Retry-After", de.RetryAfter)
 	}
 }
