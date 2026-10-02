@@ -135,13 +135,22 @@ func (s *EventStore) IndexedSize(ctx context.Context) (uint64, error) {
 	return size, mapSQLErr(err)
 }
 
-// LatestAgentState finds a versioned FQDN's latest lifecycle event and guards
+// LatestAgentState finds a versioned FQDN's current lifecycle event and guards
 // against moving an existing agent ID to a different ANS name.
 func (s *EventStore) LatestAgentState(ctx context.Context, ansName, agentID string) (*EventRecord, error) {
 	var r EventRecord
 	err := s.db.db.GetContext(ctx, &r, `SELECT `+eventCols+`
-		FROM tl_events WHERE identity_id IS NULL AND (ans_name = ? OR agent_id = ?)
-		ORDER BY leaf_index DESC LIMIT 1`, ansName, agentID)
+		FROM tl_events AS current
+        WHERE identity_id IS NULL AND (ans_name = ? OR agent_id = ?)
+          AND NOT EXISTS (
+              SELECT 1 FROM tl_events AS first
+              WHERE first.event_hash = current.event_hash
+                AND first.agent_id = current.agent_id
+                AND first.leaf_index < current.leaf_index
+          )
+        ORDER BY CASE WHEN ans_name <> ? OR agent_id <> ? THEN 0 ELSE 1 END,
+          CASE event_type WHEN 'AGENT_REVOKED' THEN 0 WHEN 'AGENT_DEPRECATED' THEN 1 ELSE 2 END,
+          leaf_index DESC LIMIT 1`, ansName, agentID, ansName, agentID)
 	if err != nil {
 		return nil, mapSQLErr(err)
 	}
@@ -244,7 +253,10 @@ func (s *EventStore) GetEventByLeafIndex(ctx context.Context, index uint64) (*Ev
 	return &r, nil
 }
 
-// GetLatestByAgentID returns the newest event for an agent.
+// GetLatestByAgentID returns the current distinct lifecycle state for an agent.
+// Historical duplicate leaves remain auditable but cannot supersede the first
+// occurrence of their producer event. Revocation and deprecation dominate later
+// active snapshots, matching the ingestion transition guard.
 // If maxLeafIndex > 0 the result is bounded to leaves strictly below it
 // (matches the reference's consistency-with-checkpoint pattern).
 func (s *EventStore) GetLatestByAgentID(ctx context.Context, agentID string, maxLeafIndex uint64) (*EventRecord, error) {
@@ -253,15 +265,29 @@ func (s *EventStore) GetLatestByAgentID(ctx context.Context, agentID string, max
 	if maxLeafIndex > 0 {
 		err = s.db.db.GetContext(ctx, &r,
 			`SELECT `+eventCols+`
-            FROM tl_events
-            WHERE agent_id = ? AND leaf_index < ?
-            ORDER BY leaf_index DESC LIMIT 1`, agentID, maxLeafIndex)
+            FROM tl_events AS current
+            WHERE identity_id IS NULL AND agent_id = ? AND leaf_index < ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM tl_events AS first
+                  WHERE first.event_hash = current.event_hash
+                    AND first.agent_id = current.agent_id
+                    AND first.leaf_index < current.leaf_index
+              )
+            ORDER BY CASE event_type WHEN 'AGENT_REVOKED' THEN 0 WHEN 'AGENT_DEPRECATED' THEN 1 ELSE 2 END,
+              leaf_index DESC LIMIT 1`, agentID, maxLeafIndex)
 	} else {
 		err = s.db.db.GetContext(ctx, &r,
 			`SELECT `+eventCols+`
-            FROM tl_events
-            WHERE agent_id = ?
-            ORDER BY leaf_index DESC LIMIT 1`, agentID)
+            FROM tl_events AS current
+            WHERE identity_id IS NULL AND agent_id = ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM tl_events AS first
+                  WHERE first.event_hash = current.event_hash
+                    AND first.agent_id = current.agent_id
+                    AND first.leaf_index < current.leaf_index
+              )
+            ORDER BY CASE event_type WHEN 'AGENT_REVOKED' THEN 0 WHEN 'AGENT_DEPRECATED' THEN 1 ELSE 2 END,
+              leaf_index DESC LIMIT 1`, agentID)
 	}
 	if err != nil {
 		return nil, mapSQLErr(err)

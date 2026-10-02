@@ -328,3 +328,23 @@ func TestBuildStatusClaims_V2KeysWinOverV1(t *testing.T) {
 		t.Errorf("V2 key should win; got %+v", got.ValidIdentityCerts)
 	}
 }
+
+func TestCurrentCertFingerprintsRejectConflictingDuplicateEvidence(t *testing.T) {
+	now := time.Date(2026, 10, 2, 0, 0, 0, 0, time.UTC)
+	for _, other := range []map[string]any{
+		{"fingerprint": "SHA256:abc", "type": "X509-DV-SERVER"},
+		{"fingerprint": "SHA256:abc", "type": "X509-DV-SERVER", "notAfter": "2027-01-01T00:00:00Z"},
+		{"fingerprint": "SHA256:abc", "type": "X509-OV-SERVER", "notAfter": "2026-01-01T00:00:00Z"},
+	} {
+		expired := map[string]any{"fingerprint": "SHA256:abc", "type": "X509-DV-SERVER", "notAfter": "2026-01-01T00:00:00Z"}
+		for _, input := range [][]any{{expired, other}, {other, expired}} {
+			if _, _, err := currentCertFingerprints(input, now); err == nil {
+				t.Fatal("conflicting duplicate accepted")
+			}
+		}
+		got, _, err := currentCertFingerprints([]any{expired, expired}, now)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("identical expired evidence: %v, %v", got, err)
+		}
+	}
+}
