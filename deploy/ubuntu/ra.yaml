@@ -5,7 +5,7 @@ server:
 auth:
   type: oidc
   oidc:
-    issuer-url: "https://YOUR_INSTANCE.clerk.accounts.dev"
+    issuer-url: "https://issuer.example.com"
     audience: "ans-ra"
     client-id: ""
     admin-groups: []
@@ -42,6 +42,7 @@ store:
 tl-client:
   base-url: "http://127.0.0.1:18081"
   public-base-url: "https://tl.ans.example.com"
+  # The static key grants TL administration as well as ingest. See README trust boundary.
   api-key: "__TL_SERVICE_KEY__"
   timeout: 10s
 signer:

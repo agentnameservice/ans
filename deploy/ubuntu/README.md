@@ -1,5 +1,12 @@
 # Native Ubuntu deployment
 
+Install and startup verified on Ubuntu **24.04.5 LTS arm64**, with Go **1.26.8**
+and Caddy **2.11.6**, on 2026-10-02. Verification covered package installation,
+binary builds, config permissions/overwrite refusal, systemd readiness, API
+producer-key bootstrap, and proxy routes. Proxy HTTPS used a temporary local
+CA; public DNS, Let's Encrypt issuance and authenticated registration remain
+deployment-specific acceptance steps.
+
 Run RA, TL, and Caddy directly on Ubuntu under systemd. No Docker, external
 SQL server, or Node.js runtime is required for RA/TL. These instructions assume
 a recent systemd-based Ubuntu server on amd64 or arm64, sudo access, and the
@@ -25,7 +32,8 @@ Choose stable signer key IDs and RA IDs before first startup. Preserve them
 and their keys on upgrades. The `__TL_SERVICE_KEY__` marker is replaced by the
 installation command below; do not substitute a real secret into the repository.
 
-For Clerk, create a JWT template named `ans-ra` with an `aud` claim matching
+Configure an OIDC provider with a discoverable issuer, JWKS, and tokens whose
+`aud` matches `auth.oidc.audience`. As one example, with Clerk create a JWT template named `ans-ra` with an `aud` claim matching
 `auth.oidc.audience` (the example uses `ans-ra`). Send the resulting template
 JWT as `Authorization: Bearer <token>` to the RA. Use your own issuer; a Clerk
 development instance is not a production identity deployment. Other OIDC
@@ -46,10 +54,10 @@ sudo bash deploy/ubuntu/install-packages.sh
 The script installs `ca-certificates`, `curl`, `gnupg`, `debian-keyring`,
 `debian-archive-keyring`, `apt-transport-https`, `git`, `build-essential`, `jq`,
 `openssl`, `dnsutils`, `python3`, and `python3-yaml` from Ubuntu; Caddy from
-its official stable APT repository; and the latest Go 1.26 patch release from
-`go.dev`, checking its published SHA-256. Stay on this Go release line until
-the pinned linter supports newer compiler export formats; Go 1.27 failed the
-current linter's type checks during the first server build.
+its official stable APT repository; and the latest stable Go patch on the
+release line declared by the `go` directive in this checkout's `go.mod`,
+checking its published SHA-256. The complete upstream release index is used
+so the installer still finds that line after newer Go releases appear.
 The package installer requires outbound network access and sudo; it changes
 APT sources and `/usr/local/bin/go` and `/usr/local/bin/gofmt`.
 Go is installed in `/opt/ans-toolchains/<version>` with `go` and `gofmt`
@@ -90,32 +98,23 @@ This refuses to overwrite existing configurations. Secrets remain in files
 readable by root and the corresponding service group, not in shell history:
 
 ```sh
-sudo python3 - <<'PYCONFIG'
-import grp, os, secrets
-from pathlib import Path
-pairs = [('ra', 'ans-ra'), ('tl', 'ans-tl')]
-for name, group in pairs:
-    if Path(f'/etc/ans/{name}.yaml').exists():
-        raise SystemExit(f'/etc/ans/{name}.yaml already exists; preserve its secret and edit deliberately')
-key = secrets.token_hex(32)
-for name, group in pairs:
-    text = Path(f'deploy/ubuntu/{name}.yaml').read_text()
-    if text.count('__TL_SERVICE_KEY__') != 1:
-        raise SystemExit('Expected exactly one service secret marker')
-    text = text.replace('__TL_SERVICE_KEY__', key)
-    fd = os.open(f'/etc/ans/{name}.yaml', os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o640)
-    with os.fdopen(fd, 'w') as f:
-        os.fchown(f.fileno(), 0, grp.getgrnam(group).gr_gid)
-        os.fchmod(f.fileno(), 0o640)
-        f.write(text)
-print('Installed RA/TL configuration with a generated service secret.')
-PYCONFIG
+sudo bash deploy/ubuntu/install-config.sh
 ```
 
-The templates bind both services to `127.0.0.1`, configure Clerk for RA users,
+The templates bind both services to `127.0.0.1`, configure OIDC for RA users,
 use DNS lookup and real did:web resolution, and disable vLEI (`off`) until a
 real verifier is deployed. The TL accepts its service secret only on localhost;
-Caddy publishes only read/verification routes. Do not use the checked-in secret
+Caddy publishes only read/verification routes.
+
+**Trust boundary:** the TL's static service key grants administrator privileges,
+including producer-key changes, as well as ingestion. The RA holds that key.
+Compromise of the RA process therefore permits changes to the TL producer trust
+store over loopback. Separate Unix users and Caddy's public allowlist do not
+remove this authority. This single-host profile assumes RA and TL share an
+administrative trust boundary. Deployments requiring separation must provide a
+least-privileged ingest authorization path before using this profile.
+
+Do not use the checked-in secret
 markers directly. Add your ACME contact email under `ca.server.acme.email` if
 desired. ACME account creation accepts the issuer's terms as documented by the
 adapter.
@@ -149,40 +148,19 @@ curl --fail http://127.0.0.1:18081/v2/admin/ready
 ```
 
 Wait for both readiness checks to pass. Then seed the RA public key into the
-TL configuration and restart TL. No private signing key is copied. This
-initial seed uses the TL's existing ten-year bootstrap validity policy; manage
-subsequent rotations through its private producer-key admin API.
+TL through its loopback producer-key admin API. No private signing key is
+copied and no YAML rewrite or TL restart is needed. The initial key uses a
+ten-year validity interval; plan rotations before expiry. Re-running the script
+verifies an existing identical, active key and refuses conflicting/revoked keys.
 
 ```sh
-sudo python3 - <<'PYTRUST'
-from pathlib import Path
-import yaml
-ra = yaml.safe_load(Path('/etc/ans/ra.yaml').read_text())
-p = Path('/etc/ans/tl.yaml')
-tl = yaml.safe_load(p.read_text())
-kid = ra['signer']['keyId']
-entry = {
-    'raId': ra['signer']['raId'],
-    'keyId': kid,
-    'algorithm': 'ES256',
-    'publicKeyPem': (Path(ra['keys']['file']['path']) / (kid + '.pub')).read_text(),
-}
-existing = tl.setdefault('producerKeys', [])
-matching = [e for e in existing if e['keyId'] == kid]
-if matching and matching != [entry]:
-    raise SystemExit('Existing producer key differs; investigate before changing trust')
-if not matching:
-    existing.append(entry)
-    p.write_text(yaml.safe_dump(tl, sort_keys=False))
-print('RA public key configured for TL bootstrap.')
-PYTRUST
-sudo systemctl restart ans-tl
-curl --fail http://127.0.0.1:18081/v2/admin/ready
+sudo bash deploy/ubuntu/bootstrap-trust.sh
 ```
 
-If the last readiness request races startup, retry it after checking the
-journal. Confirm the TL journal reports successful producer-key bootstrap.
-Health alone does not prove end-to-end event delivery.
+The script reads the administrator credential from root-controlled config; it
+does not place it in command arguments, output, or shell history. A successful
+bootstrap confirms trust-store configuration; health alone does not prove
+end-to-end event delivery.
 
 ## 5. DNS, firewall, and HTTPS
 
@@ -218,7 +196,9 @@ curl -o /dev/null -w '%{http_code}\n' https://tl.ans.example.com/internal/v1/pro
 
 Also open `https://tl.ans.example.com/docs`;
 the proxy explicitly allows both `/docs` and its static assets. Swagger uses
-the public service origin for requests.
+the public service origin for requests. Deploy with the Swagger fix in #135,
+which pins the CDN JavaScript and CSS with Subresource Integrity. An SSH tunnel
+alone does not protect bearer tokens from a tampered CDN script.
 
 The last request must return 404. Caddy obtains/renews RA/TL certificates and
 redirects HTTP to HTTPS; no Certbot is needed. Its administration API remains
@@ -252,9 +232,17 @@ acceptance steps; do not revoke a live user's agent merely to check setup.
 Caddy automatically renews the RA/TL service certificates. It does not rotate
 agent certificates issued through the RA or install them into an agent. Plan
 agent renewal, TL publication, DNS updates, and certificate installation
-before expiry. Post-renewal verification and sealing of changed DNS evidence
-is not implemented: `verify-dns` on an ACTIVE registration currently returns
-without refreshing its sealed DNS snapshot. Do not treat it as a DNS-update API.
+before expiry. Post-renewal DNS resealing remains tracked in
+[ans-registry#66](https://github.com/agentnameservice/ans-registry/issues/66):
+`verify-dns` on an ACTIVE registration does not refresh its sealed snapshot.
+
+Use external monitoring for `GET https://tl.ans.example.com/root-keys` and
+`GET https://ra.ans.example.com/docs`. These check public routing/availability;
+run `/v2/admin/ready` checks locally because Caddy intentionally returns 404
+for them. Alert separately on private readiness and public endpoint failures.
+
+Inspect unit confinement after installation with
+`sudo systemd-analyze security ans-ra.service ans-tl.service`.
 
 Configure off-host encrypted backups and monitoring for service readiness,
 outbox delivery failures, disk space, and certificate expiry. The units do not
@@ -264,3 +252,13 @@ This guide covers RA/TL only. An A2A/MCP agent, its ANS authentication,
 metadata, and any application frontend are separate deployments.
 
 For existing installations, follow the [certificate lifecycle and TL recovery upgrade notes](../../docs/operations/deployment-fix-upgrade.md) before replacing binaries.
+
+## Source and merge sequence
+
+The source release must include #125, #126, #127, and #128 in that dependency
+order, plus #135 for Swagger. After each parent merges, rebase its dependent
+branch onto the merged `main` and retarget the PR before merging it. For a
+squash merge, drop the old parent commits during that rebase; do not merge a
+child whose diff still contains a second copy of the parent changes. Merge
+this deployment PR onto `main` last so `Fixes #133` closes against the default
+branch. Check the resulting diff before deleting the old stack branches.
