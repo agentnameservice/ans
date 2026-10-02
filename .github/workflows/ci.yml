@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   # Build all four binaries, enforce formatting, vet, run tests with
-  # coverage (90% gate, enforced by `make test-cover` itself), and run
+  # coverage (internal/domain/crypto gates, enforced by `make test-cover` itself), and run
   # the race detector. Coverage is computed across internal/* only —
   # the cmd/* entry points are excluded by the Makefile's test-cover
   # target.
@@ -75,7 +75,7 @@ jobs:
             --allowed_licenses=MIT,Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MPL-2.0 \
             --ignore=modernc.org/mathutil
 
-      - name: Run tests with coverage (90% threshold)
+      - name: Run tests with coverage (internal/domain/crypto thresholds)
         run: make test-cover
 
       - name: Run tests with race detector

@@ -817,6 +817,11 @@ func TestVerifyStandardJWS_RSA(t *testing.T) {
 	if _, err := anscrypto.VerifyStandardJWSWithPublicKey(&priv.PublicKey, jws); err != nil {
 		t.Fatalf("verify: %v", err)
 	}
+	parts := strings.Split(jws, ".")
+	parts[1] = base64.RawURLEncoding.EncodeToString([]byte(`{"x":2}`))
+	if _, err := anscrypto.VerifyStandardJWSWithPublicKey(&priv.PublicKey, strings.Join(parts, ".")); err == nil {
+		t.Fatal("tampered RSA payload accepted")
+	}
 }
 
 // TestVerifyStandardJWS_WrongAlgForKey asserts that a header alg
