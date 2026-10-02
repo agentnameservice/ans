@@ -113,7 +113,7 @@ func TestOutboxStore_EnqueueAndClaim(t *testing.T) {
 		t.Errorf("bad id: %d", id)
 	}
 
-	claimed, err := store.Claim(ctx, 10)
+	claimed, err := store.Ready(ctx, 10)
 	if err != nil {
 		t.Fatalf("claim: %v", err)
 	}
@@ -129,10 +129,10 @@ func TestOutboxStore_EnqueueAndClaim(t *testing.T) {
 
 	// MarkSent hides the event from future claims and records the
 	// TL-assigned logId atomically with sent_at_ms.
-	if err := store.MarkSent(ctx, id, "log-abc"); err != nil {
+	if err := store.MarkSent(ctx, id, "", "log-abc"); err != nil {
 		t.Fatal(err)
 	}
-	claimed2, err := store.Claim(ctx, 10)
+	claimed2, err := store.Ready(ctx, 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,20 +175,20 @@ func TestOutboxStore_MarkFailed_BackoffAndRetryVisible(t *testing.T) {
 	// Fail with a large maxDelay — the backoff delay itself gets applied
 	// (1<<1 = 2s for attempt=1). Event should NOT be in the next claim
 	// set when we poll immediately.
-	if err := store.MarkFailed(ctx, id, 1, "boom", 5*time.Minute); err != nil {
+	if err := store.MarkFailed(ctx, id, "", 1, "boom", 5*time.Minute, false); err != nil {
 		t.Fatal(err)
 	}
-	claimed, _ := store.Claim(ctx, 10)
+	claimed, _ := store.Ready(ctx, 10)
 	if len(claimed) != 0 {
 		t.Errorf("MarkFailed did not push next_attempt into the future: %d claimed", len(claimed))
 	}
 
 	// With maxDelay=0, next_attempt is pinned to now → visible again
 	// on the next Claim.
-	if err := store.MarkFailed(ctx, id, 2, "boom2", 0); err != nil {
+	if err := store.MarkFailed(ctx, id, "", 2, "boom2", 0, false); err != nil {
 		t.Fatal(err)
 	}
-	claimed, _ = store.Claim(ctx, 10)
+	claimed, _ = store.Ready(ctx, 10)
 	if len(claimed) != 1 {
 		t.Errorf("MarkFailed+0-maxDelay should be immediately retryable: got %d", len(claimed))
 	}
@@ -200,7 +200,7 @@ func TestOutboxStore_MarkFailed_BackoffAndRetryVisible(t *testing.T) {
 func TestOutboxStore_Claim_DefaultsBatchSize(t *testing.T) {
 	// batchSize<=0 uses the default.
 	store := NewOutboxStore(newTestDB(t))
-	got, err := store.Claim(context.Background(), 0)
+	got, err := store.Ready(context.Background(), 0)
 	if err != nil {
 		t.Fatal(err)
 	}

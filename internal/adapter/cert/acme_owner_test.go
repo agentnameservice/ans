@@ -2,11 +2,12 @@ package cert
 
 import (
 	"errors"
-	"github.com/agentnameservice/ans/internal/adapter/cert/acmetest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/agentnameservice/ans/internal/adapter/cert/acmetest"
 
 	"github.com/agentnameservice/ans/internal/domain"
 	"github.com/agentnameservice/ans/internal/port"
@@ -82,7 +83,7 @@ func TestACMEIssuer_OwnerOrderValidation(t *testing.T) {
 	} {
 		if _, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
 			OwnerID: "owner-a", OrderRef: ref,
-		}); !(errors.Is(err, port.ErrOrderOwnerMismatch) || errors.Is(err, port.ErrLegacyOrder)) {
+		}); !errors.Is(err, port.ErrOrderOwnerMismatch) && !errors.Is(err, port.ErrLegacyOrder) {
 			t.Fatalf("unbound owner order accepted: %v", err)
 		}
 	}
@@ -124,7 +125,7 @@ func TestACMEIssuer_ScopedFinalizeRequiresOwner(t *testing.T) {
 	}
 	for _, owner := range []string{"", "owner-b"} {
 		_, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{OwnerID: owner, OrderRef: order.OrderRef})
-		if !(errors.Is(err, port.ErrOrderOwnerMismatch) || errors.Is(err, port.ErrLegacyOrder)) {
+		if !errors.Is(err, port.ErrOrderOwnerMismatch) && !errors.Is(err, port.ErrLegacyOrder) {
 			t.Fatalf("owner %q accepted for a scoped order: %v", owner, err)
 		}
 	}

@@ -86,12 +86,12 @@ func TestLogService_ConcurrentDuplicateSubmissionsAppendOnce(t *testing.T) {
 
 func TestLogService_RejectsConflictingStatesAllowsChangedRenewals(t *testing.T) {
 	tb := newReceiptTestbed(t)
-	first := appendFixture(t, tb)
+	appendFixture(t, tb)
 	tb.inner.Timestamp = "2026-04-18T00:00:00Z"
 	tb.inner.IssuedAt = tb.inner.Timestamp
-	retry := appendFixture(t, tb)
-	if !retry.Duplicate || retry.LogID != first.LogID {
-		t.Fatal("timestamp-only state retry appended another leaf")
+	body, signature := tb.signedFixtureBody(t)
+	if _, err := tb.logSvc.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: signature}); err == nil {
+		t.Fatal("fresh timestamp was treated as an identical producer event")
 	}
 	base := tb.inner
 	baseAgent := *tb.inner.Agent
@@ -149,7 +149,7 @@ func TestLogService_RejectsConflictingStatesAllowsChangedRenewals(t *testing.T) 
 	appendFixture(t, tb)
 	tb.inner.EventType = event.TypeAgentRenewed
 	tb.inner.Timestamp = "2026-04-20T00:00:00Z"
-	body, signature := tb.signedFixtureBody(t)
+	body, signature = tb.signedFixtureBody(t)
 	if _, err := tb.logSvc.AppendV2(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: signature}); err == nil {
 		t.Fatal("revoked agent resurrected")
 	}
@@ -408,4 +408,36 @@ func TestLogService_RejectsTrustedForeignProducerWithSpecificCode(t *testing.T) 
 		t.Fatalf("foreign producer was not rejected by state binding: %v", err)
 	}
 	assertTreeSize(t, tb, 1)
+}
+
+func TestLogService_RevocationSurvivesProducerClockRollback(t *testing.T) {
+	for _, lane := range []string{"V1", "V2"} {
+		t.Run(lane, func(t *testing.T) {
+			tb := newReceiptTestbed(t)
+			appendEvent := tb.logSvc.AppendV2
+			if lane == "V1" {
+				appendEvent = tb.logSvc.AppendV1
+			}
+			send := func() error {
+				body, sig := tb.signedFixtureBody(t)
+				_, err := appendEvent(t.Context(), service.AppendInput{RawBody: body, ProducerSignature: sig})
+				return err
+			}
+			if err := send(); err != nil {
+				t.Fatal(err)
+			}
+			tb.inner.EventType = event.TypeAgentRevoked
+			tb.inner.Timestamp = "2026-04-01T00:00:00Z"
+			if err := send(); err != nil {
+				t.Fatalf("clock rollback blocked revocation: %v", err)
+			}
+			tb.inner.EventType = event.TypeAgentRenewed
+			tb.inner.Timestamp = "2026-05-01T00:00:00Z"
+			var de *domain.Error
+			if err := send(); !errors.As(err, &de) || de.Code != "AGENT_STATE_CONFLICT" {
+				t.Fatalf("late renewal after revocation: %v", err)
+			}
+			assertTreeSize(t, tb, 2)
+		})
+	}
 }

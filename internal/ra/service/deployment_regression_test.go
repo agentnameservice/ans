@@ -92,7 +92,7 @@ func TestRegression_ServerRenewalPublishesUpdatedBinding(t *testing.T) {
 	if _, err := fx.svc.VerifyDNS(ctx, agentID, service.VerifyInput{}); err != nil {
 		t.Fatal(err)
 	}
-	pending, err := fx.outboxStore.Claim(ctx, 100)
+	pending, err := fx.outboxStore.Ready(ctx, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
