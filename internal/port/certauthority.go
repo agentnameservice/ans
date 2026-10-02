@@ -242,11 +242,11 @@ type ServerCertificateIssuer interface {
 var ErrLegacyOrder = errors.New("legacy ACME order has no authenticated owner binding")
 var ErrOrderOwnerMismatch = errors.New("ACME order owner mismatch")
 
-// ProviderThrottled is retryable; RetryAfter is an optional validated HTTP value.
-type ProviderThrottled struct {
+// ProviderThrottledError is retryable; RetryAfter is an optional validated HTTP value.
+type ProviderThrottledError struct {
 	RetryAfter string
 	Cause      error
 }
 
-func (e *ProviderThrottled) Error() string { return "certificate provider throttled the request" }
-func (e *ProviderThrottled) Unwrap() error { return e.Cause }
+func (e *ProviderThrottledError) Error() string { return "certificate provider throttled the request" }
+func (e *ProviderThrottledError) Unwrap() error { return e.Cause }

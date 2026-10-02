@@ -9,10 +9,12 @@ Account private keys remain on the RA, separate from user certificate keys.
 
 Before upgrading, finish or cancel outstanding legacy shared-account orders.
 An order without the owner-bound reference cannot be resumed after upgrade.
-A registration with no persisted challenges/proof returns
-`CERT_ORDER_UPGRADE_REQUIRED`; cancel it where supported or allow expiry, then
-register a new version. Cancel/recreate an affected pending renewal. These
-conflicts do not mark an order as a CA-reported terminal failure.
+A registration with no persisted certificate order returns 422
+`ACME_CHALLENGE_MISSING`. A persisted order without reusable owner proof, or
+with a legacy shared-account reference, returns 409 `CERT_ORDER_UPGRADE_REQUIRED`.
+Cancel an affected registration where supported or allow it to expire, then
+register a new version. Cancel/recreate an affected pending renewal. Neither
+condition marks the order as a CA-reported terminal failure.
 
 Let's Encrypt production permits 10 new accounts per source IP per 3 hours,
 with one replenished every 18 minutes and no override. Separate accounts do
@@ -25,4 +27,3 @@ validated `Retry-After` header when available. Honor that hint, preserve account
 keys and pending orders, and do not retry in a tight loop. Provider throttling
 is retryable, not a terminal certificate-order failure. A shared-account
 provider design or BYOC policy is a separate deployment decision.
-

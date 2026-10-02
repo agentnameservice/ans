@@ -66,7 +66,11 @@ func WriteJSON(w http.ResponseWriter, status int, value any) {
 func (re responder) writeError(w http.ResponseWriter, err error) {
 	p := mapError(err)
 	writeRetryHint(w, err, p.Status)
-	if p.Status >= http.StatusInternalServerError {
+	if p.Status == http.StatusServiceUnavailable {
+		re.logger.Warn().Err(err).Str("code", p.Code).
+			Str("retryAfter", w.Header().Get("Retry-After")).Int("status", p.Status).
+			Msg("request failed because a dependency is unavailable")
+	} else if p.Status >= http.StatusInternalServerError {
 		// Non-domain fault — the client-facing detail is sanitized to a
 		// generic string, so record the real cause server-side or it is
 		// lost entirely (the RA has no request-logging middleware).

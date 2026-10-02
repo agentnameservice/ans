@@ -104,8 +104,8 @@ paths:
             `duplicate: true` + the pre-existing leaf so retries are
             idempotent. Matches the reference TL's status-code and
             body shape.
-            A timestamp-only retry of the latest state is also a
-            duplicate; genuinely changed renewals receive a new leaf.
+            Only identical canonical producer-event bytes are duplicates;
+            changes to signed timestamps do not qualify as retries.
           content:
             application/json:
               schema:
@@ -116,13 +116,24 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            Lifecycle conflict (`AGENT_STATE_CONFLICT`) or stale nonterminal
+            event (`STALE_AGENT_EVENT`). A versioned name and agent ID remain
+            bound to their original registration authority. REVOKED is terminal;
+            DEPRECATED may only transition to REVOKED. Revocation is accepted
+            despite a producer clock rollback. Identity events do not use this
+            agent lifecycle policy.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '422':
           description: |
             Body fails validation. Codes include
             `NO_PRODUCER_SIGNATURE`, `INVALID_SIGNATURE_HEADER`,
             `NOT_FOUND_PRODUCER_KEY`, `INVALID_PRODUCER_KEY`,
-            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`,
-            `AGENT_STATE_CONFLICT`, `STALE_AGENT_EVENT`.
+            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`.
           content:
             application/problem+json:
               schema:
@@ -177,8 +188,8 @@ paths:
             `duplicate: true` + the pre-existing leaf so retries are
             idempotent. Matches the reference TL's status-code and
             body shape.
-            A timestamp-only retry of the latest state is also a
-            duplicate; genuinely changed renewals receive a new leaf.
+            Only identical canonical producer-event bytes are duplicates;
+            changes to signed timestamps do not qualify as retries.
           content:
             application/json:
               schema:
@@ -189,13 +200,24 @@ paths:
             application/problem+json:
               schema:
                 $ref: '#/components/schemas/Problem'
+        '409':
+          description: |
+            Lifecycle conflict (`AGENT_STATE_CONFLICT`) or stale nonterminal
+            event (`STALE_AGENT_EVENT`). A versioned name and agent ID remain
+            bound to their original registration authority. REVOKED is terminal;
+            DEPRECATED may only transition to REVOKED. Revocation is accepted
+            despite a producer clock rollback. Identity events do not use this
+            agent lifecycle policy.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
         '422':
           description: |
             Body fails validation. Codes include
             `NO_PRODUCER_SIGNATURE`, `INVALID_SIGNATURE_HEADER`,
             `NOT_FOUND_PRODUCER_KEY`, `INVALID_PRODUCER_KEY`,
-            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`,
-            `AGENT_STATE_CONFLICT`, `STALE_AGENT_EVENT`.
+            `MISMATCH_SIGNATURE`, `RAID_MISMATCH`, `INVALID_EVENT`.
           content:
             application/problem+json:
               schema:

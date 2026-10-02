@@ -72,10 +72,9 @@ func (s *LogService) duplicateResult(ctx context.Context, rec *sqlitetl.EventRec
 	}, nil
 }
 
-// checkAgentState checks the database before any append. An unchanged state
-// retried with fresh timestamps maps to its original leaf. Renewal is repeatable
-// when its certificate/attestation state changes; a UNIQUE(FQDN,version,status)
-// constraint would incorrectly suppress every renewal after the first.
+// checkAgentState protects versioned-name ownership and terminal lifecycle
+// state. Deduplication uses only the canonical producer-event hash; activation
+// retries replay persisted bytes rather than treating fresh timestamps as equal.
 //
 //nolint:nilnil // A nil record and nil error mean the new state is eligible for append.
 func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, canonical []byte) (*sqlitetl.EventRecord, error) {
@@ -106,23 +105,12 @@ func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, ca
 	if err != nil {
 		return nil, err
 	}
-	if rec.AnsName != env.AnsName() || rec.AgentID != env.AgentID() || rec.AgentFQDN != env.AgentFQDN() {
-		return nil, domain.NewValidationError("AGENT_STATE_CONFLICT", "versioned FQDN is already bound to a different agent")
+	if rec.AnsName != env.AnsName() || rec.AgentID != env.AgentID() || strings.TrimSuffix(strings.ToLower(rec.AgentFQDN), ".") != strings.TrimSuffix(strings.ToLower(env.AgentFQDN()), ".") {
+		return nil, domain.NewConflictError("AGENT_STATE_CONFLICT", "versioned FQDN is already bound to a different agent")
 	}
 	previous, err := innerEventBytes([]byte(rec.RawEvent))
 	if err != nil {
 		return nil, err
-	}
-	oldState, err := eventStateBytes(previous)
-	if err != nil {
-		return nil, err
-	}
-	newState, err := eventStateBytes(canonical)
-	if err != nil {
-		return nil, err
-	}
-	if bytes.Equal(oldState, newState) {
-		return rec, nil
 	}
 	var prior struct {
 		RaID      string `json:"raId"`
@@ -132,37 +120,21 @@ func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, ca
 		return nil, err
 	}
 	if incoming.RaID != prior.RaID {
-		return nil, domain.NewValidationError("AGENT_STATE_CONFLICT", "agent lifecycle belongs to a different producer")
+		return nil, domain.NewConflictError("AGENT_STATE_CONFLICT", "agent lifecycle belongs to a different producer")
 	}
-	if rec.EventType == string(event.TypeAgentRevoked) ||
-		env.EventType() == string(event.TypeAgentRegistered) ||
-		(rec.EventType == env.EventType() && env.EventType() != string(event.TypeAgentRenewed)) ||
-		(rec.EventType == string(event.TypeAgentDeprecated) && env.EventType() != string(event.TypeAgentRevoked)) {
-		return nil, domain.NewValidationError("AGENT_STATE_CONFLICT", "event duplicates or reverses an existing lifecycle state")
+	if !agentEventTransitionAllowed(rec.EventType, env.EventType()) {
+		return nil, domain.NewConflictError("AGENT_STATE_CONFLICT", "event duplicates or reverses an existing lifecycle state")
 	}
 	oldTime, oldErr := time.Parse(time.RFC3339, prior.Timestamp)
 	newTime, newErr := time.Parse(time.RFC3339, env.Timestamp())
 	if oldErr != nil || newErr != nil {
 		return nil, domain.NewValidationError("INVALID_EVENT", "event timestamp is invalid")
 	}
-	if newTime.Before(oldTime) {
-		return nil, domain.NewValidationError("STALE_AGENT_EVENT", "event predates the current agent state")
+	// Revocation is terminal even when the producer clock moved backwards.
+	if env.EventType() != string(event.TypeAgentRevoked) && newTime.Before(oldTime) {
+		return nil, domain.NewConflictError("STALE_AGENT_EVENT", "event predates the current agent state")
 	}
 	return nil, nil
-}
-
-func eventStateBytes(raw []byte) ([]byte, error) {
-	var state map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &state); err != nil {
-		return nil, err
-	}
-	delete(state, "timestamp")
-	delete(state, "issuedAt")
-	raw, err := json.Marshal(state)
-	if err != nil {
-		return nil, err
-	}
-	return anscrypto.Canonicalize(raw)
 }
 
 func innerEventBytes(raw []byte) ([]byte, error) {
