@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/agentnameservice/ans/internal/domain"
 	"time"
+
+	"github.com/agentnameservice/ans/internal/domain"
 
 	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
 	"github.com/agentnameservice/ans/internal/tl/receipt"
@@ -168,9 +169,13 @@ func currentCertFingerprints(v any, now time.Time) ([]receipt.CertFingerprint, t
 	if !ok {
 		return nil, time.Time{}, nil
 	}
+	type attestedCertificate struct {
+		certType string
+		expiry   time.Time
+	}
 	var out []receipt.CertFingerprint
 	var earliest time.Time
-	seen := make(map[string]bool, len(arr))
+	seen := make(map[string]attestedCertificate, len(arr))
 	for _, el := range arr {
 		m, ok := el.(map[string]any)
 		if !ok {
@@ -178,20 +183,27 @@ func currentCertFingerprints(v any, now time.Time) ([]receipt.CertFingerprint, t
 		}
 		fp, _ := m["fingerprint"].(string)
 		ct, _ := m["type"].(string)
-		if fp == "" || seen[fp] {
+		if fp == "" {
 			continue
 		}
+		var expiry time.Time
 		if raw, ok := m["notAfter"]; ok {
 			value, _ := raw.(string)
-			expiry, err := domain.ParseAttestedExpiry(value)
+			var err error
+			expiry, err = domain.ParseAttestedExpiry(value)
 			if err != nil {
 				return nil, time.Time{}, fmt.Errorf("invalid certificate notAfter: %w", err)
 			}
-			if expiry.IsZero() {
-				seen[fp] = true
-				out = append(out, receipt.CertFingerprint{Fingerprint: fp, CertType: ct})
-				continue
+		}
+		if prior, ok := seen[fp]; ok {
+			if prior.certType != ct || !prior.expiry.Equal(expiry) {
+				return nil, time.Time{}, fmt.Errorf("conflicting attestations for certificate fingerprint %q", fp)
 			}
+			continue
+		}
+		// Remember expired entries too; a duplicate cannot restore their authority.
+		seen[fp] = attestedCertificate{certType: ct, expiry: expiry}
+		if !expiry.IsZero() {
 			if !now.Before(expiry) {
 				continue
 			}
@@ -199,7 +211,6 @@ func currentCertFingerprints(v any, now time.Time) ([]receipt.CertFingerprint, t
 				earliest = expiry
 			}
 		}
-		seen[fp] = true
 		out = append(out, receipt.CertFingerprint{Fingerprint: fp, CertType: ct})
 	}
 	return out, earliest, nil
