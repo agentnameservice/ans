@@ -269,7 +269,6 @@ func (s *RegistrationService) CancelServerCertRenewal(ctx context.Context, agent
 	}
 	s.logger.Info().Str("agentId", agentID).Int64("renewalId", r.ID).Msg("pending renewal cancellation committed")
 	return nil
-
 }
 
 func (s *RegistrationService) rejectRenewalCSR(ctx context.Context, agentID string, r *domain.ServerCertificateRenewal) error {
@@ -554,7 +553,6 @@ func (s *RegistrationService) commitCertificateRenewal(
 		Int("dnsRecordsAttested", len(evidence.records)).
 		Msg("certificate renewal and publication event committed")
 	return nil
-
 }
 
 // generateChallengeTokens returns a pair of base64url-encoded random
