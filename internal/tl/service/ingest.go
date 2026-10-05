@@ -75,16 +75,14 @@ func (s *LogService) duplicateResult(ctx context.Context, rec *sqlitetl.EventRec
 // checkAgentState protects versioned-name ownership and terminal lifecycle
 // state. Deduplication uses only the canonical producer-event hash; activation
 // retries replay persisted bytes rather than treating fresh timestamps as equal.
-//
-//nolint:nilnil // A nil record and nil error mean the new state is eligible for append.
-func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, canonical []byte) (*sqlitetl.EventRecord, error) {
+func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, canonical []byte) error {
 	if _, ok := env.(*identityevent.Envelope); ok {
-		return nil, nil
+		return nil
 	}
 	name, err := domain.ParseAnsName(env.AnsName())
 	if err != nil || name.String() != env.AnsName() ||
 		name.FQDN() != strings.TrimSuffix(strings.ToLower(env.AgentFQDN()), ".") {
-		return nil, domain.NewValidationError("INVALID_EVENT", "agent host must match the canonical versioned ANS name")
+		return domain.NewValidationError("INVALID_EVENT", "agent host must match the canonical versioned ANS name")
 	}
 	var incoming struct {
 		RaID  string `json:"raId"`
@@ -93,48 +91,48 @@ func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, ca
 		} `json:"agent"`
 	}
 	if err := json.Unmarshal(canonical, &incoming); err != nil {
-		return nil, err
+		return err
 	}
 	if incoming.Agent.Version != name.Version().String() {
-		return nil, domain.NewValidationError("INVALID_EVENT", "agent version must match the versioned ANS name")
+		return domain.NewValidationError("INVALID_EVENT", "agent version must match the versioned ANS name")
 	}
 	rec, err := s.events.LatestAgentState(ctx, env.AnsName(), env.AgentID())
 	if errors.Is(err, domain.ErrNotFound) {
-		return nil, nil
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if rec.AnsName != env.AnsName() || rec.AgentID != env.AgentID() || strings.TrimSuffix(strings.ToLower(rec.AgentFQDN), ".") != strings.TrimSuffix(strings.ToLower(env.AgentFQDN()), ".") {
-		return nil, domain.NewConflictError("AGENT_STATE_CONFLICT", "versioned FQDN is already bound to a different agent")
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "versioned FQDN is already bound to a different agent")
 	}
 	previous, err := innerEventBytes([]byte(rec.RawEvent))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	var prior struct {
 		RaID      string `json:"raId"`
 		Timestamp string `json:"timestamp"`
 	}
 	if err := json.Unmarshal(previous, &prior); err != nil {
-		return nil, err
+		return err
 	}
 	if incoming.RaID != prior.RaID {
-		return nil, domain.NewConflictError("AGENT_STATE_CONFLICT", "agent lifecycle belongs to a different producer")
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "agent lifecycle belongs to a different producer")
 	}
 	if !agentEventTransitionAllowed(rec.EventType, env.EventType()) {
-		return nil, domain.NewConflictError("AGENT_STATE_CONFLICT", "event duplicates or reverses an existing lifecycle state")
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "event duplicates or reverses an existing lifecycle state")
 	}
 	oldTime, oldErr := time.Parse(time.RFC3339, prior.Timestamp)
 	newTime, newErr := time.Parse(time.RFC3339, env.Timestamp())
 	if oldErr != nil || newErr != nil {
-		return nil, domain.NewValidationError("INVALID_EVENT", "event timestamp is invalid")
+		return domain.NewValidationError("INVALID_EVENT", "event timestamp is invalid")
 	}
 	// Revocation is terminal even when the producer clock moved backwards.
 	if env.EventType() != string(event.TypeAgentRevoked) && newTime.Before(oldTime) {
-		return nil, domain.NewConflictError("STALE_AGENT_EVENT", "event predates the current agent state")
+		return domain.NewConflictError("STALE_AGENT_EVENT", "event predates the current agent state")
 	}
-	return nil, nil
+	return nil
 }
 
 func innerEventBytes(raw []byte) ([]byte, error) {
@@ -155,52 +153,57 @@ func innerEventBytes(raw []byte) ([]byte, error) {
 // accepting more writes. It includes unpublished but integrated leaves, so a
 // restart or failed mirror INSERT cannot turn a retry into another append.
 // It never regenerates a log ID, timestamp, signature, or canonical leaf.
-func (s *LogService) recoverIndex(ctx context.Context) (resultErr error) {
+func (s *LogService) recoverIndex(ctx context.Context) error {
 	start := time.Now()
-	var restored uint64
 	s.logger.Info().Msg("recovering event index")
-	defer func() {
-		if resultErr != nil {
-			s.logger.Error().Err(resultErr).Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovery failed")
-		} else {
-			s.logger.Info().Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovered")
-		}
-	}()
+	restored, err := s.restoreMissingLeaves(ctx)
+	if err != nil {
+		s.logger.Error().Err(err).Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovery failed")
+	} else {
+		s.logger.Info().Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovered")
+	}
+	return err
+}
+
+// restoreMissingLeaves reports partial progress if recovery fails, without
+// changing any stored leaf bytes or signing new evidence.
+func (s *LogService) restoreMissingLeaves(ctx context.Context) (uint64, error) {
+	var restored uint64
 	next, err := s.events.FirstUnindexedLeaf(ctx)
 	if err != nil {
-		return err
+		return restored, err
 	}
 	reader := s.log.Reader()
 	size, err := reader.IntegratedSize(ctx)
 	if err != nil {
-		return err
+		return restored, err
 	}
 	indexedSize, err := s.events.IndexedSize(ctx)
 	if err != nil {
-		return err
+		return restored, err
 	}
 	s.logger.Info().Uint64("firstUnindexedLeaf", next).Uint64("indexedSize", indexedSize).Uint64("logSize", size).Msg("event index recovery bounds")
 	if indexedSize > size {
-		return fmt.Errorf("index extends beyond the integrated log: index=%d log=%d", indexedSize, size)
+		return restored, fmt.Errorf("index extends beyond the integrated log: index=%d log=%d", indexedSize, size)
 	}
 	for next < size {
 		bundle, err := client.GetEntryBundle(ctx, reader.ReadEntryBundle, next/layout.EntryBundleWidth, size)
 		if err != nil {
-			return err
+			return restored, err
 		}
 		offset := next % layout.EntryBundleWidth
 		if offset >= uint64(len(bundle.Entries)) {
-			return fmt.Errorf("entry bundle does not contain leaf %d", next)
+			return restored, fmt.Errorf("entry bundle does not contain leaf %d", next)
 		}
 		count := min(uint64(len(bundle.Entries))-offset, size-next)
 		hashes, err := client.FetchLeafHashes(ctx, reader.ReadTile, next, count, size)
 		if err != nil {
-			return err
+			return restored, err
 		}
 		hashOffset := uint64(0)
 		for offset < uint64(len(bundle.Entries)) && next < size {
 			if err := s.restoreIndexedLeaf(ctx, next, bundle.Entries[offset], hashes[hashOffset]); err != nil {
-				return fmt.Errorf("restore leaf %d: %w", next, err)
+				return restored, fmt.Errorf("restore leaf %d: %w", next, err)
 			}
 			restored++
 			next++
@@ -208,7 +211,7 @@ func (s *LogService) recoverIndex(ctx context.Context) (resultErr error) {
 			hashOffset++
 		}
 	}
-	return nil
+	return restored, nil
 }
 
 func (s *LogService) restoreIndexedLeaf(ctx context.Context, index uint64, raw, tileHash []byte) error {

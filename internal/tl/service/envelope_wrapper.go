@@ -3,8 +3,9 @@ package service
 import (
 	"encoding/json"
 	"fmt"
-	"github.com/agentnameservice/ans/internal/domain"
 	"time"
+
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // envelopeWrapper is the schema-agnostic view of a stored envelope

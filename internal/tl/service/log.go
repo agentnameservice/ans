@@ -251,11 +251,9 @@ func (s *LogService) append(ctx context.Context, in AppendInput, codec envelopeC
 			TreeSize:  s.currentTreeSize(ctx, existingIdx),
 		}, nil
 	}
-	if existing, err := s.checkAgentState(ctx, env, innerCanonical); err != nil {
+	if err := s.checkAgentState(ctx, env, innerCanonical); err != nil {
 		s.logger.Warn().Err(err).Str("ansName", env.AnsName()).Str("eventType", env.EventType()).Msg("agent event rejected")
 		return nil, err
-	} else if existing != nil {
-		return s.duplicateResult(ctx, existing)
 	}
 
 	// 4. Sign the envelope — now the Signable is complete.

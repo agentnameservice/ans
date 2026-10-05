@@ -3,9 +3,10 @@ package service
 import (
 	"context"
 	"errors"
-	"golang.org/x/sync/semaphore"
 	"testing"
 	"time"
+
+	"golang.org/x/sync/semaphore"
 )
 
 func TestReadinessRejectsUnrecoveredIndex(t *testing.T) {
