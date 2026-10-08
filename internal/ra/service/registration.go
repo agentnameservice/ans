@@ -35,6 +35,8 @@ import (
 // picks it up automatically. No explicit `*sql.Tx` parameter — that
 // would leak SQL details into the port.
 type OutboxEnqueuer interface {
+	// CancelPending fences undelivered modifications in the revocation transaction.
+	CancelPending(ctx context.Context, agentID string) error
 	// Activation uses durable evidence but still seals synchronously. These
 	// records are never claimable by the asynchronous delivery worker.
 	LoadActivationSeal(ctx context.Context, agentID string) (string, []byte, error)

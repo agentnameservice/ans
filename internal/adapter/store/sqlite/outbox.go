@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"time"
@@ -17,16 +18,18 @@ import (
 // field were added together (migration 003) so the worker never
 // sees an empty value.
 type OutboxEvent struct {
-	ID            int64
-	EventType     string
-	AgentID       string
-	SchemaVersion string
-	PayloadJSON   []byte
-	Attempts      int
-	LastError     string
-	NextAttemptAt time.Time
-	SentAt        time.Time
-	CreatedAt     time.Time
+	ID                int64
+	EventType         string
+	AgentID           string
+	SchemaVersion     string
+	PayloadJSON       []byte
+	Attempts          int
+	PermanentAttempts int
+	ClaimToken        string
+	LastError         string
+	NextAttemptAt     time.Time
+	SentAt            time.Time
+	CreatedAt         time.Time
 }
 
 // OutboxStore manages the outbox_events table used for durable RA→TL
@@ -124,23 +127,30 @@ func (s *OutboxStore) RecordSealed(
 	return id, nil
 }
 
-// Claim returns up to batchSize pending outbox events whose
-// next_attempt_at_ms has passed. Callers process each event and then
-// call MarkSent or MarkFailed. There is no explicit lease — we rely on
-// the single-writer SQLite setup.
-func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, error) {
+// Ready lists eligible rows without reserving them. Workers must Acquire each
+// row immediately before sending. Revocations bypass earlier modifications;
+// ordinary events retain per-agent ordering across retries and active claims.
+func (s *OutboxStore) Ready(ctx context.Context, batchSize int) ([]OutboxEvent, error) {
 	if batchSize <= 0 {
 		batchSize = 10
 	}
 	const q = `
-        SELECT id, event_type, agent_id, schema_version, payload_json, attempts,
+        SELECT id, event_type, agent_id, schema_version, payload_json, attempts, permanent_attempts,
                COALESCE(last_error, '') AS last_error,
                next_attempt_at_ms, created_at_ms
-        FROM outbox_events
-        WHERE sent_at_ms IS NULL AND next_attempt_at_ms <= ?
-        ORDER BY id ASC
+        FROM outbox_events AS candidate
+        WHERE sent_at_ms IS NULL AND dead_at_ms IS NULL AND cancelled_at_ms IS NULL
+          AND next_attempt_at_ms <= ? AND COALESCE(claimed_until_ms, 0) <= ?
+          AND (candidate.event_type = 'AGENT_REVOKED' OR NOT EXISTS (
+              SELECT 1 FROM outbox_events AS earlier
+              WHERE earlier.agent_id = candidate.agent_id
+                AND earlier.id < candidate.id
+                AND earlier.sent_at_ms IS NULL
+                AND earlier.dead_at_ms IS NULL AND earlier.cancelled_at_ms IS NULL
+          ))
+        ORDER BY (event_type = 'AGENT_REVOKED') DESC, id ASC
         LIMIT ?`
-	rows, err := s.db.db.QueryContext(ctx, q, time.Now().UnixMilli(), batchSize)
+	rows, err := s.db.db.QueryContext(ctx, q, time.Now().UnixMilli(), time.Now().UnixMilli(), batchSize)
 	if err != nil {
 		return nil, mapSQLErr(err)
 	}
@@ -151,7 +161,7 @@ func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, 
 		var e OutboxEvent
 		var nextMs, createdMs int64
 		var payload string
-		if err := rows.Scan(&e.ID, &e.EventType, &e.AgentID, &e.SchemaVersion, &payload, &e.Attempts,
+		if err := rows.Scan(&e.ID, &e.EventType, &e.AgentID, &e.SchemaVersion, &payload, &e.Attempts, &e.PermanentAttempts,
 			&e.LastError, &nextMs, &createdMs); err != nil {
 			return nil, err
 		}
@@ -172,16 +182,18 @@ func (s *OutboxStore) Claim(ctx context.Context, batchSize int) ([]OutboxEvent, 
 // logID is the value the TL echoed in its ingest response
 // (AppendResult.LogID). It is also echoed on idempotent duplicate
 // retries, so a re-delivered row records the same logId.
-func (s *OutboxStore) MarkSent(ctx context.Context, id int64, logID string) error {
-	_, err := s.db.db.ExecContext(ctx,
-		`UPDATE outbox_events SET sent_at_ms = ?, log_id = ? WHERE id = ?`,
-		time.Now().UnixMilli(), logID, id)
-	return mapSQLErr(err)
+func (s *OutboxStore) MarkSent(ctx context.Context, id int64, token, logID string) error {
+	res, err := s.db.db.ExecContext(ctx,
+		`UPDATE outbox_events SET sent_at_ms = ?, log_id = ?, claim_token = NULL, claimed_until_ms = NULL
+         WHERE id = ? AND COALESCE(claim_token, '') = ? AND sent_at_ms IS NULL
+           AND dead_at_ms IS NULL AND cancelled_at_ms IS NULL`,
+		time.Now().UnixMilli(), logID, id, token)
+	return claimResult(res, err)
 }
 
 // MarkFailed bumps the attempt counter and schedules the next retry
 // using exponential backoff capped at maxDelay.
-func (s *OutboxStore) MarkFailed(ctx context.Context, id int64, attempts int, lastError string, maxDelay time.Duration) error {
+func (s *OutboxStore) MarkFailed(ctx context.Context, id int64, token string, attempts int, lastError string, maxDelay time.Duration, permanent bool) error {
 	// base 1s, doubles each attempt, capped.
 	delay := time.Duration(1<<minInt(attempts, 10)) * time.Second
 	if delay > maxDelay {
@@ -190,10 +202,13 @@ func (s *OutboxStore) MarkFailed(ctx context.Context, id int64, attempts int, la
 	next := time.Now().Add(delay)
 	const q = `
         UPDATE outbox_events SET
-            attempts = ?, last_error = ?, next_attempt_at_ms = ?
-        WHERE id = ?`
-	_, err := s.db.db.ExecContext(ctx, q, attempts, lastError, next.UnixMilli(), id)
-	return mapSQLErr(err)
+            attempts = ?, last_error = ?, next_attempt_at_ms = ?,
+            permanent_attempts = CASE WHEN ? THEN permanent_attempts + 1 ELSE 0 END,
+            claim_token = NULL, claimed_until_ms = NULL
+        WHERE id = ? AND COALESCE(claim_token, '') = ? AND sent_at_ms IS NULL
+          AND dead_at_ms IS NULL AND cancelled_at_ms IS NULL`
+	res, err := s.db.db.ExecContext(ctx, q, attempts, lastError, next.UnixMilli(), permanent, id, token)
+	return claimResult(res, err)
 }
 
 func minInt(a, b int) int {
@@ -201,4 +216,79 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// Acquire conditionally reserves a ready row. A crashed worker loses ownership
+// after lease; completion uses the unique token so stale workers cannot ack a
+// reclaimed or cancelled row. The caller bounds its HTTP attempt below lease.
+func (s *OutboxStore) Acquire(ctx context.Context, id int64, attempts int, token string, lease time.Duration) (bool, error) {
+	if token == "" || lease <= 0 {
+		return false, errors.New("sqlite/outbox: invalid claim")
+	}
+	now := time.Now()
+	res, err := s.db.db.ExecContext(ctx, `UPDATE outbox_events SET claim_token = ?, claimed_until_ms = ?
+ WHERE id = ? AND attempts = ? AND sent_at_ms IS NULL AND dead_at_ms IS NULL AND cancelled_at_ms IS NULL
+   AND next_attempt_at_ms <= ? AND COALESCE(claimed_until_ms, 0) <= ?
+   AND (event_type = 'AGENT_REVOKED' OR NOT EXISTS (
+       SELECT 1 FROM outbox_events earlier WHERE earlier.agent_id = outbox_events.agent_id
+       AND earlier.id < outbox_events.id AND earlier.sent_at_ms IS NULL
+       AND earlier.dead_at_ms IS NULL AND earlier.cancelled_at_ms IS NULL))`,
+		token, now.Add(lease).UnixMilli(), id, attempts, now.UnixMilli(), now.UnixMilli())
+	if err != nil {
+		return false, mapSQLErr(err)
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+// CancelPending participates in the revocation transaction. Signed bytes remain
+// available for audit, but pending modifications and their claims are fenced out.
+func (s *OutboxStore) CancelPending(ctx context.Context, agentID string) error {
+	_, err := s.db.extx(ctx).ExecContext(ctx, `UPDATE outbox_events
+ SET cancelled_at_ms = ?, last_error = 'superseded by agent revocation',
+     claim_token = NULL, claimed_until_ms = NULL
+ WHERE agent_id = ? AND event_type != 'AGENT_REVOKED' AND sent_at_ms IS NULL
+   AND cancelled_at_ms IS NULL`, time.Now().UnixMilli(), agentID)
+	return mapSQLErr(err)
+}
+
+// MarkDead parks an undeliverable modification without blocking later snapshots.
+// Revocation is deliberately excluded: it must remain deliverable indefinitely.
+func (s *OutboxStore) MarkDead(ctx context.Context, id int64, token, reason string) error {
+	res, err := s.db.db.ExecContext(ctx, `UPDATE outbox_events SET dead_at_ms = ?,
+ last_error = ?, attempts = attempts + 1, claim_token = NULL, claimed_until_ms = NULL
+ WHERE id = ? AND COALESCE(claim_token, '') = ? AND event_type != 'AGENT_REVOKED'
+ AND sent_at_ms IS NULL AND dead_at_ms IS NULL AND cancelled_at_ms IS NULL`, time.Now().UnixMilli(), reason, id, token)
+	return claimResult(res, err)
+}
+
+func claimResult(res sql.Result, err error) error {
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("sqlite/outbox: delivery claim lost or row terminal")
+	}
+	return nil
+}
+
+// Backlog describes pending delivery and parked rows for operator monitoring.
+type Backlog struct {
+	Pending  int   `db:"pending"`
+	Dead     int   `db:"dead"`
+	OldestMS int64 `db:"oldest_ms"`
+}
+
+func (s *OutboxStore) Backlog(ctx context.Context) (Backlog, error) {
+	var b Backlog
+	err := s.db.db.GetContext(ctx, &b, `SELECT
+ COALESCE(SUM(dead_at_ms IS NULL), 0) AS pending,
+ COALESCE(SUM(dead_at_ms IS NOT NULL), 0) AS dead,
+ COALESCE(MIN(CASE WHEN dead_at_ms IS NULL THEN created_at_ms END), 0) AS oldest_ms
+ FROM outbox_events WHERE sent_at_ms IS NULL AND cancelled_at_ms IS NULL`)
+	return b, mapSQLErr(err)
 }

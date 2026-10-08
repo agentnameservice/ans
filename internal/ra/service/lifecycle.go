@@ -167,7 +167,7 @@ func (s *RegistrationService) IdentityCertificates(ctx context.Context, agentID 
 }
 
 // ServerCertificates returns every server certificate stored for the
-// agent — both BYOC (operator-submitted) and future CA-issued ones
+// agent — both BYOC (operator-submitted) and CA-issued ones
 // (server CSR path, to land with the renewal flow).
 //
 // Matches the reference RA's
@@ -212,6 +212,15 @@ func (s *RegistrationService) ServerCertificates(ctx context.Context, agentID st
 //
 // Returns the new csrId the caller reports as `CsrSubmissionResponse.csrId`.
 func (s *RegistrationService) SubmitIdentityCSR(ctx context.Context, agentID, csrPEM string) (string, error) {
+	return s.submitIdentityCSR(ctx, agentID, csrPEM, event.SchemaVersion)
+}
+
+// SubmitIdentityCSRV1 publishes identity rotation on the V1 event lane.
+func (s *RegistrationService) SubmitIdentityCSRV1(ctx context.Context, agentID, csrPEM string) (string, error) {
+	return s.submitIdentityCSR(ctx, agentID, csrPEM, eventv1.SchemaVersion)
+}
+
+func (s *RegistrationService) submitIdentityCSR(ctx context.Context, agentID, csrPEM, schemaVersion string) (string, error) {
 	now := s.clock()
 	reg, err := s.agents.FindByAgentID(ctx, agentID)
 	if err != nil {
@@ -249,6 +258,10 @@ func (s *RegistrationService) SubmitIdentityCSR(ctx context.Context, agentID, cs
 	if err != nil {
 		return "", err
 	}
+	evidence, err := s.observeRenewalDNS(ctx, reg)
+	if err != nil {
+		return "", err
+	}
 
 	// Issue before the tx (CA work doesn't need the SQLite write
 	// lock), persist atomically after: the SIGNED CSR row, the new
@@ -261,16 +274,31 @@ func (s *RegistrationService) SubmitIdentityCSR(ctx context.Context, agentID, cs
 	reg.IdentityCSR = signedID
 
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
-		if err := s.agents.Save(txCtx, reg); err != nil {
+		current, err := s.agents.FindByAgentID(txCtx, agentID)
+		if err != nil {
+			return err
+		}
+		if current.Status != domain.StatusActive {
+			return domain.NewInvalidStateError("AGENT_NOT_ACTIVE", "agent ceased to be ACTIVE during certificate issuance")
+		}
+		current.IdentityCSR = signedID
+		if err := s.agents.Save(txCtx, current); err != nil {
 			return err
 		}
 		if err := s.certs.SaveCSR(txCtx, agentID, signedID); err != nil {
 			return err
 		}
-		return s.certs.SaveIdentityCertificate(txCtx, agentID, storedID)
+		if err := s.certs.SaveIdentityCertificate(txCtx, agentID, storedID); err != nil {
+			return err
+		}
+		return s.enqueueCertificateRenewal(txCtx, reg, evidence, schemaVersion)
 	}); err != nil {
+		s.logCertificateFailure(err, agentID, 0, schemaVersion, "identity rotation transaction failed")
 		return "", err
 	}
+	s.logger.Info().Str("agentId", agentID).Str("fqdn", reg.FQDN()).
+		Str("csrId", csrID).Str("schemaVersion", schemaVersion).
+		Msg("identity rotation and publication event committed")
 	return csrID, nil
 }
 
@@ -296,10 +324,20 @@ func (s *RegistrationService) SubmitServerCSR(ctx context.Context, agentID, csrP
 	if err != nil {
 		return "", err
 	}
-	if err := s.agents.Save(ctx, reg); err != nil {
-		return "", err
-	}
-	if err := s.certs.SaveCSR(ctx, agentID, newCSR); err != nil {
+	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.agents.FindByAgentID(txCtx, agentID)
+		if err != nil {
+			return err
+		}
+		if current.Status.IsTerminal() || current.Status == domain.StatusDeprecated {
+			return domain.NewConflictError("AGENT_STATE_CONFLICT", "terminal or deprecated registration cannot accept a server CSR")
+		}
+		current.ServerCSR = newCSR
+		if err := s.agents.Save(txCtx, current); err != nil {
+			return err
+		}
+		return s.certs.SaveCSR(txCtx, agentID, newCSR)
+	}); err != nil {
 		return "", err
 	}
 	return csrID, nil
@@ -1202,18 +1240,15 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 		})
 	}
 
-	// Identity certs: every currently-valid one the store knows
-	// about (typically one at registration time; rotation adds
-	// more).
+	// Keep valid overlap, or the last-expiring identity certificate as lapse
+	// evidence. Renewing a server certificate does not renew identity validity.
 	identityCerts, err := s.certs.FindIdentityCertificatesByAgent(ctx, reg.AgentID)
 	if err != nil {
 		return nil, err
 	}
+	identityCerts = attestedIdentityCerts(identityCerts, now)
 	idCertInfos := make([]event.CertificateInfo, 0, len(identityCerts))
 	for _, c := range identityCerts {
-		if !c.IsValid(now) {
-			continue
-		}
 		fp, ferr := fingerprintOf(c.CertificatePEM)
 		if ferr != nil {
 			return nil, ferr
@@ -1231,21 +1266,21 @@ func (s *RegistrationService) buildAgentRegisteredEvent(
 	// log, so silently emitting empty serverCerts[] would be a
 	// permanently wrong artifact from a recoverable fault.
 	var serverCertInfos []event.CertificateInfo
-	byocCert, berr := s.loadServerCert(ctx, reg.AgentID)
+	serverCerts, berr := s.attestedServerCerts(ctx, reg.AgentID, now)
 	if berr != nil {
 		return nil, berr
 	}
-	if byocCert != nil {
-		serverCertInfos = []event.CertificateInfo{{
-			Fingerprint: "SHA256:" + byocCert.Fingerprint,
+	for _, serverCert := range serverCerts {
+		serverCertInfos = append(serverCertInfos, event.CertificateInfo{
+			Fingerprint: "SHA256:" + serverCert.Fingerprint,
 			CertType:    "X509-DV-SERVER",
-			NotAfter:    byocCert.ValidToTimestamp.UTC().Format(time.RFC3339),
-		}}
+			NotAfter:    serverCert.ValidToTimestamp.UTC().Format(time.RFC3339),
+		})
 	}
 
 	// `expiresAt` is required at the event level per the reference TL
-	// spec — the min(notAfter) across attested certs.
-	inner.ExpiresAt = agentCertExpiry(identityCerts, byocCert, now)
+	// spec — the earlier of the latest expiry in each certificate family.
+	inner.ExpiresAt = agentCertExpiry(identityCerts, serverCerts, now)
 
 	// `domainValidation` is the method that actually satisfied the
 	// domain-control gate, recorded on the order at gate-pass time
@@ -1425,6 +1460,34 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 	// plus the DNS records the operator should tear down (map-typed
 	// `dnsRecordsProvisioned`). V2 uses the unified cert arrays.
 	if err := s.uow.Run(ctx, func(txCtx context.Context) error {
+		current, err := s.agents.FindByAgentID(txCtx, reg.AgentID)
+		if err != nil {
+			return err
+		}
+		if current.Status == domain.StatusRevoked {
+			reg = current
+			return nil
+		}
+		current.Endpoints = reg.Endpoints
+		current.ServerCert = reg.ServerCert
+		if err := current.Revoke(in.Reason, now); err != nil {
+			return err
+		}
+		latestCerts, err := s.certs.FindIdentityCertificatesByAgent(txCtx, reg.AgentID)
+		if err != nil {
+			return err
+		}
+		// Every valid certificate must have reached the CA revocation step.
+		// A concurrent rotation commits before this transaction or is rejected
+		// after it. Retry the revoke if it committed while the CA was called.
+		if !revocationCertsCovered(certs, latestCerts) {
+			return domain.NewConflictError("CERTIFICATES_CHANGED", "identity certificates changed during revocation; retry the revocation")
+		}
+		reg = current
+		certs = latestCerts
+		if err := s.cancelAgentModifications(txCtx, reg.AgentID, now); err != nil {
+			return err
+		}
 		if err := s.agents.Save(txCtx, reg); err != nil {
 			return err
 		}
@@ -1452,11 +1515,9 @@ func (s *RegistrationService) Revoke(ctx context.Context, agentID string, in Rev
 		return nil, err
 	}
 
-	return &RevokeResult{
-		Registration:       reg,
-		RevokedAt:          now,
-		DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg),
-	}, nil
+	s.logger.Info().Str("agentId", reg.AgentID).Str("schemaVersion", in.SchemaVersion).
+		Msg("revocation and pending-work cancellation committed; TL publication queued")
+	return &RevokeResult{Registration: reg, RevokedAt: now, DNSRecordsToRemove: s.ComputeRequiredDNSRecords(reg)}, nil
 }
 
 // buildAgentRevokedV2Event assembles the V2 AGENT_REVOKED inner

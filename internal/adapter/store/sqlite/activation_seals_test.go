@@ -19,7 +19,7 @@ func TestActivationSealPersistsFirstSignedPayloadAcrossRestart(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "V1", lane)
 	require.Equal(t, first, saved)
-	rows, err := store.Claim(t.Context(), 100)
+	rows, err := store.Ready(t.Context(), 100)
 	require.NoError(t, err)
 	require.Empty(t, rows, "synchronous evidence must not be queued for the worker")
 	require.NoError(t, db.Close())
