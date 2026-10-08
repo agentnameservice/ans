@@ -236,7 +236,7 @@ func TestServerSelfCA_OrderLifecycle_And_GetCA(t *testing.T) {
 	}
 	// CreateOrder self-issues both challenge types with distinct
 	// tokens and a non-empty order ref.
-	order, err := ca.CreateOrder(context.Background(), "agent.example.com")
+	order, err := ca.CreateOrder(context.Background(), port.CreateOrderRequest{OwnerID: "owner", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatalf("create order: %v", err)
 	}
@@ -338,7 +338,7 @@ func TestServerSelfCA_FinalizeOrder_RejectsBadCSR(t *testing.T) {
 
 func TestServerSelfCA_CreateOrder_RequiresFQDN(t *testing.T) {
 	ca, _ := NewServerSelfCA(t.TempDir(), "o", 365)
-	if _, err := ca.CreateOrder(context.Background(), ""); err == nil {
+	if _, err := ca.CreateOrder(context.Background(), port.CreateOrderRequest{}); err == nil {
 		t.Error("expected error for empty fqdn")
 	}
 }
@@ -370,7 +370,7 @@ func TestNewServerSelfCA_RespectsOrderTTLOption(t *testing.T) {
 	if ca.orderTTL != 3*time.Hour {
 		t.Errorf("WithOrderTTL ignored: got %v", ca.orderTTL)
 	}
-	order, err := ca.CreateOrder(context.Background(), "agent.example.com")
+	order, err := ca.CreateOrder(context.Background(), port.CreateOrderRequest{OwnerID: "owner", FQDN: "agent.example.com"})
 	if err != nil {
 		t.Fatal(err)
 	}

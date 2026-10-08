@@ -39,7 +39,7 @@ func newFakeACME(t *testing.T) *acmetest.Server {
 
 func newTestACMEIssuer(t *testing.T, f *acmetest.Server, opts ...ACMEIssuerOption) *ACMEIssuer {
 	t.Helper()
-	issuer, err := NewACMEIssuer(f.DirectoryURL(), "ops@example.com", t.TempDir(), opts...)
+	issuer, err := newACMEAccount(f.DirectoryURL(), "ops@example.com", t.TempDir(), opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +54,7 @@ func TestACMEIssuer_WithLogger_LogsOrderLifecycle(t *testing.T) {
 	var buf bytes.Buffer
 	issuer := newTestACMEIssuer(t, f, WithLogger(zerolog.New(&buf)))
 
-	if _, err := issuer.CreateOrder(t.Context(), "agent.example.com"); err != nil {
+	if _, err := issuer.createOrder(t.Context(), "agent.example.com"); err != nil {
 		t.Fatalf("create order: %v", err)
 	}
 	out := buf.String()
@@ -67,7 +67,7 @@ func TestACMEIssuer_CreateOrder_RelaysProviderChallenges(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatalf("create order: %v", err)
 	}
@@ -110,13 +110,13 @@ func TestACMEIssuer_FinalizeOrder_AnswersOnlyVerifiedChallenge(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	csrPEM := buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"})
 
-	issued, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	issued, err := issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   csrPEM,
 		FQDN:     "agent.example.com",
@@ -150,7 +150,7 @@ func TestACMEIssuer_FinalizeOrder_PendingThenRedriven(t *testing.T) {
 	// time out into ErrOrderPending deterministically.
 	pendingIssuer := newTestACMEIssuer(t, f, WithFinalizeBudget(300*time.Millisecond))
 
-	order, err := pendingIssuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := pendingIssuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,7 +158,7 @@ func TestACMEIssuer_FinalizeOrder_PendingThenRedriven(t *testing.T) {
 
 	// Provider-side validation outlives the in-call budget.
 	f.SetHoldPending(true)
-	_, err = pendingIssuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	_, err = pendingIssuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   csrPEM,
 		FQDN:     "agent.example.com",
@@ -176,7 +176,7 @@ func TestACMEIssuer_FinalizeOrder_PendingThenRedriven(t *testing.T) {
 	f.SetHoldPending(false)
 	f.SetOrderStatus(acme.StatusReady)
 	redriveIssuer := newTestACMEIssuer(t, f)
-	issued, err := redriveIssuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	issued, err := redriveIssuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   csrPEM,
 		FQDN:     "agent.example.com",
@@ -194,13 +194,13 @@ func TestACMEIssuer_FinalizeOrder_ProcessingReportsPending(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Provider already validating/issuing when we arrive.
 	f.SetOrderStatus(acme.StatusProcessing)
-	_, err = issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	_, err = issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -214,12 +214,12 @@ func TestACMEIssuer_FinalizeOrder_UnknownStatus(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.SetOrderStatus("deactivated")
-	_, err = issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	_, err = issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -235,12 +235,12 @@ func TestACMEIssuer_FinalizeOrder_ProviderOutageMidIssuance(t *testing.T) {
 	// the budget expires.
 	issuer := newTestACMEIssuer(t, f, WithFinalizeBudget(300*time.Millisecond))
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.SetFailFinalize(true)
-	_, err = issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	_, err = issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -257,13 +257,13 @@ func TestACMEIssuer_FinalizeOrder_ValidOrderFetchesCert(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Order already valid (issued while we were away): FetchCert path.
 	f.SetOrderStatus(acme.StatusValid)
-	issued, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	issued, err := issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -277,12 +277,12 @@ func TestACMEIssuer_FinalizeOrder_InvalidOrderFails(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
 	f.SetFailValidation(true)
-	_, err = issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	_, err = issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -298,13 +298,13 @@ func TestACMEIssuer_FinalizeOrder_InputValidation(t *testing.T) {
 	issuer := newTestACMEIssuer(t, f)
 
 	// Bad CSR shape rejected before any provider call.
-	if _, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	if _, err := issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: "x", CSRPEM: "junk", FQDN: "agent.example.com",
 	}); err == nil {
 		t.Error("want CSR validation error")
 	}
 	// Missing order ref rejected.
-	if _, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	if _, err := issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		CSRPEM: buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:   "agent.example.com",
 	}); err == nil {
@@ -323,20 +323,20 @@ func TestACMEIssuer_GetCACertificate_BeforeIssuance(t *testing.T) {
 func TestACMEIssuer_AccountKeyPersists(t *testing.T) {
 	f := newFakeACME(t)
 	dir := t.TempDir()
-	i1, err := NewACMEIssuer(f.DirectoryURL(), "", dir)
+	i1, err := newACMEAccount(f.DirectoryURL(), "", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := i1.CreateOrder(t.Context(), "agent.example.com"); err != nil {
+	if _, err := i1.createOrder(t.Context(), "agent.example.com"); err != nil {
 		t.Fatal(err)
 	}
 	// Second instance reuses the persisted key — same account per
 	// RFC 8555 §7.3.1.
-	i2, err := NewACMEIssuer(f.DirectoryURL(), "", dir)
+	i2, err := newACMEAccount(f.DirectoryURL(), "", dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := i2.CreateOrder(t.Context(), "agent.example.com"); err != nil {
+	if _, err := i2.createOrder(t.Context(), "agent.example.com"); err != nil {
 		t.Fatalf("second instance with persisted key: %v", err)
 	}
 	k1, ok1 := i1.client.Key.(*ecdsa.PrivateKey)
@@ -347,10 +347,10 @@ func TestACMEIssuer_AccountKeyPersists(t *testing.T) {
 }
 
 func TestNewACMEIssuer_InputValidation(t *testing.T) {
-	if _, err := NewACMEIssuer("", "", t.TempDir()); err == nil {
+	if _, err := newACMEAccount("", "", t.TempDir()); err == nil {
 		t.Error("want directory-url error")
 	}
-	if _, err := NewACMEIssuer("https://example.com/dir", "", ""); err == nil {
+	if _, err := newACMEAccount("https://example.com/dir", "", ""); err == nil {
 		t.Error("want data-dir error")
 	}
 }
@@ -358,7 +358,7 @@ func TestNewACMEIssuer_InputValidation(t *testing.T) {
 func TestACMEIssuer_CreateOrder_RequiresFQDN(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
-	if _, err := issuer.CreateOrder(t.Context(), ""); err == nil {
+	if _, err := issuer.createOrder(t.Context(), ""); err == nil {
 		t.Error("want fqdn error")
 	}
 }
@@ -367,11 +367,11 @@ func TestACMEIssuer_HTTP01VerifiedChallengeAnswered(t *testing.T) {
 	f := newFakeACME(t)
 	issuer := newTestACMEIssuer(t, f)
 
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	if _, err := issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: order.OrderRef,
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -394,7 +394,7 @@ func TestACMEIssuer_CreateOrder_BornReady(t *testing.T) {
 	// directly. This is routine on real Let's Encrypt within its
 	// authorization-reuse window.
 	f.SetOrderStatus(acme.StatusReady)
-	order, err := issuer.CreateOrder(t.Context(), "agent.example.com")
+	order, err := issuer.createOrder(t.Context(), "agent.example.com")
 	if err != nil {
 		t.Fatalf("born-ready order must not error: %v", err)
 	}
@@ -416,20 +416,20 @@ func TestACMEIssuer_CreateOrder_NoSupportedChallenges(t *testing.T) {
 	// adapter doesn't implement) must surface a clear error, not an
 	// empty challenge set the gate could never satisfy.
 	f.SetUnsupportedChallengesOnly(true)
-	if _, err := issuer.CreateOrder(t.Context(), "agent.example.com"); err == nil {
+	if _, err := issuer.createOrder(t.Context(), "agent.example.com"); err == nil {
 		t.Error("want no-supported-challenges error")
 	}
 }
 
 func TestACMEIssuer_UnreachableProvider(t *testing.T) {
-	issuer, err := NewACMEIssuer("http://127.0.0.1:1/dir", "", t.TempDir())
+	issuer, err := newACMEAccount("http://127.0.0.1:1/dir", "", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := issuer.CreateOrder(t.Context(), "agent.example.com"); err == nil {
+	if _, err := issuer.createOrder(t.Context(), "agent.example.com"); err == nil {
 		t.Error("want registration failure against unreachable provider")
 	}
-	if _, err := issuer.FinalizeOrder(t.Context(), port.FinalizeOrderRequest{
+	if _, err := issuer.finalizeOrder(t.Context(), port.FinalizeOrderRequest{
 		OrderRef: "http://127.0.0.1:1/order/1",
 		CSRPEM:   buildCSR(t, "agent.example.com", nil, []string{"agent.example.com"}),
 		FQDN:     "agent.example.com",
@@ -501,7 +501,7 @@ func TestNewACMEIssuer_DataDirCreationFails(t *testing.T) {
 	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := NewACMEIssuer("https://acme.example/dir", "", filepath.Join(blocker, "sub")); err == nil {
+	if _, err := newACMEAccount("https://acme.example/dir", "", filepath.Join(blocker, "sub")); err == nil {
 		t.Error("want mkdir error")
 	}
 }
