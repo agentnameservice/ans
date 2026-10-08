@@ -580,6 +580,7 @@ paths:
           description: |
             `CERT_ORDER_UPGRADE_REQUIRED` and `CERT_ORDER_OWNER_MISMATCH` identify
             non-retryable owner/order conflicts that require a new order.
+            `ACTIVATION_LANE_CONFLICT` requires retrying the original API lane.
             `AGENT_HOST_TAKEN` — a different operator now holds this FQDN
             live (it activated first). This registration lost the host and
             was cancelled; it can no longer progress.

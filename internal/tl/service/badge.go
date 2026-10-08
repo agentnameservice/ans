@@ -175,20 +175,29 @@ func (s *BadgeService) buildTransparencyLog(ctx context.Context, rec *sqlitetl.E
 // come from `now` vs `certExpiresAt` and carry no corresponding
 // event.
 func (s *BadgeService) statusFromRecord(rec *sqlitetl.EventRecord, certExpiresAt time.Time) BadgeStatus {
-	switch rec.EventType {
-	case "AGENT_REVOKED":
+	now := time.Now().UTC()
+	if s.log != nil {
+		now = s.log.nowFn()
+	}
+	return currentAgentStatus(rec, certExpiresAt, now, s.warningWindow)
+}
+
+// currentAgentStatus is shared by badges and status tokens. Revocation is
+// terminal; expiry also applies to deprecated agents still serving traffic.
+func currentAgentStatus(rec *sqlitetl.EventRecord, certExpiresAt, now time.Time, warningWindow time.Duration) BadgeStatus {
+	if rec.EventType == "AGENT_REVOKED" {
 		return BadgeRevoked
-	case "AGENT_DEPRECATED":
-		return BadgeDeprecated
 	}
 	if !certExpiresAt.IsZero() {
-		now := time.Now().UTC()
-		switch {
-		case !now.Before(certExpiresAt):
+		if !now.Before(certExpiresAt) {
 			return BadgeExpired
-		case certExpiresAt.Sub(now) < s.warningWindow:
-			return BadgeWarning
 		}
+	}
+	if rec.EventType == "AGENT_DEPRECATED" {
+		return BadgeDeprecated
+	}
+	if !certExpiresAt.IsZero() && certExpiresAt.Sub(now) < warningWindow {
+		return BadgeWarning
 	}
 	return BadgeActive
 }

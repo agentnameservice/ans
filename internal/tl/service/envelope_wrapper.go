@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"time"
+
+	"github.com/agentnameservice/ans/internal/domain"
 )
 
 // envelopeWrapper is the schema-agnostic view of a stored envelope
@@ -30,11 +32,40 @@ func parseEnvelopeWrapper(raw string) (*envelopeWrapper, error) {
 	if err := json.Unmarshal([]byte(raw), &w); err != nil {
 		return nil, fmt.Errorf("service: parse envelope wrapper: %w", err)
 	}
+	var payload struct {
+		Producer struct {
+			Event struct {
+				ExpiresAt    string `json:"expiresAt"`
+				Attestations struct {
+					Identity       []certInfoView `json:"identityCerts"`
+					Server         []certInfoView `json:"serverCerts"`
+					LegacyIdentity []certInfoView `json:"validIdentityCerts"`
+					LegacyServer   []certInfoView `json:"validServerCerts"`
+				} `json:"attestations"`
+			} `json:"event"`
+		} `json:"producer"`
+	}
+	if len(w.Payload) > 0 {
+		if err := json.Unmarshal(w.Payload, &payload); err != nil {
+			return nil, fmt.Errorf("decode attested certificate dates: %w", err)
+		}
+		event := payload.Producer.Event
+		if _, err := domain.ParseAttestedExpiry(event.ExpiresAt); err != nil {
+			return nil, err
+		}
+		for _, family := range [][]certInfoView{event.Attestations.Identity, event.Attestations.Server, event.Attestations.LegacyIdentity, event.Attestations.LegacyServer} {
+			for _, cert := range family {
+				if _, err := domain.ParseAttestedExpiry(cert.NotAfter); err != nil {
+					return nil, err
+				}
+			}
+		}
+	}
 	return &w, nil
 }
 
 // certExpiresAt returns the effective expiry for badge-status
-// derivation: the earlier of the identity-cert and server-cert
+// derivation: the earlier of the latest identity-cert and server-cert
 // notAfter timestamps attested on the event. This is what the TL
 // compares against `now` to flip badge status to WARNING (30 days
 // before) / EXPIRED (after).
@@ -48,8 +79,9 @@ func parseEnvelopeWrapper(raw string) (*envelopeWrapper, error) {
 //   - V2 collapses both shapes into `attestations.identityCerts[]` and
 //     `attestations.serverCerts[]` arrays.
 //
-// We union every cert entry both shapes can carry and take the
-// min(notAfter). Returns a zero time when no attested cert is
+// Each family remains usable while at least one allowed certificate is
+// unexpired. Expiry of an old overlap certificate must not expire its
+// replacement. Returns a zero time when no attested cert is
 // present (revocation events, deprecation events). Callers treat
 // zero as "no expiry to enforce, badge stays ACTIVE".
 func (w *envelopeWrapper) certExpiresAt() time.Time {
@@ -59,6 +91,7 @@ func (w *envelopeWrapper) certExpiresAt() time.Time {
 	var payload struct {
 		Producer struct {
 			Event struct {
+				ExpiresAt    string `json:"expiresAt"`
 				Attestations struct {
 					// V2 shape: unified arrays.
 					IdentityCerts []certInfoView `json:"identityCerts"`
@@ -76,30 +109,36 @@ func (w *envelopeWrapper) certExpiresAt() time.Time {
 		return time.Time{}
 	}
 
-	all := make([]certInfoView, 0, 8)
-	all = append(all, payload.Producer.Event.Attestations.IdentityCerts...)
-	all = append(all, payload.Producer.Event.Attestations.ServerCerts...)
-	all = append(all, payload.Producer.Event.Attestations.ValidIdentityCerts...)
-	all = append(all, payload.Producer.Event.Attestations.ValidServerCerts...)
-	if c := payload.Producer.Event.Attestations.IdentityCert; c != nil {
-		all = append(all, *c)
+	attest := payload.Producer.Event.Attestations
+	identity := attest.IdentityCerts
+	identity = append(identity, attest.ValidIdentityCerts...)
+	server := attest.ServerCerts
+	server = append(server, attest.ValidServerCerts...)
+	if len(identity) == 0 && attest.IdentityCert != nil {
+		identity = append(identity, *attest.IdentityCert)
 	}
-	if c := payload.Producer.Event.Attestations.ServerCert; c != nil {
-		all = append(all, *c)
+	if len(server) == 0 && attest.ServerCert != nil {
+		server = append(server, *attest.ServerCert)
 	}
-
+	fallback, _ := domain.ParseAttestedExpiry(payload.Producer.Event.ExpiresAt)
 	var earliest time.Time
-	for _, c := range all {
-		if c.NotAfter == "" {
-			continue
+	for _, family := range [][]certInfoView{identity, server} {
+		var latest time.Time
+		for _, c := range family {
+			t, err := domain.ParseAttestedExpiry(c.NotAfter)
+			if err != nil || t.IsZero() {
+				t = fallback
+			}
+			if t.After(latest) {
+				latest = t
+			}
 		}
-		t, err := time.Parse(time.RFC3339, c.NotAfter)
-		if err != nil {
-			continue
+		if !latest.IsZero() && (earliest.IsZero() || latest.Before(earliest)) {
+			earliest = latest
 		}
-		if earliest.IsZero() || t.Before(earliest) {
-			earliest = t
-		}
+	}
+	if earliest.IsZero() {
+		return fallback
 	}
 	return earliest
 }
