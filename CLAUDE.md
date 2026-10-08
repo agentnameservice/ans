@@ -209,7 +209,7 @@ verify-dns flow without touching real DNS infrastructure.
 
 - `make build` — builds all four binaries into `bin/`.
 - `make test` — unit tests.
-- `make test-cover` — coverage report; enforces the 90% gate.
+- `make test-cover` — coverage report; enforces internal ≥90%, domain 100%, and crypto ≥95%.
 - `make test-race` — race detector.
 - `make lint` — `golangci-lint` with the repo config.
 - `make check` — `fmt` + `vet` + `lint` + `test-cover`. Must pass
