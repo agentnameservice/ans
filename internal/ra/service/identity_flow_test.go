@@ -168,7 +168,7 @@ func TestRevoke_PendingDNS_CancelsWithoutTLEmit(t *testing.T) {
 		t.Error("cancelled registration's identity cert must be revoked at the CA")
 	}
 
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
+	rows, err := fx.outboxStore.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -131,15 +131,25 @@ func (s *RenewalStore) Save(ctx context.Context, r *domain.ServerCertificateRene
             failure_reason = ?,
             completed_at_ms = ?,
             updated_at_ms = ?
-        WHERE id = ?`
-	_, err := s.db.extx(ctx).ExecContext(ctx, q,
+        WHERE id = ? AND completed_at_ms IS NULL`
+	res, err := s.db.extx(ctx).ExecContext(ctx, q,
 		string(r.Validation.Status),
 		nullableString(r.FailureReason),
 		nullableMs(r.CompletedAt),
 		now,
 		r.ID,
 	)
-	return mapSQLErr(err)
+	if err != nil {
+		return mapSQLErr(err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected != 1 {
+		return domain.NewConflictError("RENEWAL_NOT_PENDING", "renewal completed or was cancelled during processing")
+	}
+	return nil
 }
 
 // FindByAgentID returns the most recent renewal for the agent.

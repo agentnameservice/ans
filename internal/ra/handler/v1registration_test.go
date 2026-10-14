@@ -344,7 +344,7 @@ func TestV1Register_NoTLEmitAtRegistration(t *testing.T) {
 	fx := newHandlerFixture(t)
 	agentID, _ := fx.v1RegisterAgent(t, "alice", "agent.example.com", "1.0.0")
 
-	rows, err := fx.outbox.Claim(context.Background(), 100)
+	rows, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("claim outbox: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestV2Register_StampsV2SchemaOnOutbox(t *testing.T) {
 	fx := newHandlerFixture(t)
 	agentID := fx.registerAgent(t, "alice", "v2agent.example.com", "1.0.0")
 
-	rows, err := fx.outbox.Claim(context.Background(), 100)
+	rows, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatalf("claim outbox: %v", err)
 	}

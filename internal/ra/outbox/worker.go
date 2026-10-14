@@ -16,12 +16,9 @@
 //   - **Exponential backoff, capped.** Transient failures (transport
 //     errors, 5xx, 429) retry with the backoff already encoded in
 //     OutboxStore.MarkFailed.
-//   - **Permanent failures are logged loudly but kept in the table.**
-//     A 422 from the TL (e.g., producer-signature mismatch) means
-//     the current producer-key trust can't accept this event. We
-//     mark the row with max backoff so it retries rarely but doesn't
-//     disappear — if an operator fixes the trust store, the next
-//     retry succeeds.
+//   - Undeliverable modifications are parked after five consecutive permanent
+//     failures (malformed payloads immediately). Revocations always retry; they
+//     bypass pending modifications and are never automatically dead-lettered.
 package outbox
 
 import (
@@ -31,6 +28,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/rs/zerolog"
 
 	"github.com/agentnameservice/ans/internal/adapter/store/sqlite"
@@ -126,14 +124,42 @@ func (w *Worker) tick(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	events, err := w.store.Claim(ctx, w.opts.BatchSize)
+	events, err := w.store.Ready(ctx, w.opts.BatchSize)
 	if err != nil {
 		w.logger.Error().Err(err).Msg("claim")
 		return
 	}
 	for i := range events {
-		w.process(ctx, &events[i])
+		ev := &events[i]
+		ev.ClaimToken = uuid.NewString()
+		acquired, err := w.store.Acquire(ctx, ev.ID, ev.Attempts, ev.ClaimToken, time.Minute)
+		if err != nil {
+			w.logger.Error().Err(err).Int64("id", ev.ID).Msg("acquire delivery claim")
+			continue
+		}
+		if !acquired {
+			continue
+		}
+		w.process(ctx, ev)
 	}
+	backlog, err := w.store.Backlog(ctx)
+	if err != nil {
+		w.logger.Error().Err(err).Msg("read outbox backlog")
+		return
+	}
+	if backlog.Pending > 0 || backlog.Dead > 0 {
+		w.logger.Warn().Int("pending", backlog.Pending).Int("dead", backlog.Dead).
+			Int64("oldestPendingMs", backlog.OldestMS).Msg("outbox delivery backlog")
+	}
+}
+
+// appendWithTimeout bounds HTTP work below the durable lease. Persistence uses
+// the worker context so an HTTP timeout can still record a retry and release
+// the claim. Token fencing handles a worker paused past its lease.
+func (w *Worker) appendWithTimeout(ctx context.Context, ev *sqlite.OutboxEvent, payload service.OutboxPayload) (*tlclient.AppendResult, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	return w.client.Append(attemptCtx, ev.SchemaVersion, payload.InnerEventCanonical, payload.ProducerSignature)
 }
 
 // process sends a single outbox row to the TL and updates its status.
@@ -150,43 +176,47 @@ func (w *Worker) process(ctx context.Context, ev *sqlite.OutboxEvent) {
 		// Row is malformed — unlikely in practice (we wrote it
 		// ourselves) but treat as a permanent failure so it doesn't
 		// spam retries. Ops must inspect the row manually.
-		log.Error().Err(err).Msg("outbox row is malformed JSON; marking failed with max backoff")
-		w.markFailed(ctx, ev, fmt.Sprintf("unmarshal payload: %v", err))
+		log.Error().Err(err).Msg("outbox row is malformed JSON")
+		w.reject(ctx, ev, fmt.Sprintf("unmarshal payload: %v", err), true)
 		return
 	}
 	if len(payload.InnerEventCanonical) == 0 || payload.ProducerSignature == "" {
 		log.Error().Msg("outbox row missing innerEventCanonical or producerSignature")
-		w.markFailed(ctx, ev, "payload missing inner event or signature")
+		w.reject(ctx, ev, "payload missing inner event or signature", true)
 		return
 	}
 
-	if ev.SchemaVersion == "" {
+	if ev.SchemaVersion != "V1" && ev.SchemaVersion != "V2" {
 		// Pre-migration rows default to V2 at the column level, but
 		// if a row somehow lacks a version (manual insert, bad
 		// fixture), bail rather than guess — guessing risks posting
 		// a V2 envelope to /v1 and triggering obscure 422s.
-		log.Error().Msg("outbox row has empty schema_version; marking failed")
-		w.markFailed(ctx, ev, "outbox row missing schema_version")
+		log.Error().Msg("outbox row has unsupported schema_version")
+		w.reject(ctx, ev, "outbox row has unsupported schema_version", true)
 		return
 	}
-	res, err := w.client.Append(ctx, ev.SchemaVersion, payload.InnerEventCanonical, payload.ProducerSignature)
+	res, err := w.appendWithTimeout(ctx, ev, payload)
 	if err != nil {
 		switch {
 		case tlclient.IsPermanent(err):
 			// Most common: producer-key trust store rejected the
 			// signature. Logged at ERROR so operators see it
-			// immediately. Row stays in the table with max backoff.
-			log.Error().Err(err).Msg("TL rejected event permanently; row retained at max backoff")
+			// immediately. Modifications have a bounded permanent retry budget.
+			log.Error().Err(err).Msg("TL rejected event permanently")
 		case tlclient.IsTransient(err):
 			log.Warn().Err(err).Msg("TL append transient failure; will retry")
 		default:
 			log.Error().Err(err).Msg("TL append unexpected error")
 		}
-		w.markFailed(ctx, ev, err.Error())
+		if tlclient.IsPermanent(err) {
+			w.reject(ctx, ev, err.Error(), ev.PermanentAttempts >= 4)
+		} else {
+			w.markFailed(ctx, ev, err.Error(), false)
+		}
 		return
 	}
 
-	if res.LogID == "" {
+	if res == nil || res.LogID == "" {
 		// The TL accepted the event but returned no logId. A
 		// compliant ans-tl always echoes one (including on duplicate
 		// retries), but an older or reference-shaped TL can answer 201
@@ -200,19 +230,17 @@ func (w *Worker) process(ctx context.Context, ev *sqlite.OutboxEvent) {
 		// later retry against a fixed TL records the real logId without
 		// duplicating the leaf.
 		log.Error().
-			Uint64("leafIndex", res.LeafIndex).
-			Bool("duplicate", res.Duplicate).
 			Msg("TL accepted event but returned empty logId; row kept pending for retry")
-		w.markFailed(ctx, ev, "TL returned empty logId")
+		w.markFailed(ctx, ev, "TL returned empty logId", false)
 		return
 	}
 
-	if markErr := w.store.MarkSent(ctx, ev.ID, res.LogID); markErr != nil {
+	if markErr := w.store.MarkSent(ctx, ev.ID, ev.ClaimToken, res.LogID); markErr != nil {
 		// Rare: the TL accepted the event but we couldn't update
 		// the outbox row. Next tick will re-send, and the TL will
 		// reply 200 OK (duplicate) since event_hash dedups. Still
 		// log loudly.
-		log.Error().Err(markErr).Msg("TL accepted but MarkSent failed; next retry will dedupe")
+		log.Error().Err(markErr).Msg("TL accepted but delivery acknowledgement was not recorded")
 		return
 	}
 	log.Info().
@@ -224,12 +252,25 @@ func (w *Worker) process(ctx context.Context, ev *sqlite.OutboxEvent) {
 // markFailed wraps OutboxStore.MarkFailed with error logging. On a
 // double-failure (can't mark the row), we log but don't panic — the
 // next tick will re-claim and try again.
-func (w *Worker) markFailed(ctx context.Context, ev *sqlite.OutboxEvent, reason string) {
-	if err := w.store.MarkFailed(ctx, ev.ID, ev.Attempts+1, reason, w.opts.MaxBackoff); err != nil {
+func (w *Worker) markFailed(ctx context.Context, ev *sqlite.OutboxEvent, reason string, permanent bool) {
+	if err := w.store.MarkFailed(ctx, ev.ID, ev.ClaimToken, ev.Attempts+1, reason, w.opts.MaxBackoff, permanent); err != nil {
 		// Only log if we were not cancelling; ctx cancellation races
 		// are expected at shutdown.
 		if !errors.Is(err, context.Canceled) {
 			w.logger.Error().Err(err).Int64("id", ev.ID).Msg("MarkFailed")
 		}
 	}
+}
+
+func (w *Worker) reject(ctx context.Context, ev *sqlite.OutboxEvent, reason string, park bool) {
+	if !park || ev.EventType == "AGENT_REVOKED" {
+		w.markFailed(ctx, ev, reason, true)
+		return
+	}
+	if err := w.store.MarkDead(ctx, ev.ID, ev.ClaimToken, reason); err != nil {
+		w.logger.Error().Err(err).Int64("id", ev.ID).Msg("park outbox event")
+		return
+	}
+	w.logger.Error().Int64("id", ev.ID).Str("agentId", ev.AgentID).
+		Str("eventType", ev.EventType).Str("reason", reason).Msg("outbox event dead-lettered; operator action required")
 }

@@ -64,7 +64,7 @@ func TestAgentCertExpiry_NoInputsReturnsEmpty(t *testing.T) {
 	}
 }
 
-func TestAgentCertExpiry_EarliestStoredCertWins(t *testing.T) {
+func TestAgentCertExpiry_LatestValidIdentityCertWins(t *testing.T) {
 	now := time.Now().UTC()
 	earliest := now.Add(24 * time.Hour)
 	later := now.Add(72 * time.Hour)
@@ -76,7 +76,7 @@ func TestAgentCertExpiry_EarliestStoredCertWins(t *testing.T) {
 	if got == "" {
 		t.Fatal("expected non-empty expiry")
 	}
-	want := earliest.Format(time.RFC3339)
+	want := later.Format(time.RFC3339)
 	if got != want {
 		t.Errorf("expiry: got %q want %q", got, want)
 	}
@@ -105,7 +105,7 @@ func TestAgentCertExpiry_BYOCEarlierThanStored(t *testing.T) {
 	byoc := &domain.ByocServerCertificate{
 		ValidToTimestamp: now.Add(24 * time.Hour),
 	}
-	got := agentCertExpiry(stored, byoc, now)
+	got := agentCertExpiry(stored, []*domain.ByocServerCertificate{byoc}, now)
 	want := now.Add(24 * time.Hour).Format(time.RFC3339)
 	if got != want {
 		t.Errorf("expiry: got %q want %q (BYOC should win)", got, want)
@@ -118,7 +118,7 @@ func TestAgentCertExpiry_BYOCWithZeroValidToIgnored(t *testing.T) {
 		{ExpirationTimestamp: now.Add(72 * time.Hour), Status: domain.CertStatusValid},
 	}
 	byoc := &domain.ByocServerCertificate{} // zero ValidTo
-	got := agentCertExpiry(stored, byoc, now)
+	got := agentCertExpiry(stored, []*domain.ByocServerCertificate{byoc}, now)
 	want := now.Add(72 * time.Hour).Format(time.RFC3339)
 	if got != want {
 		t.Errorf("expiry: got %q want %q (zero BYOC.ValidTo should be skipped)", got, want)

@@ -154,4 +154,6 @@ func TestV1VerifyRenewalACME_HappyPath(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("verify-acme: want 200, got %d body=%s", rec.Code, rec.Body)
 	}
+	assertV1RenewalLane(t, fx)
+
 }

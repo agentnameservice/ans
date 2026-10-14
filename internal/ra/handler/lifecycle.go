@@ -168,11 +168,8 @@ func (h *LifecycleHandler) GetServerCerts(w http.ResponseWriter, r *http.Request
 // a `CsrSubmissionRequest` (V2 §1362) with a single `csrPEM` field.
 // Returns 202 with `{csrId, message}` per `CsrSubmissionResponse`.
 //
-// Parity with reference `CertificateOperationsHandler.submitAgentIdentityCsr`:
-// the reference validates + persists the CSR synchronously and emits
-// a domain event the infrastructure handler picks up to actually
-// issue the cert. We take the same approach — the service saves the
-// CSR with status=PENDING; a future job will flip it to SIGNED.
+// The service signs the replacement immediately, then commits the certificate
+// and signed AGENT_RENEWED outbox event together.
 func (h *LifecycleHandler) SubmitIdentityCSR(w http.ResponseWriter, r *http.Request) {
 	h.submitCSR(w, r, h.svc.SubmitIdentityCSR, "Identity CSR accepted for processing")
 }

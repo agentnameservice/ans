@@ -46,7 +46,7 @@ func TestWorker_GenericError(t *testing.T) {
 	// Wait for the worker to attempt at least once and mark the row
 	// non-claimable.
 	waitUntil(t, 1*time.Second, func() bool {
-		pending, _ := store.Claim(context.Background(), 10)
+		pending, _ := store.Ready(context.Background(), 10)
 		return calls.Load() >= 1 && len(pending) == 0
 	})
 }
