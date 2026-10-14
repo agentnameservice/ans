@@ -119,14 +119,17 @@ func TestReceiptService_LeafNotYetCovered(t *testing.T) {
 // ----- testbed -----
 
 type receiptTestbed struct {
-	svc        *service.ReceiptService
-	logSvc     *service.LogService
-	receiptPub *ecdsa.PublicKey
-	raID       string
-	producerID string
-	producerKM *testKM
-	tlKM       port.KeyManager // exposed via testKMHandle for ad-hoc tests that need to spin up extra services
-	inner      event.Event
+	db          *sqlitetl.DB
+	log         *logstore.Log
+	producerSig *service.ProducerSigVerifier
+	svc         *service.ReceiptService
+	logSvc      *service.LogService
+	receiptPub  *ecdsa.PublicKey
+	raID        string
+	producerID  string
+	producerKM  *testKM
+	tlKM        port.KeyManager // exposed via testKMHandle for ad-hoc tests that need to spin up extra services
+	inner       event.Event
 }
 
 // testKMHandle exposes the testbed's TL KeyManager so sibling tests
@@ -252,13 +255,16 @@ func newReceiptTestbed(t *testing.T, opts ...receiptTestbedOpt) *receiptTestbed 
 	svc := service.NewReceiptService(logSvc, receiptStore, gen)
 
 	return &receiptTestbed{
-		svc:        svc,
-		logSvc:     logSvc,
-		receiptPub: receiptPub,
-		raID:       "ra-test-1",
-		producerID: "prod-1",
-		producerKM: prodKM,
-		tlKM:       tlKM,
+		db:          db,
+		log:         lg,
+		producerSig: producerSig,
+		svc:         svc,
+		logSvc:      logSvc,
+		receiptPub:  receiptPub,
+		raID:        "ra-test-1",
+		producerID:  "prod-1",
+		producerKM:  prodKM,
+		tlKM:        tlKM,
 		inner: event.Event{
 			AnsID:     "10000000-0000-4000-8000-000000000010",
 			AnsName:   "ans://v1.0.0.rcpt.example.com",

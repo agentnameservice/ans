@@ -167,7 +167,7 @@ func rebuildWithIssuer(fx *regFixture, issuer port.ServerCertificateIssuer, dnsV
 		fx.agents, fx.endpoints, fx.certs, fx.byoc, fx.renewals,
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
-	).WithServerCertificateIssuer(issuer).WithAgentSealer(fx.sealer)
+	).WithServerCertificateIssuer(issuer).WithAgentSealer(fx.sealer).WithSigner(fx.signer)
 	if dnsV != nil {
 		svc = svc.WithDNSVerifier(dnsV)
 	}
@@ -968,7 +968,7 @@ func TestGetServerCertRenewal_TransientServerCertError_Propagates(t *testing.T) 
 		fx.validator, fx.identityCA, fx.bus, fx.outboxStore, fx.uow,
 		fx.discoveryReg,
 	).WithServerCertificateIssuer(fx.serverCA).WithDNSVerifier(dns.NewNoopVerifier()).
-		WithAgentSealer(fx.sealer)
+		WithAgentSealer(fx.sealer).WithSigner(fx.signer)
 
 	agentID := registerAndActivate(t, fx, svc)
 	// BYOC renewal completes synchronously, leaving a completed renewal

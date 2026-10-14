@@ -78,6 +78,9 @@ type StatusTokenClaims struct {
 	ValidIdentityCerts []CertFingerprint
 	ValidServerCerts   []CertFingerprint
 	MetadataHashes     map[string]string
+	// ValidUntil bounds EXP without changing the token's CBOR shape. It is
+	// the earliest expiry of any certificate included in these claims.
+	ValidUntil time.Time
 }
 
 // StatusTokenGenerator creates signed status tokens as COSE_Sign1
@@ -155,13 +158,20 @@ func (g *KeyManagerStatusTokenGenerator) GenerateStatusToken(
 	claims *StatusTokenClaims,
 ) ([]byte, error) {
 	now := g.nowFn()
+	expires := now.Add(g.ttl)
+	if !claims.ValidUntil.IsZero() && claims.ValidUntil.Before(expires) {
+		expires = claims.ValidUntil
+	}
+	if expires.Unix() <= now.Unix() {
+		return nil, errors.New("status-token: claims have no remaining validity")
+	}
 
 	// --- Payload ---
 	payload := StatusTokenPayload{
 		AgentID:            claims.AgentID,
 		Status:             claims.Status,
 		IAT:                now.Unix(),
-		EXP:                now.Add(g.ttl).Unix(),
+		EXP:                expires.Unix(),
 		ANSName:            claims.ANSName,
 		ValidIdentityCerts: claims.ValidIdentityCerts,
 		ValidServerCerts:   claims.ValidServerCerts,

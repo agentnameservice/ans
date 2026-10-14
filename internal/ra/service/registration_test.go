@@ -278,6 +278,7 @@ type regFixture struct {
 	bus          port.EventBus
 	discoveryReg port.ProfileRegistry
 	signerPubPEM string
+	signer       service.EventSigner
 }
 
 func newRegFixture(t *testing.T) *regFixture {
@@ -374,6 +375,7 @@ func newRegFixture(t *testing.T) *regFixture {
 		bus:          bus,
 		discoveryReg: discoveryReg,
 		signerPubPEM: pubPEM,
+		signer:       service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"},
 		req: service.RegisterRequest{
 			OwnerID:     "owner-1",
 			AnsName:     ansName,
@@ -438,4 +440,11 @@ func parseTestURI(t *testing.T, s string) []*url.URL {
 		t.Fatal(err)
 	}
 	return []*url.URL{u}
+}
+
+func (failingOutbox) LoadActivationSeal(context.Context, string) (string, []byte, error) {
+	return "", nil, errors.New("activation storage failure")
+}
+func (failingOutbox) PrepareActivationSeal(context.Context, string, string, []byte) (string, []byte, error) {
+	return "", nil, errors.New("activation storage failure")
 }
