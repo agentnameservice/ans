@@ -18,6 +18,7 @@ import (
 // chain verification for local-dev flows via WithSkipChainVerify.
 type X509Validator struct {
 	skipChainVerify bool
+	roots           *x509.CertPool
 }
 
 // ValidatorOption configures an X509Validator.
@@ -28,6 +29,16 @@ type ValidatorOption func(*X509Validator)
 // self-signed BYOC certificates for testing.
 func WithSkipChainVerify() ValidatorOption {
 	return func(v *X509Validator) { v.skipChainVerify = true }
+}
+
+// WithTrustedRoots pins the configured roots for chain verification. A copy
+// prevents callers from changing a validator's trust after construction.
+func WithTrustedRoots(roots *x509.CertPool) ValidatorOption {
+	return func(v *X509Validator) {
+		if roots != nil {
+			v.roots = roots.Clone()
+		}
+	}
 }
 
 // NewX509Validator constructs a validator with the given options.
@@ -55,11 +66,8 @@ func (v *X509Validator) ValidateServerCertificate(
 	if err := anscrypto.CheckKeyStrength(leaf.PublicKey); err != nil {
 		return nil, err
 	}
-	if err := anscrypto.CheckCertificateValidity(leaf, leaf.NotBefore.Add(0)); err == nil {
-		// re-check with current time to get the sentinel
-		if err := anscrypto.CheckCertificateValidity(leaf, time.Now()); err != nil {
-			return nil, err
-		}
+	if err := anscrypto.CheckCertificateValidity(leaf, time.Now()); err != nil {
+		return nil, err
 	}
 	if err := anscrypto.MatchCertificateToFQDN(leaf, expectedFQDN); err != nil {
 		return nil, err
@@ -74,7 +82,7 @@ func (v *X509Validator) ValidateServerCertificate(
 	}
 
 	if !v.skipChainVerify {
-		if err := anscrypto.VerifyChain(leaf, chain, nil); err != nil {
+		if err := anscrypto.VerifyChain(leaf, chain, v.roots); err != nil {
 			// Surface the sentinel so callers can distinguish chain errors
 			// from format errors.
 			if !errors.Is(err, anscrypto.ErrChainInvalid) {

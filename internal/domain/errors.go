@@ -27,6 +27,7 @@ var (
 // It wraps a sentinel error for type-based classification and
 // carries a machine-readable code and human-readable message.
 type Error struct {
+	RetryAfter string // Optional upstream retry hint, emitted only as an HTTP header.
 	// Code is a machine-readable error code (e.g., "INVALID_ANS_NAME").
 	Code string
 	// Message is a human-readable description.

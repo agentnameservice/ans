@@ -105,7 +105,7 @@ func WithLogger(logger zerolog.Logger) ACMEIssuerOption {
 	}
 }
 
-// NewACMEIssuer opens (or creates) the ACME account key under
+// newACMEAccount opens (or creates) the ACME account key under
 // dataDir and returns an issuer speaking to the given directory URL
 // (e.g. Let's Encrypt staging:
 // https://acme-staging-v02.api.letsencrypt.org/directory). The
@@ -113,7 +113,7 @@ func WithLogger(logger zerolog.Logger) ACMEIssuerOption {
 // notices. No network I/O happens here — account registration is
 // deferred to first use so the RA can boot while the provider is
 // unreachable.
-func NewACMEIssuer(directoryURL, email, dataDir string, opts ...ACMEIssuerOption) (*ACMEIssuer, error) {
+func newACMEAccount(directoryURL, email, dataDir string, opts ...ACMEIssuerOption) (*ACMEIssuer, error) {
 	if directoryURL == "" {
 		return nil, errors.New("cert: acme directory-url is required")
 	}
@@ -146,13 +146,11 @@ func NewACMEIssuer(directoryURL, email, dataDir string, opts ...ACMEIssuerOption
 //
 // A new order is not always 'pending': per RFC 8555 §7.1.3 a CA that
 // still holds a valid authorization for this account+identifier
-// returns the order already 'ready' (Let's Encrypt reuses
-// authorizations for ~30 days). The RA uses a single ACME account, so
-// a renewal or re-registration of a recently-validated FQDN hits this
-// routinely. In that case there is nothing for the owner to publish:
-// the order is relayed as ISSUING with no challenges, the RA's gate
-// skips ISSUING orders, and the next verify-acme finalizes directly.
-func (a *ACMEIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
+// returns the order already 'ready'. This adapter reports provider state;
+// the RA adds fresh local proof when there is no provider challenge.
+// RA callers use CreateOrder to isolate even pending authorization
+// reuse between customers.
+func (a *ACMEIssuer) createOrder(ctx context.Context, fqdn string) (*domain.CertificateOrder, error) {
 	if fqdn == "" {
 		return nil, errors.New("cert: create order: fqdn is required")
 	}
@@ -162,7 +160,7 @@ func (a *ACMEIssuer) CreateOrder(ctx context.Context, fqdn string) (*domain.Cert
 	order, err := a.client.AuthorizeOrder(ctx, acme.DomainIDs(fqdn))
 	if err != nil {
 		a.logger.Error().Err(err).Str("fqdn", fqdn).Msg("acme new-order failed")
-		return nil, fmt.Errorf("cert: acme new-order: %w", err)
+		return nil, providerFailure(err)
 	}
 	a.logger.Info().
 		Str("fqdn", fqdn).
@@ -263,7 +261,8 @@ func (a *ACMEIssuer) collectChallenges(ctx context.Context, order *acme.Order) (
 // FinalizeOrder drives the order to completion: answer the challenges
 // the RA verified, wait (bounded) for the provider's validation, then
 // finalize with the CSR and download the chain.
-func (a *ACMEIssuer) FinalizeOrder(ctx context.Context, req port.FinalizeOrderRequest) (*port.IssuedCert, error) {
+// finalizeOrder operates only on an already selected provider account.
+func (a *ACMEIssuer) finalizeOrder(ctx context.Context, req port.FinalizeOrderRequest) (*port.IssuedCert, error) {
 	csr, err := anscrypto.ValidateServerCSR(req.CSRPEM, req.FQDN)
 	if err != nil {
 		return nil, err
@@ -282,7 +281,7 @@ func (a *ACMEIssuer) FinalizeOrder(ctx context.Context, req port.FinalizeOrderRe
 	order, err := a.client.GetOrder(ctx, req.OrderRef)
 	if err != nil {
 		a.logger.Error().Err(err).Str("orderRef", req.OrderRef).Msg("acme get order failed")
-		return nil, fmt.Errorf("cert: acme get order: %w", err)
+		return nil, providerFailure(err)
 	}
 
 	if order.Status == acme.StatusPending {
@@ -499,7 +498,7 @@ func (a *ACMEIssuer) ensureRegistered(ctx context.Context) error {
 	}
 	_, err := a.client.Register(ctx, &acme.Account{Contact: a.contact}, acme.AcceptTOS)
 	if err != nil && !errors.Is(err, acme.ErrAccountAlreadyExists) {
-		return fmt.Errorf("cert: acme account registration: %w", err)
+		return providerFailure(err)
 	}
 	a.registered = true
 	return nil
