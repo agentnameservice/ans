@@ -284,6 +284,14 @@ Follow-up opportunities (community): cloud-KMS / Postgres /
 managed-DNS adapters, real ACME DNS-01 verifier wiring, additional
 schema versions.
 
+## Contributing
+
+This repository follows [ANS governance](https://github.com/agentnameservice/governance/blob/main/GOVERNANCE.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidance and
+[MAINTAINERS.md](MAINTAINERS.md) for the repository's Maintainers.
+The [Code of Conduct](CODE_OF_CONDUCT.md) applies to participation;
+report vulnerabilities privately using [SECURITY.md](SECURITY.md).
+
 ## License
 
 MIT License. See [LICENSE](LICENSE).
