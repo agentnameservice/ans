@@ -1,16 +1,6 @@
-# Repository access roster
+# Maintainers
 
-## Maintainers
-
-| GitHub |
-| --- |
-| @csnitker-godaddy |
-| @kperry-godaddy |
-| @jhateley-godaddy |
-
-## Reviewers
-
-| GitHub |
-| --- |
-
-Update this file through a reviewed pull request. The organization automation reads the GitHub column in these two sections.
+The [ans-maintainers team](https://github.com/orgs/agentnameservice/teams/ans-maintainers)
+maintains this repository. Current membership and GitHub access are recorded in
+[the organization team configuration](https://github.com/agentnameservice/.github/blob/main/peribolos.yml).
+Propose membership changes there through a reviewed pull request.
