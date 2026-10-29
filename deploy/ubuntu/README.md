@@ -233,7 +233,7 @@ Caddy automatically renews the RA/TL service certificates. It does not rotate
 agent certificates issued through the RA or install them into an agent. Plan
 agent renewal, TL publication, DNS updates, and certificate installation
 before expiry. Post-renewal DNS resealing remains tracked in
-[ans-registry#66](https://github.com/agentnameservice/ans-registry/issues/66):
+[ans-spec#66](https://github.com/agentnameservice/ans-spec/issues/66):
 `verify-dns` on an ACTIVE registration does not refresh its sealed snapshot.
 
 Use external monitoring for `GET https://tl.ans.example.com/root-keys` and
