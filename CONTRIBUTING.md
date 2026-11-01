@@ -1,6 +1,6 @@
 # Contributing
 
-Follow the [ANS contribution guide](https://github.com/agentnameservice/governance/blob/main/CONTRIBUTING.md)
+Follow the [ANS contribution guide](https://github.com/agentnameservice/.github/blob/main/CONTRIBUTING.md)
 and [governance](https://github.com/agentnameservice/governance/blob/main/GOVERNANCE.md).
 They define DCO sign-off, pull request review, issue references, and disclosure
 of AI assistance.
