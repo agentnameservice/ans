@@ -29,6 +29,11 @@ browse <http://localhost:18080/docs> (RA) and
 scripts/demo/start.sh`. The raw OpenAPI bytes live at
 `/docs/openapi.yaml` on each host.
 
+The RA and TL specs use relative server URLs so Swagger requests target the
+host serving the document: `/v2` for RA management, and `/` for the RA events
+feed and TL. Generated clients must be configured with an absolute deployment
+base URL, preserving those path prefixes; the specs provide no default host.
+
 To call protected endpoints from Swagger UI's "Try it out" button:
 click **Authorize** in the top-right and paste the static API key.
 The quickstart defaults are:
