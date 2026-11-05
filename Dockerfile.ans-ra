@@ -48,6 +48,9 @@ RUN apk add --no-cache ca-certificates tzdata \
 USER ans
 WORKDIR /var/lib/ans-ra
 COPY --from=build /out/ans-ra /usr/local/bin/ans-ra
+COPY LICENSE NOTICE /usr/share/licenses/ans/
+COPY LICENSES/MIT.txt /usr/share/licenses/ans/LICENSES/MIT.txt
+LABEL org.opencontainers.image.licenses="Apache-2.0 AND MIT"
 EXPOSE 18080
 ENTRYPOINT ["/usr/local/bin/ans-ra"]
 CMD ["--config", "/etc/ans-ra/ra.yaml"]

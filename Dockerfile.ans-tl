@@ -31,6 +31,9 @@ RUN apk add --no-cache ca-certificates tzdata \
 USER ans
 WORKDIR /var/lib/ans-tl
 COPY --from=build /out/ans-tl /usr/local/bin/ans-tl
+COPY LICENSE NOTICE /usr/share/licenses/ans/
+COPY LICENSES/MIT.txt /usr/share/licenses/ans/LICENSES/MIT.txt
+LABEL org.opencontainers.image.licenses="Apache-2.0 AND MIT"
 EXPOSE 18081
 ENTRYPOINT ["/usr/local/bin/ans-tl"]
 CMD ["--config", "/etc/ans-tl/tl.yaml"]

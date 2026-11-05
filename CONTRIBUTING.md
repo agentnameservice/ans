@@ -108,6 +108,20 @@ Generally speaking, Git handles attribution automatically.
 Ensure that your contribution follows the standards set by the project's style
 guide with respect to patterns, naming, documentation and testing.
 
+## Licensing new contributions
+
+This policy applies to new original contributions submitted after its adoption.
+By submitting such a contribution for inclusion in ANS, you agree to license it
+under the [Apache License, Version 2.0](LICENSE), including its copyright and
+patent grants. Only submit material that you have the right to license on those
+terms, and sign off each commit under the Developer Certificate of Origin below.
+
+Pre-existing contributions retain the licenses under which they were submitted.
+In particular, earlier MIT-licensed contributions remain under
+[LICENSES/MIT.txt](LICENSES/MIT.txt); this policy does not claim an Apache patent grant from
+those contributors for their earlier work. Preserve existing copyright and
+third-party license notices when modifying or incorporating material.
+
 ## Developer Certificate of Origin
 
 This project follows the Linux Foundation contribution model. Every commit
