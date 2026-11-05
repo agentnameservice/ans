@@ -113,6 +113,8 @@ archives:
       - tar.gz
     files:
       - LICENSE
+      - LICENSES/MIT.txt
+      - NOTICE
       - README.md
 
 checksum:
