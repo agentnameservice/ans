@@ -23,7 +23,6 @@ In particular, earlier MIT-licensed contributions remain under
 those contributors for their earlier work. Preserve existing copyright and
 third-party license notices when modifying or incorporating material.
 
-
 ## Development
 
 See the [development instructions](README.md#development) in the README.
