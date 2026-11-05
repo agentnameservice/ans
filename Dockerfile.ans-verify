@@ -24,4 +24,6 @@ RUN go build \
 FROM alpine:3.23
 RUN apk add --no-cache ca-certificates
 COPY --from=build /out/ans-verify /usr/local/bin/ans-verify
+COPY LICENSE LICENSE-MIT NOTICE /usr/share/licenses/ans/
+LABEL org.opencontainers.image.licenses="Apache-2.0 AND MIT"
 ENTRYPOINT ["/usr/local/bin/ans-verify"]
