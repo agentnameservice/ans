@@ -52,7 +52,7 @@ func TestWorker_HappyPath_DrainsQueue(t *testing.T) {
 	})
 
 	// All rows should be marked sent.
-	pending, err := store.Claim(context.Background(), 10)
+	pending, err := store.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestWorker_Transient_RetriesWithBackoff(t *testing.T) {
 	defer cancel()
 
 	waitUntil(t, 3*time.Second, func() bool {
-		pending, _ := store.Claim(context.Background(), 10)
+		pending, _ := store.Ready(context.Background(), 10)
 		return len(pending) == 0 && calls.Load() >= 3
 	})
 
@@ -112,11 +112,11 @@ func TestWorker_Transient_RetriesWithBackoff(t *testing.T) {
 	}
 }
 
-// TestWorker_Permanent_KeepsInTableAtMaxBackoff — 422 from the TL
+// TestWorker_Permanent_RetriesBeforeDeadLetter — 422 from the TL
 // means the row will never succeed in its current form. We log
 // loudly but keep the row with max backoff (if the operator fixes
 // the producer-key trust, it could succeed next time).
-func TestWorker_Permanent_KeepsInTableAtMaxBackoff(t *testing.T) {
+func TestWorker_Permanent_RetriesBeforeDeadLetter(t *testing.T) {
 	t.Parallel()
 	store, cleanup := newOutboxStore(t)
 	defer cleanup()
@@ -149,7 +149,7 @@ func TestWorker_Permanent_KeepsInTableAtMaxBackoff(t *testing.T) {
 	// The row should still be in the table (not marked sent), but
 	// its next_attempt_at should have been pushed into the future.
 	// Immediately claiming should return nothing.
-	pending, err := store.Claim(context.Background(), 10)
+	pending, err := store.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestWorker_EmptyOutboxNoOp(t *testing.T) {
 // But missing-field rows (valid JSON, but empty innerEventCanonical
 // or empty producerSignature) are reachable if the RA's signing path
 // ever misbehaves. Exercise that branch here — the worker must not
-// call the sender and must mark the row with max backoff.
+// call the sender and must park the row for operator repair.
 func TestWorker_MissingFieldsRow_Buried(t *testing.T) {
 	t.Parallel()
 	store, cleanup := newOutboxStore(t)
@@ -222,8 +222,8 @@ func TestWorker_MissingFieldsRow_Buried(t *testing.T) {
 	defer cancel()
 
 	waitUntil(t, 1*time.Second, func() bool {
-		pending, _ := store.Claim(context.Background(), 10)
-		return len(pending) == 0 // row is in backoff → not claimable
+		backlog, err := store.Backlog(context.Background())
+		return err == nil && backlog.Dead == 1
 	})
 }
 

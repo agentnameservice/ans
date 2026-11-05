@@ -165,6 +165,7 @@ func PublicKeyToJWK(pub any) (json.RawMessage, error) {
 func marshalJWK(members map[string]string) (json.RawMessage, error) {
 	raw, err := json.Marshal(members)
 	if err != nil {
+		// NOTE: map[string]string contains no values json.Marshal can reject.
 		return nil, fmt.Errorf("%w: %w", ErrJWK, err)
 	}
 	return raw, nil
@@ -182,6 +183,8 @@ func p256Coordinates(pub *ecdsa.PublicKey) ([]byte, []byte, error) {
 		return nil, nil, fmt.Errorf("%w: %w", ErrJWK, err)
 	}
 	if len(point) != 65 || point[0] != 0x04 {
+		// SAFETY: successful Bytes on the P-256 key checked above always
+		// returns a 65-byte uncompressed SEC1 point.
 		return nil, nil, fmt.Errorf("%w: unexpected SEC1 encoding", ErrJWK)
 	}
 	return point[1:33], point[33:65], nil
@@ -242,6 +245,8 @@ func DecodeMultibase(encoded string) (any, error) {
 		point = append(point, y.FillBytes(make([]byte, 32))...)
 		pub, err := ecdsa.ParseUncompressedPublicKey(elliptic.P256(), point)
 		if err != nil {
+			// SAFETY: UnmarshalCompressed already validated the point;
+			// the fixed-width encoding above preserves those coordinates.
 			return nil, fmt.Errorf("%w: %w", ErrJWK, err)
 		}
 		return pub, nil

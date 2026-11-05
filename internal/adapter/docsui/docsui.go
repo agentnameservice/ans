@@ -96,9 +96,9 @@ func Mount(r chi.Router, spec Spec) {
 // by itself — we pass it only the OpenAPI URL and a few cosmetic
 // options. dom_id anchors the app into the page body.
 func renderSwaggerUI(title string) string {
-	// Pin the Swagger UI version so upstream changes can't break
-	// local dev overnight. 5.17.x is the current LTS-ish series
-	// at the time of writing and works against OpenAPI 3.0 specs.
+	// Pin the package version and asset integrity together. The SRI hashes
+	// below are SHA-384 over files from the integrity-verified npm package.
+	// Browsers must reject modified CDN assets before they can read API tokens.
 	const swaggerVersion = "5.17.14"
 	// Escape the title in case it ever grows HTML-sensitive chars
 	// — today it's plain ASCII but defense-in-depth costs nothing.
@@ -109,7 +109,8 @@ func renderSwaggerUI(title string) string {
   <meta charset="utf-8">
   <title>%s</title>
   <link rel="stylesheet"
-        href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@%s/swagger-ui.css">
+        href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@%s/swagger-ui.css"
+        integrity="sha384-wxLW6kwyHktdDGr6Pv1zgm/VGJh99lfUbzSn6HNHBENZlCN7W602k9VkGdxuFvPn" crossorigin="anonymous">
   <style>
     body { margin: 0; background: #fafafa; }
     .topbar { display: none; }
@@ -117,8 +118,10 @@ func renderSwaggerUI(title string) string {
 </head>
 <body>
   <div id="swagger-ui"></div>
-  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@%s/swagger-ui-bundle.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@%s/swagger-ui-standalone-preset.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@%s/swagger-ui-bundle.js"
+          integrity="sha384-wmyclcVGX/WhUkdkATwhaK1X1JtiNrr2EoYJ+diV3vj4v6OC5yCeSu+yW13SYJep" crossorigin="anonymous"></script>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@%s/swagger-ui-standalone-preset.js"
+          integrity="sha384-2YH8WDRaj7V2OqU/trsmzSagmk/E2SutiCsGkdgoQwC9pNUJV1u/141DHB6jgs8t" crossorigin="anonymous"></script>
   <script>
     window.onload = () => {
       window.ui = SwaggerUIBundle({

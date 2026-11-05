@@ -146,9 +146,10 @@ func run(cfgPath string) error {
 	} else {
 		logger.Info().Msg("no server issuer configured — serverCsrPEM path disabled (BYOC-only)")
 	}
-	// In local-dev, accept self-signed BYOC certs. Production must
-	// remove WithSkipChainVerify in its config factory.
-	validator := cert.NewX509Validator(cert.WithSkipChainVerify())
+	validator, err := buildCertificateValidator(ctx, cfg.CA, serverCA)
+	if err != nil {
+		return fmt.Errorf("init certificate validator: %w", err)
+	}
 
 	// DNS verifier.
 	var dnsVerifier = selectDNSVerifier(cfg)

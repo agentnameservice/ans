@@ -29,6 +29,11 @@ browse <http://localhost:18080/docs> (RA) and
 scripts/demo/start.sh`. The raw OpenAPI bytes live at
 `/docs/openapi.yaml` on each host.
 
+The RA and TL specs use relative server URLs so Swagger requests target the
+host serving the document: `/v2` for RA management, and `/` for the RA events
+feed and TL. Generated clients must be configured with an absolute deployment
+base URL, preserving those path prefixes; the specs provide no default host.
+
 To call protected endpoints from Swagger UI's "Try it out" button:
 click **Authorize** in the top-right and paste the static API key.
 The quickstart defaults are:
@@ -39,6 +44,9 @@ The quickstart defaults are:
 The RA writes signed events; the TL verifies, ingests, and publishes
 them. An operator can run just the TL (for read-only verification) or
 both together (full registry).
+
+For a native Ubuntu host with systemd, Caddy, OIDC, and Let’s Encrypt, see
+the [RA/TL deployment guide](deploy/ubuntu/README.md).
 
 ## Quickstart (60 seconds)
 
@@ -270,7 +278,7 @@ contribution-shaped — see `CONTRIBUTING.md`.
 
 ```bash
 make test         # unit tests
-make test-cover   # with coverage, enforces the repo gate (≥90%)
+make test-cover   # with coverage, enforces internal ≥90%, domain 100%, crypto ≥95%
 make test-race    # race detector
 make check        # fmt + vet + lint + test-cover (pre-commit gate)
 ```
