@@ -76,7 +76,7 @@ const (
 	// "registration complete" leaf; emitted once at verify-dns.
 	TypeAgentRegistered Type = "AGENT_REGISTERED"
 
-	// TypeAgentRenewed — a server-certificate renewal cycle
+	// TypeAgentRenewed — a server or identity certificate renewal cycle
 	// completed. Emitted once per renewal.
 	TypeAgentRenewed Type = "AGENT_RENEWED"
 
@@ -283,6 +283,19 @@ func (ev *Event) Validate() error {
 	}
 	if ev.RevocationReasonCode != "" && !domain.RevocationReason(ev.RevocationReasonCode).IsValid() {
 		return fmt.Errorf("event: invalid revocationReasonCode %q", ev.RevocationReasonCode)
+	}
+
+	if _, err := domain.ParseAttestedExpiry(ev.ExpiresAt); err != nil {
+		return err
+	}
+	if ev.Attestations != nil {
+		for _, family := range [][]CertificateInfo{ev.Attestations.IdentityCerts, ev.Attestations.ServerCerts} {
+			for _, cert := range family {
+				if _, err := domain.ParseAttestedExpiry(cert.NotAfter); err != nil {
+					return err
+				}
+			}
+		}
 	}
 	return nil
 }

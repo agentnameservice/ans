@@ -30,13 +30,13 @@ func TestLive_LetsEncryptStaging_CreateOrder(t *testing.T) {
 	if os.Getenv("ANS_LE_LIVE_TEST") == "" {
 		t.Skip("live Let's Encrypt staging test; set ANS_LE_LIVE_TEST=1 to run")
 	}
-	issuer, err := NewACMEIssuer(
+	issuer, err := newACMEAccount(
 		"https://acme-staging-v02.api.letsencrypt.org/directory",
 		"", t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	order, err := issuer.CreateOrder(t.Context(), "agent.ans-issuer-smoke-2026.com")
+	order, err := issuer.createOrder(t.Context(), "agent.ans-issuer-smoke-2026.com")
 	if err != nil {
 		t.Fatalf("create order against real LE staging: %v", err)
 	}

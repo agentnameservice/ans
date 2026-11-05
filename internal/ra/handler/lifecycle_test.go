@@ -784,7 +784,7 @@ func TestVerifyDNS_ActivatesWhenRecordsMatch(t *testing.T) {
 	// Activation seals inline, so nothing is claimable by the outbox
 	// worker — the only row it writes is the pre-delivered feed row
 	// (sent + logId at insert), which Claim never returns.
-	rows, err := fx.outbox.Claim(context.Background(), 100)
+	rows, err := fx.outbox.Ready(context.Background(), 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,7 +822,7 @@ func TestVerifyDNS_SealFailure_Returns503(t *testing.T) {
 	if detResp.AgentStatus != "PENDING_DNS" {
 		t.Fatalf("agent must stay PENDING_DNS after a failed seal; got %q", detResp.AgentStatus)
 	}
-	if rows, _ := fx.outbox.Claim(context.Background(), 100); len(rows) != 0 {
+	if rows, _ := fx.outbox.Ready(context.Background(), 100); len(rows) != 0 {
 		t.Errorf("activation must not enqueue to the outbox; got %d rows", len(rows))
 	}
 }
@@ -871,7 +871,7 @@ func TestRevoke_TransitionsToRevokedAndEmitsEvent(t *testing.T) {
 		t.Error("sealer missing AGENT_REGISTERED event")
 	}
 
-	rows, _ := fx.outbox.Claim(context.Background(), 100)
+	rows, _ := fx.outbox.Ready(context.Background(), 100)
 	sawRevoked := false
 	for _, row := range rows {
 		if row.EventType == "AGENT_REGISTERED" {

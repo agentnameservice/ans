@@ -46,7 +46,7 @@ func TestRegistration_NoOutboxEmit(t *testing.T) {
 		t.Fatalf("status: got %q want PENDING_VALIDATION", resp.Registration.Status)
 	}
 
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
+	rows, err := fx.outboxStore.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -90,7 +90,7 @@ func TestRegistration_NoSigner(t *testing.T) {
 		t.Fatalf("RegisterAgent unsigned: %v", err)
 	}
 	// No outbox rows at register time — terminal-only event model.
-	rows, err := fx.outboxStore.Claim(context.Background(), 10)
+	rows, err := fx.outboxStore.Ready(context.Background(), 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,6 +278,7 @@ type regFixture struct {
 	bus          port.EventBus
 	discoveryReg port.ProfileRegistry
 	signerPubPEM string
+	signer       service.EventSigner
 }
 
 func newRegFixture(t *testing.T) *regFixture {
@@ -304,7 +305,8 @@ func newRegFixture(t *testing.T) *regFixture {
 		t.Fatal(err)
 	}
 
-	// Real validator that skips chain verification (local-dev config).
+	// This fixture isolates lifecycle behavior. Executable trust-root wiring
+	// is covered separately by cmd/ans-ra's certificate-validation tests.
 	validator := cert.NewX509Validator(cert.WithSkipChainVerify())
 
 	bus := eventbus.NewInMemoryBus(zerolog.Nop())
@@ -374,6 +376,7 @@ func newRegFixture(t *testing.T) *regFixture {
 		bus:          bus,
 		discoveryReg: discoveryReg,
 		signerPubPEM: pubPEM,
+		signer:       service.EventSigner{KeyManager: km, KeyID: "ra-signer", RaID: "ra-test"},
 		req: service.RegisterRequest{
 			OwnerID:     "owner-1",
 			AnsName:     ansName,
@@ -439,3 +442,12 @@ func parseTestURI(t *testing.T, s string) []*url.URL {
 	}
 	return []*url.URL{u}
 }
+
+func (failingOutbox) LoadActivationSeal(context.Context, string) (string, []byte, error) {
+	return "", nil, errors.New("activation storage failure")
+}
+func (failingOutbox) PrepareActivationSeal(context.Context, string, string, []byte) (string, []byte, error) {
+	return "", nil, errors.New("activation storage failure")
+}
+
+func (failingOutbox) CancelPending(context.Context, string) error { return nil }

@@ -351,6 +351,7 @@ func VerifyStandardJWSWithPublicKey(pub any, jwsCompact string) (*JWSProtectedHe
 			return nil, fmt.Errorf("%w: ed25519 signature mismatch", ErrJWSVerify)
 		}
 	default:
+		// SAFETY: checkAlgMatchesKey already rejected unsupported key types.
 		return nil, fmt.Errorf("%w: unsupported public key type %T", ErrJWSVerify, pub)
 	}
 	return header, nil
@@ -511,6 +512,7 @@ func verifyWithPublicKey(pub any, alg, encodedHeader, encodedSig string, payload
 			return fmt.Errorf("%w: ed25519 signature mismatch", ErrJWSVerify)
 		}
 	default:
+		// SAFETY: checkAlgMatchesKey already rejected unsupported key types.
 		return fmt.Errorf("%w: unsupported public key type %T", ErrJWSVerify, pub)
 	}
 	return nil
@@ -524,11 +526,13 @@ func toJWSWireFormat(alg string, pub any, rawSig []byte) ([]byte, error) {
 	case AlgES256:
 		ecPub, ok := pub.(*ecdsa.PublicKey)
 		if !ok {
+			// SAFETY: both signing entry points call checkAlgMatchesKey first.
 			return nil, fmt.Errorf("jws: ES256 requires ECDSA public key, got %T", pub)
 		}
 		return DERToP1363(rawSig, CoordinateBytes(ecPub))
 	case AlgRS256:
 		if _, ok := pub.(*rsa.PublicKey); !ok {
+			// SAFETY: both signing entry points call checkAlgMatchesKey first.
 			return nil, fmt.Errorf("jws: RS256 requires RSA public key, got %T", pub)
 		}
 		return rawSig, nil

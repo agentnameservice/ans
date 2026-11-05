@@ -141,30 +141,35 @@ func fingerprintOf(pemStr string) (string, error) {
 }
 
 // agentCertExpiry returns the effective `expiresAt` value for a
-// lifecycle event: the earliest valid `notAfter` across all attested
-// agent certs (identity + server). Formatted as RFC3339 UTC. Returns
+// lifecycle event: the earlier of the latest attested identity and server
+// expirations. A lapsed family's retained certificate keeps that expiry in the
+// past; old overlap certificates do not expire their valid replacements.
+// Formatted as RFC3339 UTC. Returns
 // "" when no cert is attested — callers can decide whether to surface
 // that case (e.g., post-revocation events may have no live certs).
 //
 // Required at the event level by the reference TL spec
 // (`payload.producer.event.expiresAt`); the badge service derives
 // WARNING / EXPIRED transitions from this value.
-func agentCertExpiry(stored []*domain.StoredCertificate, byoc *domain.ByocServerCertificate, now time.Time) string {
-	var earliest time.Time
+func agentCertExpiry(stored []*domain.StoredCertificate, servers []*domain.ByocServerCertificate, now time.Time) string {
+	var identityExpiry, serverExpiry time.Time
 	for _, c := range stored {
-		if c == nil || !c.IsValid(now) {
+		if c == nil || c.Status != domain.CertStatusValid || now.Before(c.IssueTimestamp) {
 			continue
 		}
 		t := c.ExpirationTimestamp
-		if earliest.IsZero() || t.Before(earliest) {
-			earliest = t
+		if t.After(identityExpiry) {
+			identityExpiry = t
 		}
 	}
-	if byoc != nil {
-		t := byoc.ValidToTimestamp
-		if !t.IsZero() && (earliest.IsZero() || t.Before(earliest)) {
-			earliest = t
+	for _, c := range servers {
+		if c != nil && !now.Before(c.ValidFromTimestamp) && c.ValidToTimestamp.After(serverExpiry) {
+			serverExpiry = c.ValidToTimestamp
 		}
+	}
+	earliest := identityExpiry
+	if earliest.IsZero() || (!serverExpiry.IsZero() && serverExpiry.Before(earliest)) {
+		earliest = serverExpiry
 	}
 	if earliest.IsZero() {
 		return ""

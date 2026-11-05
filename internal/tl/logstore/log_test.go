@@ -78,13 +78,12 @@ func TestLog_AppendAndCheckpoint(t *testing.T) {
 	assert.Equal(t, uint64(0), res.LeafIndex)
 	assert.False(t, res.IsDuplicate)
 
-	// Tessera antispam is off by default; we deduplicate at the
-	// event-store layer before calling Append. Verify the raw second
-	// append is treated as a fresh leaf with the next index.
+	// The built-in Tessera checker must also suppress duplicate entries
+	// when a caller reaches the appender directly.
 	res2, err := lg.Append(ctx, env)
 	require.NoError(t, err)
-	assert.Equal(t, uint64(1), res2.LeafIndex,
-		"without antispam Tessera assigns a new index for each Add")
+	assert.Equal(t, uint64(0), res2.LeafIndex)
+	assert.True(t, res2.IsDuplicate)
 
 	// Wait for Tessera to sign and write a checkpoint.
 	cpPath := filepath.Join(dir, "tiles", "checkpoint")

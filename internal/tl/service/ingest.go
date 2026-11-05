@@ -1,0 +1,281 @@
+package service
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"strings"
+	"time"
+
+	"github.com/transparency-dev/tessera/api/layout"
+	"github.com/transparency-dev/tessera/client"
+
+	sqlitetl "github.com/agentnameservice/ans/internal/adapter/store/sqlitetl"
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/domain"
+	"github.com/agentnameservice/ans/internal/tl/event"
+	identityevent "github.com/agentnameservice/ans/internal/tl/event/identity"
+	eventv1 "github.com/agentnameservice/ans/internal/tl/event/v1"
+)
+
+// RecoverIndex restores committed leaves before the executable serves reads or
+// accepts writes. Append also runs recovery after any uncertain write failure.
+const indexLockWeight int64 = 1 << 20
+
+func (s *LogService) RecoverIndex(ctx context.Context) error {
+	select {
+	case s.writerGate <- struct{}{}:
+		defer func() { <-s.writerGate }()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	if err := s.indexGate.Acquire(ctx, indexLockWeight); err != nil {
+		return err
+	}
+	defer s.indexGate.Release(indexLockWeight)
+	s.indexReady = false
+	if err := s.recoverIndex(ctx); err != nil {
+		return err
+	}
+	s.indexReady = true
+	return nil
+}
+
+// Healthy readers share the index fence. A failed/uncertain mirror is repaired
+// only under exclusive ownership; no lock upgrade is attempted while reading.
+func (s *LogService) lockIndexedRead(ctx context.Context) (func(), error) {
+	for {
+		if err := s.indexGate.Acquire(ctx, 1); err != nil {
+			return nil, err
+		}
+		if s.indexReady {
+			return func() { s.indexGate.Release(1) }, nil
+		}
+		s.indexGate.Release(1)
+		if err := s.RecoverIndex(ctx); err != nil {
+			return nil, fmt.Errorf("recover index before read: %w", err)
+		}
+	}
+}
+
+func (s *LogService) duplicateResult(ctx context.Context, rec *sqlitetl.EventRecord) (*AppendResult, error) {
+	hash, err := rec.LeafHashBytes()
+	if err != nil {
+		return nil, err
+	}
+	return &AppendResult{
+		LogID: rec.LogID, LeafIndex: rec.LeafIndex, LeafHash: hash,
+		Duplicate: true, TreeSize: s.currentTreeSize(ctx, rec.LeafIndex),
+	}, nil
+}
+
+// checkAgentState protects versioned-name ownership and terminal lifecycle
+// state. Deduplication uses only the canonical producer-event hash; activation
+// retries replay persisted bytes rather than treating fresh timestamps as equal.
+func (s *LogService) checkAgentState(ctx context.Context, env event.Signable, canonical []byte) error {
+	if _, ok := env.(*identityevent.Envelope); ok {
+		return nil
+	}
+	name, err := domain.ParseAnsName(env.AnsName())
+	if err != nil || name.String() != env.AnsName() ||
+		name.FQDN() != strings.TrimSuffix(strings.ToLower(env.AgentFQDN()), ".") {
+		return domain.NewValidationError("INVALID_EVENT", "agent host must match the canonical versioned ANS name")
+	}
+	var incoming struct {
+		RaID  string `json:"raId"`
+		Agent struct {
+			Version string `json:"version"`
+		} `json:"agent"`
+	}
+	if err := json.Unmarshal(canonical, &incoming); err != nil {
+		return err
+	}
+	if incoming.Agent.Version != name.Version().String() {
+		return domain.NewValidationError("INVALID_EVENT", "agent version must match the versioned ANS name")
+	}
+	rec, err := s.events.LatestAgentState(ctx, env.AnsName(), env.AgentID())
+	if errors.Is(err, domain.ErrNotFound) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if rec.AnsName != env.AnsName() || rec.AgentID != env.AgentID() || strings.TrimSuffix(strings.ToLower(rec.AgentFQDN), ".") != strings.TrimSuffix(strings.ToLower(env.AgentFQDN()), ".") {
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "versioned FQDN is already bound to a different agent")
+	}
+	previous, err := innerEventBytes([]byte(rec.RawEvent))
+	if err != nil {
+		return err
+	}
+	var prior struct {
+		RaID      string `json:"raId"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(previous, &prior); err != nil {
+		return err
+	}
+	if incoming.RaID != prior.RaID {
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "agent lifecycle belongs to a different producer")
+	}
+	if !agentEventTransitionAllowed(rec.EventType, env.EventType()) {
+		return domain.NewConflictError("AGENT_STATE_CONFLICT", "event duplicates or reverses an existing lifecycle state")
+	}
+	oldTime, oldErr := time.Parse(time.RFC3339, prior.Timestamp)
+	newTime, newErr := time.Parse(time.RFC3339, env.Timestamp())
+	if oldErr != nil || newErr != nil {
+		return domain.NewValidationError("INVALID_EVENT", "event timestamp is invalid")
+	}
+	// Revocation is terminal even when the producer clock moved backwards.
+	if env.EventType() != string(event.TypeAgentRevoked) && newTime.Before(oldTime) {
+		return domain.NewConflictError("STALE_AGENT_EVENT", "event predates the current agent state")
+	}
+	return nil
+}
+
+func innerEventBytes(raw []byte) ([]byte, error) {
+	var wrapper struct {
+		Payload struct {
+			Producer struct {
+				Event json.RawMessage `json:"event"`
+			} `json:"producer"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, err
+	}
+	return anscrypto.Canonicalize(wrapper.Payload.Producer.Event)
+}
+
+// recoverIndex repairs committed Tessera leaves missing from SQLite before
+// accepting more writes. It includes unpublished but integrated leaves, so a
+// restart or failed mirror INSERT cannot turn a retry into another append.
+// It never regenerates a log ID, timestamp, signature, or canonical leaf.
+func (s *LogService) recoverIndex(ctx context.Context) error {
+	start := time.Now()
+	s.logger.Info().Msg("recovering event index")
+	restored, err := s.restoreMissingLeaves(ctx)
+	if err != nil {
+		s.logger.Error().Err(err).Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovery failed")
+	} else {
+		s.logger.Info().Uint64("restoredLeaves", restored).Dur("duration", time.Since(start)).Msg("event index recovered")
+	}
+	return err
+}
+
+// restoreMissingLeaves reports partial progress if recovery fails, without
+// changing any stored leaf bytes or signing new evidence.
+func (s *LogService) restoreMissingLeaves(ctx context.Context) (uint64, error) {
+	var restored uint64
+	next, err := s.events.FirstUnindexedLeaf(ctx)
+	if err != nil {
+		return restored, err
+	}
+	reader := s.log.Reader()
+	size, err := reader.IntegratedSize(ctx)
+	if err != nil {
+		return restored, err
+	}
+	indexedSize, err := s.events.IndexedSize(ctx)
+	if err != nil {
+		return restored, err
+	}
+	s.logger.Info().Uint64("firstUnindexedLeaf", next).Uint64("indexedSize", indexedSize).Uint64("logSize", size).Msg("event index recovery bounds")
+	if indexedSize > size {
+		return restored, fmt.Errorf("index extends beyond the integrated log: index=%d log=%d", indexedSize, size)
+	}
+	for next < size {
+		bundle, err := client.GetEntryBundle(ctx, reader.ReadEntryBundle, next/layout.EntryBundleWidth, size)
+		if err != nil {
+			return restored, err
+		}
+		offset := next % layout.EntryBundleWidth
+		if offset >= uint64(len(bundle.Entries)) {
+			return restored, fmt.Errorf("entry bundle does not contain leaf %d", next)
+		}
+		count := min(uint64(len(bundle.Entries))-offset, size-next)
+		hashes, err := client.FetchLeafHashes(ctx, reader.ReadTile, next, count, size)
+		if err != nil {
+			return restored, err
+		}
+		hashOffset := uint64(0)
+		for offset < uint64(len(bundle.Entries)) && next < size {
+			if err := s.restoreIndexedLeaf(ctx, next, bundle.Entries[offset], hashes[hashOffset]); err != nil {
+				return restored, fmt.Errorf("restore leaf %d: %w", next, err)
+			}
+			restored++
+			next++
+			offset++
+			hashOffset++
+		}
+	}
+	return restored, nil
+}
+
+func (s *LogService) restoreIndexedLeaf(ctx context.Context, index uint64, raw, tileHash []byte) error {
+	hash := sha256.Sum256(append([]byte{0}, raw...))
+	if !bytes.Equal(hash[:], tileHash) {
+		return errors.New("entry bytes disagree with the Merkle tile")
+	}
+	if existing, err := s.events.GetEventByLeafIndex(ctx, index); err == nil {
+		if existing.RawEvent != string(raw) {
+			return errors.New("indexed bytes disagree with Tessera")
+		}
+		return nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	env, err := decodeStoredEnvelope(raw)
+	if err != nil {
+		return err
+	}
+	canonical, err := env.LeafBytes()
+	if err != nil {
+		return err
+	}
+	if !bytes.Equal(raw, canonical) {
+		return errors.New("stored leaf is not canonical")
+	}
+	inner, err := innerEventBytes(raw)
+	if err != nil {
+		return err
+	}
+	_, err = s.events.StoreEvent(ctx, index, hash, sqlitetl.ComputeEventHash(inner), env, raw)
+	return err
+}
+
+func decodeStoredEnvelope(raw []byte) (event.Signable, error) {
+	var header struct {
+		SchemaVersion string `json:"schemaVersion"`
+		Payload       struct {
+			Producer struct {
+				Event struct {
+					EventType string `json:"eventType"`
+				} `json:"event"`
+			} `json:"producer"`
+		} `json:"payload"`
+	}
+	if err := json.Unmarshal(raw, &header); err != nil {
+		return nil, err
+	}
+	var env event.Signable
+	switch {
+	case strings.HasPrefix(header.Payload.Producer.Event.EventType, "IDENTITY_"):
+		env = &identityevent.Envelope{}
+	case header.SchemaVersion == event.SchemaVersion:
+		env = &event.Envelope{}
+	case header.SchemaVersion == eventv1.SchemaVersion:
+		env = &eventv1.Envelope{}
+	default:
+		return nil, fmt.Errorf("unsupported stored schema %q", header.SchemaVersion)
+	}
+	if err := json.Unmarshal(raw, env); err != nil {
+		return nil, err
+	}
+	if err := env.Validate(); err != nil {
+		return nil, err
+	}
+	return env, nil
+}

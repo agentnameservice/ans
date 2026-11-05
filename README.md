@@ -40,6 +40,9 @@ The RA writes signed events; the TL verifies, ingests, and publishes
 them. An operator can run just the TL (for read-only verification) or
 both together (full registry).
 
+For a native Ubuntu host with systemd, Caddy, OIDC, and Let’s Encrypt, see
+the [RA/TL deployment guide](deploy/ubuntu/README.md).
+
 ## Quickstart (60 seconds)
 
 ```bash
@@ -249,7 +252,7 @@ contribution-shaped — see `CONTRIBUTING.md`.
 
 ```bash
 make test         # unit tests
-make test-cover   # with coverage, enforces the repo gate (≥90%)
+make test-cover   # with coverage, enforces internal ≥90%, domain 100%, crypto ≥95%
 make test-race    # race detector
 make check        # fmt + vet + lint + test-cover (pre-commit gate)
 ```
