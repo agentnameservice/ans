@@ -288,7 +288,7 @@ schema versions.
 
 ANS uses the [Apache License, Version 2.0](LICENSE) for new original
 contributions under the [contribution policy](CONTRIBUTING.md#licensing-new-contributions).
-Pre-existing MIT-licensed contributions retain their [MIT license](LICENSE-MIT)
+Pre-existing MIT-licensed contributions retain their [MIT license](LICENSES/MIT.txt)
 and copyright notices; see [NOTICE](NOTICE).
 
 Distributions containing both kinds of material must comply with the applicable

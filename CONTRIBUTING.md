@@ -118,7 +118,7 @@ terms, and sign off each commit under the Developer Certificate of Origin below.
 
 Pre-existing contributions retain the licenses under which they were submitted.
 In particular, earlier MIT-licensed contributions remain under
-[LICENSE-MIT](LICENSE-MIT); this policy does not claim an Apache patent grant from
+[LICENSES/MIT.txt](LICENSES/MIT.txt); this policy does not claim an Apache patent grant from
 those contributors for their earlier work. Preserve existing copyright and
 third-party license notices when modifying or incorporating material.
 

@@ -113,7 +113,7 @@ archives:
       - tar.gz
     files:
       - LICENSE
-      - LICENSE-MIT
+      - LICENSES/MIT.txt
       - NOTICE
       - README.md
 
