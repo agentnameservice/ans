@@ -15,7 +15,8 @@ This policy applies to new original contributions submitted after its adoption.
 By submitting such a contribution for inclusion in ANS, you agree to license it
 under the [Apache License, Version 2.0](LICENSE), including its copyright and
 patent grants. Only submit material that you have the right to license on those
-terms, and sign off each commit under the Developer Certificate of Origin below.
+terms, and sign off each commit under the
+[Developer Certificate of Origin](https://developercertificate.org/).
 
 Pre-existing contributions retain the licenses under which they were submitted.
 In particular, earlier MIT-licensed contributions remain under
