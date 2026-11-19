@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/agentnameservice/ans/compare/v0.2.0...v0.2.1) (2026-11-19)
+
+
+### Miscellaneous
+
+* adopt shared ANS governance guidance ([#147](https://github.com/agentnameservice/ans/issues/147)) ([36269ae](https://github.com/agentnameservice/ans/commit/36269ae793fb95bcee2d5dae313a9bf6b340614b))
+
 ## [0.2.0](https://github.com/agentnameservice/ans/compare/v0.1.6...v0.2.0) (2026-11-05)
 
 
