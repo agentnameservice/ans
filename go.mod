@@ -19,8 +19,8 @@ require (
 	github.com/rs/zerolog v1.35.1
 	github.com/stretchr/testify v1.12.1
 	github.com/transparency-dev/tessera v1.0.4
-	golang.org/x/crypto v0.58.0
-	golang.org/x/mod v0.42.0
+	golang.org/x/crypto v0.59.0
+	golang.org/x/mod v0.43.0
 	golang.org/x/net v0.62.0
 	golang.org/x/sync v0.25.0
 	golang.org/x/sys v0.50.0
