@@ -123,9 +123,11 @@ has zero framework or storage dependencies. Services depend on port
 interfaces (`internal/port`) which adapters in `internal/adapter/`
 implement against real drivers: `cmd/ans-ra` and `cmd/ans-tl` wire
 `internal/ra/service` and `internal/tl/service` to the SQLite, file
-key-manager, DNS, and certificate adapters; `cmd/ans-verify` depends
-only on `internal/tl/receipt`; `cmd/ans-dns` is a miekg/dns
-authoritative server with RA-driven record `install` / `clear`.
+key-manager, DNS, and certificate adapters; `cmd/ans-verify` verifies
+receipts through `internal/tl/receipt` and checkpoints through
+`internal/lognote`, with no dependency on the TL's storage or service
+layer; `cmd/ans-dns` is a miekg/dns authoritative server with
+RA-driven record `install` / `clear`.
 
 See `spec/api-spec-v2.yaml` + `spec/api-spec-tl-v2.yaml` for the
 authoritative OpenAPI contracts. `docs/architecture/ans-finder.md`
