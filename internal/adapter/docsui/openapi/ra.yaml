@@ -559,13 +559,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Authorization failed
+          description: Authorization failed, including AGENT_NOT_OWNED when the agent exists but is owned by another caller
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Agent not found or not owned by caller
+          description: Agent not found
           content:
             application/json:
               schema:
@@ -629,13 +629,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '403':
-          description: Authorization failed
+          description: Authorization failed, including AGENT_NOT_OWNED when the agent exists but is owned by another caller
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
         '404':
-          description: Agent not found or not owned by caller
+          description: Agent not found
           content:
             application/json:
               schema:
