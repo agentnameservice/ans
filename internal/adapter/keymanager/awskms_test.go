@@ -1,0 +1,561 @@
+package keymanager
+
+import (
+	"bytes"
+	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"crypto/x509"
+	"errors"
+	"path/filepath"
+	"strings"
+	"sync"
+	"testing"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/service/kms"
+	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/rs/zerolog"
+
+	anscrypto "github.com/agentnameservice/ans/internal/crypto"
+	"github.com/agentnameservice/ans/internal/port"
+	"github.com/agentnameservice/ans/internal/tl/receipt"
+)
+
+var _ port.KeyManager = (*AWSKMSKeyManager)(nil)
+
+const (
+	tlKeyID = "ans-tl-attestation"
+	raKeyID = "ans-ra-signer"
+	tlRef   = "alias/ans-tl"
+	raRef   = "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
+)
+
+// stubKMS returns KMS-shaped responses and signs with real P-256 keys.
+type stubKMS struct {
+	mu   sync.Mutex
+	keys map[string]*stubKey
+
+	describeErr, publicErr, signErr error
+	publicDER                       []byte // overrides the key's SPKI when set
+
+	describeCalls, publicCalls, signCalls int
+	lastSign                              *kms.SignInput
+}
+
+type stubKey struct {
+	priv *ecdsa.PrivateKey
+	md   types.KeyMetadata
+}
+
+func newStubKey(t *testing.T, ref string) *stubKey {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	arn := ref
+	if !strings.HasPrefix(ref, "arn:") {
+		arn = "arn:aws:kms:us-east-1:111122223333:key/" + strings.TrimPrefix(ref, "alias/") + "-key"
+	}
+	return &stubKey{priv: priv, md: types.KeyMetadata{
+		Arn:      aws.String(arn),
+		KeySpec:  types.KeySpecEccNistP256,
+		KeyUsage: types.KeyUsageTypeSignVerify,
+		KeyState: types.KeyStateEnabled,
+	}}
+}
+
+func newStub(t *testing.T, refs ...string) *stubKMS {
+	t.Helper()
+	s := &stubKMS{keys: make(map[string]*stubKey)}
+	for _, ref := range refs {
+		s.keys[ref] = newStubKey(t, ref)
+	}
+	return s
+}
+
+// key looks a key up by its registered reference or its ARN.
+func (s *stubKMS) key(ref *string) (*stubKey, error) {
+	if k, ok := s.keys[aws.ToString(ref)]; ok {
+		return k, nil
+	}
+	for _, k := range s.keys {
+		if aws.ToString(k.md.Arn) == aws.ToString(ref) {
+			return k, nil
+		}
+	}
+	return nil, &types.NotFoundException{Message: aws.String("key not found")}
+}
+
+func (s *stubKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.describeCalls++
+	if s.describeErr != nil {
+		return nil, s.describeErr
+	}
+	k, err := s.key(in.KeyId)
+	if err != nil {
+		return nil, err
+	}
+	md := k.md
+	return &kms.DescribeKeyOutput{KeyMetadata: &md}, nil
+}
+
+func (s *stubKMS) GetPublicKey(_ context.Context, in *kms.GetPublicKeyInput, _ ...func(*kms.Options)) (*kms.GetPublicKeyOutput, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.publicCalls++
+	if s.publicErr != nil {
+		return nil, s.publicErr
+	}
+	k, err := s.key(in.KeyId)
+	if err != nil {
+		return nil, err
+	}
+	der := s.publicDER
+	if der == nil {
+		if der, err = x509.MarshalPKIXPublicKey(&k.priv.PublicKey); err != nil {
+			return nil, err
+		}
+	}
+	return &kms.GetPublicKeyOutput{PublicKey: der}, nil
+}
+
+func (s *stubKMS) Sign(_ context.Context, in *kms.SignInput, _ ...func(*kms.Options)) (*kms.SignOutput, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.signCalls++
+	s.lastSign = in
+	if s.signErr != nil {
+		return nil, s.signErr
+	}
+	k, err := s.key(in.KeyId)
+	if err != nil {
+		return nil, err
+	}
+	if in.MessageType != types.MessageTypeDigest || in.SigningAlgorithm != types.SigningAlgorithmSpecEcdsaSha256 {
+		return nil, errors.New("stub: unexpected message type or signing algorithm")
+	}
+	sig, err := ecdsa.SignASN1(rand.Reader, k.priv, in.Message)
+	if err != nil {
+		return nil, err
+	}
+	return &kms.SignOutput{Signature: sig}, nil
+}
+
+func newAWSKMS(t *testing.T, stub *stubKMS, opts ...AWSKMSOption) *AWSKMSKeyManager {
+	t.Helper()
+	km, err := NewAWSKMSKeyManager(stub, map[string]string{tlKeyID: tlRef, raKeyID: raRef}, opts...)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return km
+}
+
+func TestAWSKMS_EnsureSignVerify(t *testing.T) {
+	ctx := context.Background()
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+
+	id, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256)
+	if err != nil || id != tlKeyID {
+		t.Fatalf("EnsureKey = %q, %v", id, err)
+	}
+	pub, err := km.GetPublicKey(ctx, tlKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pub.(*ecdsa.PublicKey).Equal(&stub.keys[tlRef].priv.PublicKey) {
+		t.Fatal("public key does not match the KMS key")
+	}
+	if stub.publicCalls != 1 {
+		t.Fatalf("GetPublicKey reached KMS %d times, want 1 (cached after EnsureKey)", stub.publicCalls)
+	}
+
+	digest := sha256.Sum256([]byte("checkpoint body"))
+	sig, err := km.Sign(ctx, tlKeyID, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := aws.ToString(stub.lastSign.KeyId), aws.ToString(stub.keys[tlRef].md.Arn); got != want {
+		t.Fatalf("Sign sent KeyId %q, want the key ARN pinned by EnsureKey %q", got, want)
+	}
+	if !bytes.Equal(stub.lastSign.Message, digest[:]) {
+		t.Fatal("Sign must send the digest unchanged")
+	}
+	if ok, err := km.Verify(ctx, tlKeyID, digest[:], sig); err != nil || !ok {
+		t.Fatalf("Verify = %v, %v", ok, err)
+	}
+	other := sha256.Sum256([]byte("other body"))
+	if ok, err := km.Verify(ctx, tlKeyID, other[:], sig); err != nil || ok {
+		t.Fatalf("Verify of a different digest = %v, %v; want false, nil", ok, err)
+	}
+	if stub.publicCalls != 1 {
+		t.Fatalf("Verify reached KMS GetPublicKey; calls = %d", stub.publicCalls)
+	}
+}
+
+func TestAWSKMS_AliasRepointTakesEffectOnRestart(t *testing.T) {
+	ctx := context.Background()
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+	if _, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	oldKey := stub.keys[tlRef]
+	oldARN := aws.ToString(oldKey.md.Arn)
+
+	stub.keys[oldARN] = oldKey
+	stub.keys[tlRef] = newStubKey(t, "alias/ans-tl-next")
+
+	digest := sha256.Sum256([]byte("checkpoint body"))
+	sig, err := km.Sign(ctx, tlKeyID, digest[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := aws.ToString(stub.lastSign.KeyId); got != oldARN {
+		t.Fatalf("Sign after re-pointing the alias used %q, want the pinned ARN %q", got, oldARN)
+	}
+	if !ecdsa.VerifyASN1(&oldKey.priv.PublicKey, digest[:], sig) {
+		t.Fatal("signature must come from the key the service started with")
+	}
+
+	restarted := newAWSKMS(t, stub)
+	if _, err := restarted.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	pub, err := restarted.GetPublicKey(ctx, tlKeyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pub.(*ecdsa.PublicKey).Equal(&stub.keys[tlRef].priv.PublicKey) {
+		t.Fatal("after a restart the alias must resolve to the new key")
+	}
+}
+
+// Calls use the configured reference before EnsureKey and when KMS
+// returns no ARN.
+func TestAWSKMS_PinFallbacks(t *testing.T) {
+	ctx := context.Background()
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+
+	digest := sha256.Sum256([]byte("body"))
+	if _, err := km.Sign(ctx, tlKeyID, digest[:]); err != nil {
+		t.Fatal(err)
+	}
+	if got := aws.ToString(stub.lastSign.KeyId); got != tlRef {
+		t.Fatalf("Sign before EnsureKey used %q, want the configured reference %q", got, tlRef)
+	}
+
+	if _, err := km.GetPublicKey(ctx, tlKeyID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	if stub.publicCalls != 2 {
+		t.Fatalf("GetPublicKey calls = %d, want 2 (refetched for the pinned ARN)", stub.publicCalls)
+	}
+
+	stub.keys[raRef].md.Arn = nil
+	if _, err := km.EnsureKey(ctx, raKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := km.Sign(ctx, raKeyID, digest[:]); err != nil {
+		t.Fatal(err)
+	}
+	if got := aws.ToString(stub.lastSign.KeyId); got != raRef {
+		t.Fatalf("Sign without a returned ARN used %q, want the configured reference %q", got, raRef)
+	}
+}
+
+// Adapter signatures verify as receipts, status tokens, and RA JWS.
+func TestAWSKMS_SignaturesVerifyDownstream(t *testing.T) {
+	ctx := context.Background()
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+	tlPub := &stub.keys[tlRef].priv.PublicKey
+
+	gen, err := receipt.NewKeyManagerGenerator(ctx, km, tlKeyID, "ans-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	event := []byte(`{"demo":"receipt","leafIndex":0}`)
+	leaf := receipt.ComputeLeafHash(event)
+	cose, err := gen.GenerateReceipt(ctx, &receipt.InclusionProof{TreeSize: 1, Path: [][]byte{}, RootHash: leaf}, event)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := receipt.Verify(cose, tlPub); err != nil {
+		t.Fatalf("receipt signed through KMS does not verify: %v", err)
+	}
+
+	tokens, err := receipt.NewKeyManagerStatusTokenGenerator(ctx, km, tlKeyID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := tokens.GenerateStatusToken(ctx, &receipt.StatusTokenClaims{AgentID: "agent", Status: "ACTIVE"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := receipt.VerifyStatusToken(token, tlPub); err != nil {
+		t.Fatalf("status token signed through KMS does not verify: %v", err)
+	}
+
+	payload := []byte(`{"agentId":"agent","eventType":"AGENT_REGISTERED"}`)
+	jws, err := anscrypto.SignDetachedJWS(ctx, km, raKeyID, anscrypto.JWSProtectedHeader{Typ: "JWT", Timestamp: 1, RAID: "ra-1"}, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header, err := anscrypto.VerifyDetachedJWS(ctx, km, jws, payload)
+	if err != nil {
+		t.Fatalf("RA event JWS signed through KMS does not verify: %v", err)
+	}
+	if header.Kid != raKeyID {
+		t.Fatalf("JWS kid = %q, want the key ID %q (the KMS reference must not be published)", header.Kid, raKeyID)
+	}
+	if aws.ToString(stub.lastSign.KeyId) != raRef {
+		t.Fatalf("RA signature used KMS key %q, want %q", aws.ToString(stub.lastSign.KeyId), raRef)
+	}
+}
+
+func TestAWSKMS_EnsureKeyRejects(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name      string
+		keyID     string
+		algorithm string
+		mutate    func(*stubKMS)
+		want      string
+		wantIs    error
+	}{
+		{name: "unmapped key ID", keyID: "ans-other", algorithm: port.AlgorithmECDSAP256, want: "no keys.aws-kms.keys entry", wantIs: ErrKeyNotFound},
+		{name: "unsupported algorithm", keyID: tlKeyID, algorithm: port.AlgorithmRSA2048, want: "supports ECDSA_P256", wantIs: ErrUnsupportedAlgorithm},
+		{name: "key spec", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { s.keys[tlRef].md.KeySpec = types.KeySpecRsa2048 }, want: "key spec is RSA_2048"},
+		{name: "key usage", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { s.keys[tlRef].md.KeyUsage = types.KeyUsageTypeEncryptDecrypt }, want: "key usage is ENCRYPT_DECRYPT"},
+		{name: "disabled key", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { s.keys[tlRef].md.KeyState = types.KeyStateDisabled }, want: "key state is Disabled"},
+		{name: "key pending deletion", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { s.keys[tlRef].md.KeyState = types.KeyStatePendingDeletion }, want: "key state is PendingDeletion"},
+		{name: "key missing in KMS", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { delete(s.keys, tlRef) }, want: "kms describe key", wantIs: ErrKeyNotFound},
+		{name: "access denied", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { s.describeErr = errors.New("AccessDeniedException: not authorized") }, want: "AccessDeniedException"},
+		{name: "public key fetch fails", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
+			mutate: func(s *stubKMS) { s.publicErr = errors.New("ThrottlingException") }, want: "kms get public key"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStub(t, tlRef, raRef)
+			if tc.mutate != nil {
+				tc.mutate(stub)
+			}
+			km := newAWSKMS(t, stub)
+			_, err := km.EnsureKey(ctx, tc.keyID, tc.algorithm)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("EnsureKey error = %v, want it to contain %q", err, tc.want)
+			}
+			if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+				t.Fatalf("EnsureKey error = %v, want errors.Is %v", err, tc.wantIs)
+			}
+		})
+	}
+}
+
+func TestAWSKMS_NilMetadataIsRejected(t *testing.T) {
+	if err := checkSigningKey(nil); err == nil || !strings.Contains(err.Error(), "no key metadata") {
+		t.Fatalf("checkSigningKey(nil) = %v", err)
+	}
+}
+
+func TestAWSKMS_SignErrors(t *testing.T) {
+	ctx := context.Background()
+	digest := sha256.Sum256([]byte("x"))
+
+	km := newAWSKMS(t, newStub(t, tlRef, raRef))
+	if _, err := km.Sign(ctx, tlKeyID, []byte("not a digest")); err == nil || !strings.Contains(err.Error(), "32-byte") {
+		t.Fatalf("Sign of a non-digest = %v", err)
+	}
+	if _, err := km.Sign(ctx, "ans-other", digest[:]); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Sign with an unmapped key ID = %v, want ErrKeyNotFound", err)
+	}
+
+	stub := newStub(t, tlRef, raRef)
+	stub.signErr = &types.DisabledException{Message: aws.String("key is disabled")}
+	km = newAWSKMS(t, stub)
+	if _, err := km.Sign(ctx, tlKeyID, digest[:]); err == nil || !strings.Contains(err.Error(), "kms sign") || errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Sign with a disabled key = %v", err)
+	}
+
+	stub = newStub(t, raRef) // tlRef deleted from KMS after configuration
+	km = newAWSKMS(t, stub)
+	if _, err := km.Sign(ctx, tlKeyID, digest[:]); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Sign with a key missing in KMS = %v, want ErrKeyNotFound", err)
+	}
+}
+
+func TestAWSKMS_PublicKeyErrors(t *testing.T) {
+	ctx := context.Background()
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rsaDER, _ := x509.MarshalPKIXPublicKey(&rsaKey.PublicKey)
+	p384, err := ecdsa.GenerateKey(elliptic.P384(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p384DER, _ := x509.MarshalPKIXPublicKey(&p384.PublicKey)
+
+	tests := []struct {
+		name   string
+		keyID  string
+		mutate func(*stubKMS)
+		want   string
+	}{
+		{name: "unmapped key ID", keyID: "ans-other", want: "no keys.aws-kms.keys entry"},
+		{name: "kms error", keyID: tlKeyID, mutate: func(s *stubKMS) { s.publicErr = errors.New("KMSInternalException") }, want: "kms get public key"},
+		{name: "not DER", keyID: tlKeyID, mutate: func(s *stubKMS) { s.publicDER = []byte("garbage") }, want: "parse kms public key"},
+		{name: "RSA key", keyID: tlKeyID, mutate: func(s *stubKMS) { s.publicDER = rsaDER }, want: "want ECDSA P-256"},
+		{name: "P-384 key", keyID: tlKeyID, mutate: func(s *stubKMS) { s.publicDER = p384DER }, want: "want ECDSA P-256"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := newStub(t, tlRef, raRef)
+			if tc.mutate != nil {
+				tc.mutate(stub)
+			}
+			km := newAWSKMS(t, stub)
+			if _, err := km.GetPublicKey(ctx, tc.keyID); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("GetPublicKey error = %v, want %q", err, tc.want)
+			}
+			digest := sha256.Sum256([]byte("x"))
+			if ok, err := km.Verify(ctx, tc.keyID, digest[:], []byte{0x30}); err == nil || ok {
+				t.Fatalf("Verify = %v, %v; want false with an error", ok, err)
+			}
+		})
+	}
+}
+
+func TestAWSKMS_ConcurrentPublicKeyFetch(t *testing.T) {
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+	var wg sync.WaitGroup
+	for range 16 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := km.GetPublicKey(context.Background(), tlKeyID); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	first, _ := km.GetPublicKey(context.Background(), tlKeyID)
+	second, _ := km.GetPublicKey(context.Background(), tlKeyID)
+	if first != second {
+		t.Fatal("cached public key changed between calls")
+	}
+}
+
+func TestAWSKMS_CreateAndListKeys(t *testing.T) {
+	km := newAWSKMS(t, newStub(t, tlRef, raRef))
+	if _, err := km.CreateKey(context.Background(), port.AlgorithmECDSAP256); !errors.Is(err, ErrUnsupportedOperation) {
+		t.Fatalf("CreateKey = %v, want ErrUnsupportedOperation", err)
+	}
+	ids, err := km.ListKeys(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ids) != 2 || ids[0] != raKeyID || ids[1] != tlKeyID {
+		t.Fatalf("ListKeys = %v, want sorted configured key IDs", ids)
+	}
+}
+
+func TestAWSKMS_ConstructorValidation(t *testing.T) {
+	stub := newStub(t)
+	tests := []struct {
+		name   string
+		client AWSKMSClient
+		keys   map[string]string
+		want   string
+	}{
+		{name: "nil client", keys: map[string]string{tlKeyID: tlRef}, want: "client is required"},
+		{name: "empty map", client: stub, keys: map[string]string{}, want: "key map is empty"},
+		{name: "empty reference", client: stub, keys: map[string]string{tlKeyID: ""}, want: "empty entry"},
+		{name: "empty key ID", client: stub, keys: map[string]string{"": tlRef}, want: "empty entry"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := NewAWSKMSKeyManager(tc.client, tc.keys); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("NewAWSKMSKeyManager error = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestAWSKMS_ConfigMapIsCopied(t *testing.T) {
+	keys := map[string]string{tlKeyID: tlRef}
+	km, err := NewAWSKMSKeyManager(newStub(t, tlRef), keys)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys[tlKeyID] = "alias/changed"
+	if _, err := km.EnsureKey(context.Background(), tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatalf("mutating the caller's map changed the adapter: %v", err)
+	}
+}
+
+func TestAWSKMS_Logging(t *testing.T) {
+	var buf bytes.Buffer
+	logger := zerolog.New(&buf)
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub, WithAWSKMSLogger(logger))
+	ctx := context.Background()
+
+	if _, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	stub.signErr = errors.New("AccessDeniedException")
+	digest := sha256.Sum256([]byte("x"))
+	_, _ = km.Sign(ctx, tlKeyID, digest[:])
+
+	logs := buf.String()
+	for _, want := range []string{`"component":"aws-kms-keymanager"`, `"message":"KMS signing key ready"`, `"keyId":"ans-tl-attestation"`, `"message":"KMS sign failed"`, `"level":"error"`} {
+		if !strings.Contains(logs, want) {
+			t.Fatalf("logs missing %s:\n%s", want, logs)
+		}
+	}
+}
+
+func TestNewAWSKMSClient(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("AWS_CONFIG_FILE", filepath.Join(dir, "config"))
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", filepath.Join(dir, "credentials"))
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_PROFILE", "")
+
+	client, err := NewAWSKMSClient(context.Background(), "us-east-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := client.Options().Region; got != "us-east-1" {
+		t.Fatalf("region = %q, want the configured override", got)
+	}
+	if _, err := NewAWSKMSClient(context.Background(), ""); err != nil {
+		t.Fatalf("NewAWSKMSClient without a region override: %v", err)
+	}
+
+	t.Setenv("AWS_PROFILE", "missing-profile")
+	if _, err := NewAWSKMSClient(context.Background(), ""); err == nil {
+		t.Fatal("NewAWSKMSClient with a missing shared-config profile should fail")
+	}
+}
