@@ -92,7 +92,7 @@ func run(cfgPath string) error {
 	// signer, outer envelope attestation JWS, SCITT receipts, and
 	// status tokens. Matches the reference TL's deployed topology
 	// (production `/root-keys` advertises exactly one key).
-	km, err := keymanager.NewFileKeyManager(cfg.Keys.File.Path)
+	km, err := buildKeyManager(ctx, cfg.Keys, logger)
 	if err != nil {
 		return fmt.Errorf("key manager: %w", err)
 	}
@@ -326,6 +326,34 @@ func run(cfgPath string) error {
 	case err := <-errCh:
 		return err
 	}
+}
+
+// keyManager is the configured key manager, including the EnsureKey
+// call run makes at startup.
+type keyManager interface {
+	port.KeyManager
+	EnsureKey(ctx context.Context, keyID, algorithm string) (string, error)
+}
+
+// buildKeyManager builds the key manager selected by keys.type.
+func buildKeyManager(ctx context.Context, k config.Keys, logger zerolog.Logger) (keyManager, error) {
+	if k.Type == "aws-kms" {
+		client, err := keymanager.NewAWSKMSClient(ctx, k.AWSKMS.Region)
+		if err != nil {
+			return nil, err
+		}
+		km, err := keymanager.NewAWSKMSKeyManager(client, k.AWSKMS.Keys, keymanager.WithAWSKMSLogger(logger))
+		if err != nil {
+			return nil, err
+		}
+		logger.Info().Str("region", client.Options().Region).Int("keys", len(k.AWSKMS.Keys)).Msg("AWS KMS key manager ready")
+		return km, nil
+	}
+	km, err := keymanager.NewFileKeyManager(k.File.Path)
+	if err != nil {
+		return nil, err
+	}
+	return km, nil
 }
 
 func buildLogger(cfg config.Log) zerolog.Logger {
