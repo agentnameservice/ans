@@ -12,6 +12,12 @@ keys:
   type: file
   file:
     path: "./data/tl/keys"
+  # AWS KMS instead of PEM files: set type to aws-kms and map the
+  # signing key ID to an existing ECC_NIST_P256 SIGN_VERIFY key.
+  # aws-kms:
+  #   region: us-east-1
+  #   keys:
+  #     ans-tl-attestation: alias/ans-tl-signing
 
 store:
   type: sqlite

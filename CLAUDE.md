@@ -171,13 +171,13 @@ boundary without touching the service layer.
 | Server certificate issuance | File-backed self-signed CA (`ca.server.type: self`) or external RFC 8555 ACME CA such as Let's Encrypt (`ca.server.type: acme`) for the `serverCsrPEM` path, plus BYOC (`serverCertificatePEM` + chain). Exactly one of CSR/BYOC per registration/renewal. Issuance runs through a certificate-order lifecycle: `CreateOrder` (at registration/renewal submission) returns the provider's domain-control challenges, which are relayed verbatim to the domain owner — ANS never writes DNS or serves challenge files on their behalf; `FinalizeOrder` (at verify-acme, gated on a verified challenge artifact) returns the cert, or `ErrOrderPending` for asynchronous providers (ACME CAs such as Let's Encrypt), in which case re-POSTing verify-acme re-drives the order. | `port.ServerCertificateIssuer` |
 | DNS verification | `noop` (quickstart; accepts any state) and `lookup` (real miekg/dns queries with TXT / TLSA / HTTPS / SVCB support; TLSA responses carry the resolver's DNSSEC AuthenticatedData bit through to the TL attestation as `dnsRecordsProvisioned[].dnssecVerified`) | `port.DNSVerifier` |
 | HTTP-01 challenge verification | Plain-HTTP fetch of the owner-published challenge artifact (`/.well-known/acme-challenge/<token>` by default). The verify-acme gate passes when either the DNS-01 TXT record or the HTTP-01 resource verifies. | `port.HTTPChallengeVerifier` |
-| Signing keys | File-based ECDSA P-256 PEM | `port.KeyManager` |
+| Signing keys | File-based ECDSA P-256 PEM, or existing AWS KMS keys (`keys.type: aws-kms`) | `port.KeyManager` |
 | Storage (RA) | SQLite | `port.AgentStore`, `port.CertificateStore`, `port.RenewalStore`, `port.OutboxStore`, `port.UnitOfWork` |
 | Storage (TL) | SQLite + Tessera POSIX tile storage | `tl/event` codec interfaces |
 | Producer-key trust store | SQLite + `/internal/v1/producer-keys` admin CRUD; YAML `producerKeys[]` for bootstrap seeding | `producerkey.Store` and `producerkey.AdminStore` |
 | Scheduler | Go goroutines + `time.Ticker` | (in-process) |
 
-Cloud-KMS, cloud-DB (Postgres / managed RDBMS), and managed-DNS
+Other cloud-KMS, cloud-DB (Postgres / managed RDBMS), and managed-DNS
 adapters are good contribution-shaped opportunities — they slot in
 at the port boundary.
 
