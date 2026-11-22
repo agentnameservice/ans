@@ -201,13 +201,24 @@ type VLEI struct {
 
 // Keys holds key-manager configuration.
 type Keys struct {
-	Type string    `koanf:"type"` // "file"
-	File *KeysFile `koanf:"file"`
+	Type   string      `koanf:"type"` // "file" | "aws-kms"
+	File   *KeysFile   `koanf:"file"`
+	AWSKMS *KeysAWSKMS `koanf:"aws-kms"`
 }
 
 // KeysFile configures the filesystem key manager.
 type KeysFile struct {
 	Path string `koanf:"path"`
+}
+
+// KeysAWSKMS configures the AWS KMS key manager. Credentials come from
+// the standard AWS credential chain.
+type KeysAWSKMS struct {
+	// Region overrides the region from the credential chain when set.
+	Region string `koanf:"region"`
+	// Keys maps each key ID the service signs with to a KMS key ID, key
+	// ARN, alias name, or alias ARN.
+	Keys map[string]string `koanf:"keys"`
 }
 
 // Store holds persistence adapter configuration.
@@ -597,11 +608,22 @@ func validateAuth(a *Auth) error {
 }
 
 func validateKeys(k *Keys) error {
-	if k.Type != "file" {
-		return fmt.Errorf("keys.type %q not supported (expected 'file')", k.Type)
-	}
-	if k.File == nil || k.File.Path == "" {
-		return errors.New("keys.file.path is required")
+	switch k.Type {
+	case "file":
+		if k.File == nil || k.File.Path == "" {
+			return errors.New("keys.file.path is required")
+		}
+	case "aws-kms":
+		if k.AWSKMS == nil || len(k.AWSKMS.Keys) == 0 {
+			return errors.New("keys.aws-kms.keys must map at least one key ID to a KMS key")
+		}
+		for id, ref := range k.AWSKMS.Keys {
+			if id == "" || ref == "" {
+				return fmt.Errorf("keys.aws-kms.keys has an empty entry (%q: %q)", id, ref)
+			}
+		}
+	default:
+		return fmt.Errorf("keys.type %q not supported (expected 'file' or 'aws-kms')", k.Type)
 	}
 	return nil
 }
