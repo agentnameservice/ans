@@ -686,7 +686,7 @@ func TestAWSKMS_EnsureKeyFailsWithoutSignPermission(t *testing.T) {
 	if err == nil || err.Error() != "keymanager: ans-tl-attestation: kms sign dry run: AccessDeniedException" {
 		t.Fatalf("EnsureKey error = %v", err)
 	}
-	if !strings.Contains(logs.String(), "KMS sign permission check failed") || strings.Contains(logs.String(), "KMS signing key ready") {
+	if !strings.Contains(logs.String(), `"op":"sign dry run"`) || strings.Contains(logs.String(), "KMS signing key ready") {
 		t.Fatalf("logs = %s", logs.String())
 	}
 }
@@ -904,7 +904,7 @@ func TestAWSKMS_Logging(t *testing.T) {
 	_, _ = km.Sign(ctx, tlKeyID, digest[:])
 
 	logs := buf.String()
-	for _, want := range []string{`"component":"aws-kms-keymanager"`, `"message":"KMS signing key ready"`, `"keyId":"ans-tl-attestation"`, `"message":"KMS sign failed"`, `"level":"error"`} {
+	for _, want := range []string{`"component":"aws-kms-keymanager"`, `"message":"KMS signing key ready"`, `"keyId":"ans-tl-attestation"`, `"message":"KMS call failed"`, `"op":"sign"`, `"level":"error"`} {
 		if !strings.Contains(logs, want) {
 			t.Fatalf("logs missing %s:\n%s", want, logs)
 		}

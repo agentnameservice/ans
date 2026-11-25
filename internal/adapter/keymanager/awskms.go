@@ -128,12 +128,11 @@ func (m *AWSKMSKeyManager) EnsureKey(ctx context.Context, keyID, algorithm strin
 	if err != nil {
 		return "", err
 	}
-	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-	out, err := m.client.DescribeKey(callCtx, &kms.DescribeKeyInput{KeyId: aws.String(ref)})
+	out, err := callKMS(ctx, m, "describe key", keyID, ref, func(ctx context.Context) (*kms.DescribeKeyOutput, error) {
+		return m.client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(ref)})
+	})
 	if err != nil {
-		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("describe KMS key failed")
-		return "", m.wrapKMSError("describe key", keyID, err)
+		return "", err
 	}
 	if err := checkSigningKey(out.KeyMetadata); err != nil {
 		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("KMS key cannot sign for this key ID")
@@ -161,22 +160,22 @@ func (m *AWSKMSKeyManager) EnsureKey(ctx context.Context, keyID, algorithm strin
 // checkSignPermission sends a DryRun Sign request for ref. KMS answers
 // DryRunOperationException when the request would succeed.
 func (m *AWSKMSKeyManager) checkSignPermission(ctx context.Context, keyID, ref string) error {
-	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
 	var digest [sha256.Size]byte
-	_, err := m.client.Sign(callCtx, &kms.SignInput{
-		KeyId:            aws.String(ref),
-		Message:          digest[:],
-		MessageType:      types.MessageTypeDigest,
-		SigningAlgorithm: types.SigningAlgorithmSpecEcdsaSha256,
-		DryRun:           aws.Bool(true),
+	_, err := callKMS(ctx, m, "sign dry run", keyID, ref, func(ctx context.Context) (*kms.SignOutput, error) {
+		out, err := m.client.Sign(ctx, &kms.SignInput{
+			KeyId:            aws.String(ref),
+			Message:          digest[:],
+			MessageType:      types.MessageTypeDigest,
+			SigningAlgorithm: types.SigningAlgorithmSpecEcdsaSha256,
+			DryRun:           aws.Bool(true),
+		})
+		var dryRun *types.DryRunOperationException
+		if errors.As(err, &dryRun) {
+			return out, nil
+		}
+		return out, err
 	})
-	var dryRun *types.DryRunOperationException
-	if err == nil || errors.As(err, &dryRun) {
-		return nil
-	}
-	m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("KMS sign permission check failed")
-	return m.wrapKMSError("sign dry run", keyID, err)
+	return err
 }
 
 // CreateKey returns ErrUnsupportedOperation.
@@ -194,17 +193,16 @@ func (m *AWSKMSKeyManager) Sign(ctx context.Context, keyID string, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-	out, err := m.client.Sign(callCtx, &kms.SignInput{
-		KeyId:            aws.String(ref),
-		Message:          data,
-		MessageType:      types.MessageTypeDigest,
-		SigningAlgorithm: types.SigningAlgorithmSpecEcdsaSha256,
+	out, err := callKMS(ctx, m, "sign", keyID, ref, func(ctx context.Context) (*kms.SignOutput, error) {
+		return m.client.Sign(ctx, &kms.SignInput{
+			KeyId:            aws.String(ref),
+			Message:          data,
+			MessageType:      types.MessageTypeDigest,
+			SigningAlgorithm: types.SigningAlgorithmSpecEcdsaSha256,
+		})
 	})
 	if err != nil {
-		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("KMS sign failed")
-		return nil, m.wrapKMSError("sign", keyID, err)
+		return nil, err
 	}
 	return out.Signature, nil
 }
@@ -247,12 +245,11 @@ func (m *AWSKMSKeyManager) publicKey(ctx context.Context, keyID string) (*ecdsa.
 		return nil, err
 	}
 	m.logger.Debug().Str("keyId", keyID).Str("kmsKey", ref).Msg("public key not cached, fetching from KMS")
-	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
-	defer cancel()
-	out, err := m.client.GetPublicKey(callCtx, &kms.GetPublicKeyInput{KeyId: aws.String(ref)})
+	out, err := callKMS(ctx, m, "get public key", keyID, ref, func(ctx context.Context) (*kms.GetPublicKeyOutput, error) {
+		return m.client.GetPublicKey(ctx, &kms.GetPublicKeyInput{KeyId: aws.String(ref)})
+	})
 	if err != nil {
-		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("get KMS public key failed")
-		return nil, m.wrapKMSError("get public key", keyID, err)
+		return nil, err
 	}
 	parsed, err := x509.ParsePKIXPublicKey(out.PublicKey)
 	if err != nil {
@@ -296,6 +293,19 @@ func (m *AWSKMSKeyManager) resolve(keyID string) (string, error) {
 		return "", fmt.Errorf("%w: %s has no keys.aws-kms.keys entry", ErrKeyNotFound, keyID)
 	}
 	return ref, nil
+}
+
+// callKMS runs call under the per-call timeout. A failure is logged with
+// the full AWS error and returned with only the AWS error code.
+func callKMS[T any](ctx context.Context, m *AWSKMSKeyManager, op, keyID, ref string, call func(context.Context) (T, error)) (T, error) {
+	ctx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	out, err := call(ctx)
+	if err != nil {
+		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Str("op", op).Msg("KMS call failed")
+		return out, m.wrapKMSError(op, keyID, err)
+	}
+	return out, nil
 }
 
 // wrapKMSError keeps only the AWS error code of err. NotFoundException
