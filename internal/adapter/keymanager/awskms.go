@@ -16,6 +16,7 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/aws/smithy-go"
 	"github.com/rs/zerolog"
 
 	"github.com/agentnameservice/ans/internal/port"
@@ -250,14 +251,23 @@ func (m *AWSKMSKeyManager) resolve(keyID string) (string, error) {
 	return ref, nil
 }
 
-// wrapKMSError maps a KMS NotFoundException to ErrKeyNotFound and
-// wraps every other error with the operation and key ID.
+// wrapKMSError keeps only the AWS error code of err. NotFoundException
+// wraps ErrKeyNotFound, and context errors stay matchable.
 func (m *AWSKMSKeyManager) wrapKMSError(op, keyID string, err error) error {
 	var notFound *types.NotFoundException
 	if errors.As(err, &notFound) {
-		return fmt.Errorf("%w: %s: kms %s: %w", ErrKeyNotFound, keyID, op, err)
+		return fmt.Errorf("%w: %s: kms %s: %s", ErrKeyNotFound, keyID, op, notFound.ErrorCode())
 	}
-	return fmt.Errorf("keymanager: %s: kms %s: %w", keyID, op, err)
+	var apiErr smithy.APIError
+	if errors.As(err, &apiErr) {
+		return fmt.Errorf("keymanager: %s: kms %s: %s", keyID, op, apiErr.ErrorCode())
+	}
+	for _, ctxErr := range []error{context.DeadlineExceeded, context.Canceled} {
+		if errors.Is(err, ctxErr) {
+			return fmt.Errorf("keymanager: %s: kms %s: %w", keyID, op, ctxErr)
+		}
+	}
+	return fmt.Errorf("keymanager: %s: kms %s: request failed", keyID, op)
 }
 
 // checkSigningKey reports why a KMS key cannot back an ECDSA P-256

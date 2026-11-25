@@ -10,14 +10,21 @@ import (
 	"crypto/sha256"
 	"crypto/x509"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
+	"github.com/aws/aws-sdk-go-v2/aws/retry"
+	awshttp "github.com/aws/aws-sdk-go-v2/aws/transport/http"
 	"github.com/aws/aws-sdk-go-v2/service/kms"
 	"github.com/aws/aws-sdk-go-v2/service/kms/types"
+	"github.com/aws/smithy-go"
+	smithyhttp "github.com/aws/smithy-go/transport/http"
 	"github.com/rs/zerolog"
 
 	anscrypto "github.com/agentnameservice/ans/internal/crypto"
@@ -348,9 +355,11 @@ func TestAWSKMS_EnsureKeyRejects(t *testing.T) {
 		{name: "key missing in KMS", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
 			mutate: func(s *stubKMS) { delete(s.keys, tlRef) }, want: "kms describe key", wantIs: ErrKeyNotFound},
 		{name: "access denied", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
-			mutate: func(s *stubKMS) { s.describeErr = errors.New("AccessDeniedException: not authorized") }, want: "AccessDeniedException"},
+			mutate: func(s *stubKMS) { s.describeErr = accessDenied("kms:DescribeKey") }, want: "kms describe key: AccessDeniedException"},
 		{name: "public key fetch fails", keyID: tlKeyID, algorithm: port.AlgorithmECDSAP256,
-			mutate: func(s *stubKMS) { s.publicErr = errors.New("ThrottlingException") }, want: "kms get public key"},
+			mutate: func(s *stubKMS) {
+				s.publicErr = &smithy.GenericAPIError{Code: "ThrottlingException", Message: "Rate exceeded"}
+			}, want: "kms get public key: ThrottlingException"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -399,6 +408,186 @@ func TestAWSKMS_SignErrors(t *testing.T) {
 	km = newAWSKMS(t, stub)
 	if _, err := km.Sign(ctx, tlKeyID, digest[:]); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("Sign with a key missing in KMS = %v, want ErrKeyNotFound", err)
+	}
+}
+
+// accessDenied returns a KMS AccessDeniedException as AWS words it.
+func accessDenied(action string) error {
+	return &smithy.GenericAPIError{
+		Code: "AccessDeniedException",
+		Message: "User: arn:aws:sts::111122223333:assumed-role/ans-tl/session is not authorized to perform: " +
+			action + " on resource: arn:aws:kms:us-east-1:111122223333:key/1234abcd",
+	}
+}
+
+// kmsCallError wraps err the way the SDK returns a failed KMS call.
+func kmsCallError(op string, err error) error {
+	return &smithy.OperationError{ServiceID: "KMS", OperationName: op, Err: &awshttp.ResponseError{
+		ResponseError: &smithyhttp.ResponseError{
+			Response: &smithyhttp.Response{Response: &http.Response{StatusCode: http.StatusBadRequest}},
+			Err:      err,
+		},
+		RequestID: "0f6a4b3e-7c1d-4e2a-9b8f-5d6c7e8f9a0b",
+	}}
+}
+
+// allKMSExceptions returns every exception type in the KMS types
+// package (service/kms v1.62.5), each carrying msg.
+func allKMSExceptions(msg *string) []struct {
+	code string
+	err  error
+} {
+	return []struct {
+		code string
+		err  error
+	}{
+		{"AlreadyExistsException", &types.AlreadyExistsException{Message: msg}},
+		{"CloudHsmClusterInUseException", &types.CloudHsmClusterInUseException{Message: msg}},
+		{"CloudHsmClusterInvalidConfigurationException", &types.CloudHsmClusterInvalidConfigurationException{Message: msg}},
+		{"CloudHsmClusterNotActiveException", &types.CloudHsmClusterNotActiveException{Message: msg}},
+		{"CloudHsmClusterNotFoundException", &types.CloudHsmClusterNotFoundException{Message: msg}},
+		{"CloudHsmClusterNotRelatedException", &types.CloudHsmClusterNotRelatedException{Message: msg}},
+		{"ConflictException", &types.ConflictException{Message: msg}},
+		{"CustomKeyStoreHasCMKsException", &types.CustomKeyStoreHasCMKsException{Message: msg}},
+		{"CustomKeyStoreInvalidStateException", &types.CustomKeyStoreInvalidStateException{Message: msg}},
+		{"CustomKeyStoreNameInUseException", &types.CustomKeyStoreNameInUseException{Message: msg}},
+		{"CustomKeyStoreNotFoundException", &types.CustomKeyStoreNotFoundException{Message: msg}},
+		{"DependencyTimeoutException", &types.DependencyTimeoutException{Message: msg}},
+		{"DisabledException", &types.DisabledException{Message: msg}},
+		{"DryRunOperationException", &types.DryRunOperationException{Message: msg}},
+		{"ExpiredImportTokenException", &types.ExpiredImportTokenException{Message: msg}},
+		{"IncorrectKeyException", &types.IncorrectKeyException{Message: msg}},
+		{"IncorrectKeyMaterialException", &types.IncorrectKeyMaterialException{Message: msg}},
+		{"IncorrectTrustAnchorException", &types.IncorrectTrustAnchorException{Message: msg}},
+		{"InvalidAliasNameException", &types.InvalidAliasNameException{Message: msg}},
+		{"InvalidArnException", &types.InvalidArnException{Message: msg}},
+		{"InvalidCiphertextException", &types.InvalidCiphertextException{Message: msg}},
+		{"InvalidGrantIdException", &types.InvalidGrantIdException{Message: msg}},
+		{"InvalidGrantTokenException", &types.InvalidGrantTokenException{Message: msg}},
+		{"InvalidImportTokenException", &types.InvalidImportTokenException{Message: msg}},
+		{"InvalidKeyUsageException", &types.InvalidKeyUsageException{Message: msg}},
+		{"InvalidMarkerException", &types.InvalidMarkerException{Message: msg}},
+		{"KeyUnavailableException", &types.KeyUnavailableException{Message: msg}},
+		{"KMSInternalException", &types.KMSInternalException{Message: msg}},
+		{"KMSInvalidMacException", &types.KMSInvalidMacException{Message: msg}},
+		{"KMSInvalidSignatureException", &types.KMSInvalidSignatureException{Message: msg}},
+		{"KMSInvalidStateException", &types.KMSInvalidStateException{Message: msg}},
+		{"LimitExceededException", &types.LimitExceededException{Message: msg}},
+		{"MalformedPolicyDocumentException", &types.MalformedPolicyDocumentException{Message: msg}},
+		{"NotFoundException", &types.NotFoundException{Message: msg}},
+		{"TagException", &types.TagException{Message: msg}},
+		{"UnsupportedOperationException", &types.UnsupportedOperationException{Message: msg}},
+		{"XksKeyAlreadyInUseException", &types.XksKeyAlreadyInUseException{Message: msg}},
+		{"XksKeyInvalidConfigurationException", &types.XksKeyInvalidConfigurationException{Message: msg}},
+		{"XksKeyNotFoundException", &types.XksKeyNotFoundException{Message: msg}},
+		{"XksProxyIncorrectAuthenticationCredentialException", &types.XksProxyIncorrectAuthenticationCredentialException{Message: msg}},
+		{"XksProxyInvalidConfigurationException", &types.XksProxyInvalidConfigurationException{Message: msg}},
+		{"XksProxyInvalidResponseException", &types.XksProxyInvalidResponseException{Message: msg}},
+		{"XksProxyUriEndpointInUseException", &types.XksProxyUriEndpointInUseException{Message: msg}},
+		{"XksProxyUriInUseException", &types.XksProxyUriInUseException{Message: msg}},
+		{"XksProxyUriUnreachableException", &types.XksProxyUriUnreachableException{Message: msg}},
+		{"XksProxyVpcEndpointServiceInUseException", &types.XksProxyVpcEndpointServiceInUseException{Message: msg}},
+		{"XksProxyVpcEndpointServiceInvalidConfigurationException", &types.XksProxyVpcEndpointServiceInvalidConfigurationException{Message: msg}},
+		{"XksProxyVpcEndpointServiceNotFoundException", &types.XksProxyVpcEndpointServiceNotFoundException{Message: msg}},
+	}
+}
+
+func TestAWSKMS_ErrorsOmitAWSMessage(t *testing.T) {
+	const keyARN = "arn:aws:kms:us-east-1:111122223333:key/1234abcd"
+	msg := aws.String("User: arn:aws:sts::111122223333:assumed-role/ans-tl/session, resource: " + keyARN)
+
+	type errorCase struct {
+		name   string
+		err    func(op string) error
+		want   string // returned error after "kms <operation>: "
+		wantIs error
+	}
+	exceptions := allKMSExceptions(msg)
+	tests := make([]errorCase, 0, len(exceptions)+6)
+	for _, exc := range exceptions {
+		tc := errorCase{name: exc.code, want: exc.code, err: func(op string) error { return kmsCallError(op, exc.err) }}
+		if exc.code == "NotFoundException" {
+			tc.wantIs = ErrKeyNotFound
+		}
+		tests = append(tests, tc)
+	}
+	tests = append(tests,
+		errorCase{name: "AccessDeniedException", want: "AccessDeniedException",
+			err: func(op string) error { return kmsCallError(op, accessDenied("kms:"+op)) }},
+		errorCase{name: "ThrottlingException", want: "ThrottlingException",
+			err: func(op string) error {
+				return kmsCallError(op, &smithy.GenericAPIError{Code: "ThrottlingException", Message: *msg})
+			}},
+		errorCase{name: "retries exhausted", want: "ThrottlingException",
+			err: func(op string) error {
+				return &retry.MaxAttemptsError{Attempt: 3, Err: kmsCallError(op,
+					&smithy.GenericAPIError{Code: "ThrottlingException", Message: *msg})}
+			}},
+		errorCase{name: "deadline", want: "context deadline exceeded", wantIs: context.DeadlineExceeded,
+			err: func(op string) error {
+				return &smithy.OperationError{ServiceID: "KMS", OperationName: op, Err: fmt.Errorf("send request: %w", context.DeadlineExceeded)}
+			}},
+		errorCase{name: "canceled", want: "context canceled", wantIs: context.Canceled,
+			err: func(op string) error {
+				return &smithy.OperationError{ServiceID: "KMS", OperationName: op, Err: fmt.Errorf("send request: %w", context.Canceled)}
+			}},
+		errorCase{name: "transport", want: "request failed",
+			err: func(op string) error {
+				return &smithy.OperationError{ServiceID: "KMS", OperationName: op, Err: &url.Error{
+					Op: "Post", URL: "https://kms.us-east-1.amazonaws.com/", Err: errors.New("dial tcp 52.94.0.1:443: connection refused")}}
+			}},
+	)
+
+	digest := sha256.Sum256([]byte("x"))
+	calls := []struct {
+		label, op string
+		inject    func(*stubKMS, error)
+		call      func(context.Context, *AWSKMSKeyManager) error
+	}{
+		{label: "describe key", op: "DescribeKey",
+			inject: func(s *stubKMS, err error) { s.describeErr = err },
+			call: func(ctx context.Context, km *AWSKMSKeyManager) error {
+				_, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256)
+				return err
+			}},
+		{label: "get public key", op: "GetPublicKey",
+			inject: func(s *stubKMS, err error) { s.publicErr = err },
+			call: func(ctx context.Context, km *AWSKMSKeyManager) error {
+				_, err := km.GetPublicKey(ctx, tlKeyID)
+				return err
+			}},
+		{label: "sign", op: "Sign",
+			inject: func(s *stubKMS, err error) { s.signErr = err },
+			call: func(ctx context.Context, km *AWSKMSKeyManager) error {
+				_, err := km.Sign(ctx, tlKeyID, digest[:])
+				return err
+			}},
+	}
+	for _, tc := range tests {
+		for _, c := range calls {
+			t.Run(tc.name+"/"+c.label, func(t *testing.T) {
+				var logs bytes.Buffer
+				stub := newStub(t, tlRef, raRef)
+				c.inject(stub, tc.err(c.op))
+				km := newAWSKMS(t, stub, WithAWSKMSLogger(zerolog.New(&logs)))
+
+				err := c.call(context.Background(), km)
+				prefix := "keymanager: "
+				if errors.Is(tc.wantIs, ErrKeyNotFound) {
+					prefix = ErrKeyNotFound.Error() + ": "
+				}
+				want := prefix + "ans-tl-attestation: kms " + c.label + ": " + tc.want
+				if err == nil || err.Error() != want {
+					t.Fatalf("error = %v, want exactly %q", err, want)
+				}
+				if tc.wantIs != nil && !errors.Is(err, tc.wantIs) {
+					t.Fatalf("error = %v, want errors.Is %v", err, tc.wantIs)
+				}
+				if !strings.Contains(logs.String(), "operation error KMS: "+c.op) {
+					t.Fatalf("the full AWS error must be logged: %s", logs.String())
+				}
+			})
+		}
 	}
 }
 
@@ -524,7 +713,7 @@ func TestAWSKMS_Logging(t *testing.T) {
 	if _, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
 		t.Fatal(err)
 	}
-	stub.signErr = errors.New("AccessDeniedException")
+	stub.signErr = accessDenied("kms:Sign")
 	digest := sha256.Sum256([]byte("x"))
 	_, _ = km.Sign(ctx, tlKeyID, digest[:])
 
