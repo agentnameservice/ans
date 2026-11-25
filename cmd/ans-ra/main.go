@@ -504,7 +504,11 @@ func buildKeyManager(ctx context.Context, k config.Keys, logger zerolog.Logger) 
 		if err != nil {
 			return nil, err
 		}
-		km, err := keymanager.NewAWSKMSKeyManager(client, k.AWSKMS.Keys, keymanager.WithAWSKMSLogger(logger))
+		opts := []keymanager.AWSKMSOption{keymanager.WithAWSKMSLogger(logger)}
+		if k.AWSKMS.Timeout > 0 {
+			opts = append(opts, keymanager.WithAWSKMSTimeout(k.AWSKMS.Timeout))
+		}
+		km, err := keymanager.NewAWSKMSKeyManager(client, k.AWSKMS.Keys, opts...)
 		if err != nil {
 			return nil, err
 		}

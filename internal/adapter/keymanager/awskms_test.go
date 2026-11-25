@@ -17,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/retry"
@@ -51,6 +52,24 @@ type stubKMS struct {
 
 	describeCalls, publicCalls, signCalls int
 	lastSign                              *kms.SignInput
+
+	stall     bool        // calls wait for their context to end, like an unanswered request
+	deadlines []time.Time // deadline of each call's context; zero when it has none
+}
+
+// observe records the call's deadline and, when stalling, blocks until
+// the context ends.
+func (s *stubKMS) observe(ctx context.Context) error {
+	deadline, _ := ctx.Deadline()
+	s.mu.Lock()
+	s.deadlines = append(s.deadlines, deadline)
+	stall := s.stall
+	s.mu.Unlock()
+	if !stall {
+		return nil
+	}
+	<-ctx.Done()
+	return &smithy.OperationError{ServiceID: "KMS", OperationName: "call", Err: ctx.Err()}
 }
 
 type stubKey struct {
@@ -98,7 +117,10 @@ func (s *stubKMS) key(ref *string) (*stubKey, error) {
 	return nil, &types.NotFoundException{Message: aws.String("key not found")}
 }
 
-func (s *stubKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+func (s *stubKMS) DescribeKey(ctx context.Context, in *kms.DescribeKeyInput, _ ...func(*kms.Options)) (*kms.DescribeKeyOutput, error) {
+	if err := s.observe(ctx); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.describeCalls++
@@ -113,7 +135,10 @@ func (s *stubKMS) DescribeKey(_ context.Context, in *kms.DescribeKeyInput, _ ...
 	return &kms.DescribeKeyOutput{KeyMetadata: &md}, nil
 }
 
-func (s *stubKMS) GetPublicKey(_ context.Context, in *kms.GetPublicKeyInput, _ ...func(*kms.Options)) (*kms.GetPublicKeyOutput, error) {
+func (s *stubKMS) GetPublicKey(ctx context.Context, in *kms.GetPublicKeyInput, _ ...func(*kms.Options)) (*kms.GetPublicKeyOutput, error) {
+	if err := s.observe(ctx); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.publicCalls++
@@ -133,7 +158,10 @@ func (s *stubKMS) GetPublicKey(_ context.Context, in *kms.GetPublicKeyInput, _ .
 	return &kms.GetPublicKeyOutput{PublicKey: der}, nil
 }
 
-func (s *stubKMS) Sign(_ context.Context, in *kms.SignInput, _ ...func(*kms.Options)) (*kms.SignOutput, error) {
+func (s *stubKMS) Sign(ctx context.Context, in *kms.SignInput, _ ...func(*kms.Options)) (*kms.SignOutput, error) {
+	if err := s.observe(ctx); err != nil {
+		return nil, err
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.signCalls++
@@ -587,6 +615,92 @@ func TestAWSKMS_ErrorsOmitAWSMessage(t *testing.T) {
 					t.Fatalf("the full AWS error must be logged: %s", logs.String())
 				}
 			})
+		}
+	}
+}
+
+func TestAWSKMS_CallsHaveDefaultDeadline(t *testing.T) {
+	ctx := context.Background()
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+	start := time.Now()
+	if _, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte("x"))
+	if _, err := km.Sign(ctx, tlKeyID, digest[:]); err != nil {
+		t.Fatal(err)
+	}
+	if len(stub.deadlines) != 3 {
+		t.Fatalf("KMS calls = %d, want 3 (DescribeKey, GetPublicKey, Sign)", len(stub.deadlines))
+	}
+	for i, d := range stub.deadlines {
+		if d.IsZero() || d.Before(start.Add(defaultAWSKMSTimeout)) || d.After(time.Now().Add(defaultAWSKMSTimeout)) {
+			t.Fatalf("call %d deadline = %v, want about %v after the call", i, d, defaultAWSKMSTimeout)
+		}
+	}
+}
+
+func TestAWSKMS_TimeoutEndsStalledCalls(t *testing.T) {
+	digest := sha256.Sum256([]byte("x"))
+	calls := map[string]func(context.Context, *AWSKMSKeyManager) error{
+		"describe key": func(ctx context.Context, km *AWSKMSKeyManager) error {
+			_, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256)
+			return err
+		},
+		"get public key": func(ctx context.Context, km *AWSKMSKeyManager) error {
+			_, err := km.GetPublicKey(ctx, tlKeyID)
+			return err
+		},
+		"sign": func(ctx context.Context, km *AWSKMSKeyManager) error {
+			_, err := km.Sign(ctx, tlKeyID, digest[:])
+			return err
+		},
+	}
+	for label, call := range calls {
+		t.Run(label, func(t *testing.T) {
+			stub := newStub(t, tlRef, raRef)
+			stub.stall = true
+			km := newAWSKMS(t, stub, WithAWSKMSTimeout(50*time.Millisecond))
+			start := time.Now()
+			err := call(context.Background(), km)
+			if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "kms "+label) {
+				t.Fatalf("error = %v, want a %q deadline error", err, label)
+			}
+			if elapsed := time.Since(start); elapsed > 5*time.Second {
+				t.Fatalf("stalled call returned after %v", elapsed)
+			}
+		})
+	}
+}
+
+func TestAWSKMS_ShorterCallerDeadlineWins(t *testing.T) {
+	stub := newStub(t, tlRef, raRef)
+	stub.stall = true
+	km := newAWSKMS(t, stub)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	digest := sha256.Sum256([]byte("x"))
+	start := time.Now()
+	if _, err := km.Sign(ctx, tlKeyID, digest[:]); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Sign = %v, want context.DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Sign waited %v, want the caller's 50ms deadline", elapsed)
+	}
+}
+
+func TestWithAWSKMSTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		in, want time.Duration
+	}{
+		{in: 3 * time.Second, want: 3 * time.Second},
+		{in: 0, want: defaultAWSKMSTimeout},
+		{in: -time.Second, want: defaultAWSKMSTimeout},
+	} {
+		km := newAWSKMS(t, newStub(t, tlRef, raRef), WithAWSKMSTimeout(tc.in))
+		if km.timeout != tc.want {
+			t.Errorf("WithAWSKMSTimeout(%v): timeout = %v, want %v", tc.in, km.timeout, tc.want)
 		}
 	}
 }

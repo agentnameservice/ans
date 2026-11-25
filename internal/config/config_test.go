@@ -325,6 +325,9 @@ func TestRAConfig_Validate_Errors(t *testing.T) {
 		{"aws-kms empty key reference", func(c *RAConfig) {
 			c.Keys = Keys{Type: "aws-kms", AWSKMS: &KeysAWSKMS{Keys: map[string]string{"ans-ra-signer": ""}}}
 		}, "empty entry"},
+		{"aws-kms negative timeout", func(c *RAConfig) {
+			c.Keys = Keys{Type: "aws-kms", AWSKMS: &KeysAWSKMS{Keys: map[string]string{"ans-ra-signer": "alias/ra"}, Timeout: -time.Second}}
+		}, "keys.aws-kms.timeout must not be negative"},
 		{"unsupported store.type", func(c *RAConfig) { c.Store.Type = "postgres" }, "store.type"},
 		{"missing store.sqlite.path", func(c *RAConfig) { c.Store.SQLite.Path = "" }, "store.sqlite.path"},
 		{"missing tl-client.base-url", func(c *RAConfig) { c.TLClient.BaseURL = "" }, "tl-client.base-url"},
@@ -563,6 +566,7 @@ keys:
   type: aws-kms
   aws-kms:
     region: us-east-1
+    timeout: 3s
     keys:
       ans-tl-attestation: "arn:aws:kms:us-east-1:111122223333:alias/ans-tl"
 store: {type: sqlite, sqlite: {path: "`+dir+`/db"}}
@@ -587,5 +591,8 @@ merkle:
 	}
 	if got := cfg.Keys.AWSKMS.Keys["ans-tl-attestation"]; got != "arn:aws:kms:us-east-1:111122223333:alias/ans-tl" {
 		t.Errorf("key map: got %q", got)
+	}
+	if cfg.Keys.AWSKMS.Timeout != 3*time.Second {
+		t.Errorf("timeout: got %v, want 3s", cfg.Keys.AWSKMS.Timeout)
 	}
 }

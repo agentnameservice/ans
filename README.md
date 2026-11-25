@@ -287,6 +287,7 @@ keys:
   type: aws-kms
   aws-kms:
     region: us-east-1               # optional; defaults to the credential chain's region
+    timeout: 10s                    # optional; limit for each KMS call, retries included
     keys:
       ans-tl-attestation: alias/ans-tl-signing
 ```

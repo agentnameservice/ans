@@ -16,6 +16,7 @@ keys:
   # signing key ID to an existing ECC_NIST_P256 SIGN_VERIFY key.
   # aws-kms:
   #   region: us-east-1
+  #   timeout: 10s
   #   keys:
   #     ans-tl-attestation: alias/ans-tl-signing
 

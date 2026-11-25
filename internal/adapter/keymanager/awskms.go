@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
@@ -21,6 +22,10 @@ import (
 
 	"github.com/agentnameservice/ans/internal/port"
 )
+
+// defaultAWSKMSTimeout bounds each AWS KMS call unless
+// WithAWSKMSTimeout overrides it.
+const defaultAWSKMSTimeout = 10 * time.Second
 
 // ErrUnsupportedOperation is returned for KeyManager operations an
 // adapter does not perform.
@@ -38,9 +43,10 @@ type AWSKMSClient interface {
 // the key ID to the key ARN, so a re-pointed alias takes effect on
 // restart.
 type AWSKMSKeyManager struct {
-	client AWSKMSClient
-	keys   map[string]string
-	logger zerolog.Logger
+	client  AWSKMSClient
+	keys    map[string]string
+	logger  zerolog.Logger
+	timeout time.Duration
 
 	mu   sync.RWMutex
 	pubs map[string]*ecdsa.PublicKey
@@ -54,6 +60,16 @@ type AWSKMSOption func(*AWSKMSKeyManager)
 func WithAWSKMSLogger(logger zerolog.Logger) AWSKMSOption {
 	return func(m *AWSKMSKeyManager) {
 		m.logger = logger.With().Str("component", "aws-kms-keymanager").Logger()
+	}
+}
+
+// WithAWSKMSTimeout overrides the time limit for each AWS KMS call,
+// retries included (default 10s). A non-positive d keeps the default.
+func WithAWSKMSTimeout(d time.Duration) AWSKMSOption {
+	return func(m *AWSKMSKeyManager) {
+		if d > 0 {
+			m.timeout = d
+		}
 	}
 }
 
@@ -88,11 +104,12 @@ func NewAWSKMSKeyManager(client AWSKMSClient, keys map[string]string, opts ...AW
 		resolved[id] = ref
 	}
 	m := &AWSKMSKeyManager{
-		client: client,
-		keys:   resolved,
-		logger: zerolog.Nop(),
-		pubs:   make(map[string]*ecdsa.PublicKey, len(resolved)),
-		arns:   make(map[string]string, len(resolved)),
+		client:  client,
+		keys:    resolved,
+		logger:  zerolog.Nop(),
+		timeout: defaultAWSKMSTimeout,
+		pubs:    make(map[string]*ecdsa.PublicKey, len(resolved)),
+		arns:    make(map[string]string, len(resolved)),
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -111,7 +128,9 @@ func (m *AWSKMSKeyManager) EnsureKey(ctx context.Context, keyID, algorithm strin
 	if err != nil {
 		return "", err
 	}
-	out, err := m.client.DescribeKey(ctx, &kms.DescribeKeyInput{KeyId: aws.String(ref)})
+	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	out, err := m.client.DescribeKey(callCtx, &kms.DescribeKeyInput{KeyId: aws.String(ref)})
 	if err != nil {
 		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("describe KMS key failed")
 		return "", m.wrapKMSError("describe key", keyID, err)
@@ -148,7 +167,9 @@ func (m *AWSKMSKeyManager) Sign(ctx context.Context, keyID string, data []byte) 
 	if err != nil {
 		return nil, err
 	}
-	out, err := m.client.Sign(ctx, &kms.SignInput{
+	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	out, err := m.client.Sign(callCtx, &kms.SignInput{
 		KeyId:            aws.String(ref),
 		Message:          data,
 		MessageType:      types.MessageTypeDigest,
@@ -199,7 +220,9 @@ func (m *AWSKMSKeyManager) publicKey(ctx context.Context, keyID string) (*ecdsa.
 		return nil, err
 	}
 	m.logger.Debug().Str("keyId", keyID).Str("kmsKey", ref).Msg("public key not cached, fetching from KMS")
-	out, err := m.client.GetPublicKey(ctx, &kms.GetPublicKeyInput{KeyId: aws.String(ref)})
+	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	out, err := m.client.GetPublicKey(callCtx, &kms.GetPublicKeyInput{KeyId: aws.String(ref)})
 	if err != nil {
 		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("get KMS public key failed")
 		return nil, m.wrapKMSError("get public key", keyID, err)

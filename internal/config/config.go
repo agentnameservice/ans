@@ -219,6 +219,8 @@ type KeysAWSKMS struct {
 	// Keys maps each key ID the service signs with to a KMS key ID, key
 	// ARN, alias name, or alias ARN.
 	Keys map[string]string `koanf:"keys"`
+	// Timeout bounds each AWS KMS call, retries included (default 10s).
+	Timeout time.Duration `koanf:"timeout"`
 }
 
 // Store holds persistence adapter configuration.
@@ -621,6 +623,9 @@ func validateKeys(k *Keys) error {
 			if id == "" || ref == "" {
 				return fmt.Errorf("keys.aws-kms.keys has an empty entry (%q: %q)", id, ref)
 			}
+		}
+		if k.AWSKMS.Timeout < 0 {
+			return errors.New("keys.aws-kms.timeout must not be negative")
 		}
 	default:
 		return fmt.Errorf("keys.type %q not supported (expected 'file' or 'aws-kms')", k.Type)
