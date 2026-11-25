@@ -320,10 +320,21 @@ keys:
     echo "-----END PUBLIC KEY-----"; } > ans-ra-signer.pub
   ```
 
-- Mapping a key ID to a different KMS key changes the public key that
-  verifiers and the TL producer-key store trust. Treat it as a key
-  rotation. The service resolves an alias to its key ARN at startup, so
-  re-pointing the alias takes effect on the next restart.
+- Changing the KMS key behind a key ID, by editing the map or by
+  re-pointing an alias, takes effect on the next restart: the service
+  resolves an alias to its key ARN at startup.
+- Rotate the RA key under a new key ID. The TL seeds `producerKeys`
+  only for key IDs it does not already store, so a new public key under
+  an existing ID is skipped and the TL rejects events signed with it.
+  1. Register the new public key with the TL under the new key ID,
+     through `POST /internal/v1/producer-keys` or a new `producerKeys`
+     entry.
+  2. Add the new key ID to the RA's `keys.aws-kms.keys`, set
+     `signer.keyId` to it, and restart the RA.
+  3. Keep the old key registered until the RA has delivered every event
+     it signed with the old key. The outbox replays those events with
+     their original signatures.
+  4. Revoke the old key with `DELETE /internal/v1/producer-keys/{key_id}`.
 
 ## Development
 
