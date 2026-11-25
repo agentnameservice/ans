@@ -762,6 +762,40 @@ func TestAWSKMS_ShorterCallerDeadlineWins(t *testing.T) {
 	}
 }
 
+func TestAWSKMS_CanceledCallsLogAtDebug(t *testing.T) {
+	digest := sha256.Sum256([]byte("x"))
+	for _, tc := range []struct {
+		name      string
+		ctx       func() (context.Context, context.CancelFunc)
+		timeout   time.Duration
+		wantLevel string
+	}{
+		{name: "canceled by caller", wantLevel: `"level":"debug"`, timeout: time.Second,
+			ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			}},
+		{name: "deadline exceeded", wantLevel: `"level":"error"`, timeout: 20 * time.Millisecond,
+			ctx: func() (context.Context, context.CancelFunc) { return context.Background(), func() {} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			stub := newStub(t, tlRef, raRef)
+			stub.stall = true
+			km := newAWSKMS(t, stub, WithAWSKMSLogger(zerolog.New(&logs).Level(zerolog.DebugLevel)), WithAWSKMSTimeout(tc.timeout))
+			ctx, cancel := tc.ctx()
+			defer cancel()
+			if _, err := km.Sign(ctx, tlKeyID, digest[:]); err == nil {
+				t.Fatal("Sign succeeded, want an error")
+			}
+			if !strings.Contains(logs.String(), tc.wantLevel) || !strings.Contains(logs.String(), `"message":"KMS call failed"`) {
+				t.Fatalf("logs = %s, want %s", logs.String(), tc.wantLevel)
+			}
+		})
+	}
+}
+
 func TestWithAWSKMSTimeout(t *testing.T) {
 	for _, tc := range []struct {
 		in, want time.Duration

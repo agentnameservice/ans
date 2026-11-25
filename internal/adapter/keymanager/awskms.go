@@ -302,7 +302,11 @@ func callKMS[T any](ctx context.Context, m *AWSKMSKeyManager, op, keyID, ref str
 	defer cancel()
 	out, err := call(ctx)
 	if err != nil {
-		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Str("op", op).Msg("KMS call failed")
+		level := zerolog.ErrorLevel
+		if errors.Is(err, context.Canceled) {
+			level = zerolog.DebugLevel
+		}
+		m.logger.WithLevel(level).Err(err).Str("keyId", keyID).Str("kmsKey", ref).Str("op", op).Msg("KMS call failed")
 		return out, m.wrapKMSError(op, keyID, err)
 	}
 	return out, nil
