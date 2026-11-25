@@ -108,6 +108,13 @@ keys:
   type: file
   file:
     path: "./data/ra/keys"
+  # AWS KMS instead of PEM files: set type to aws-kms and map the
+  # signing key ID to an existing ECC_NIST_P256 SIGN_VERIFY key.
+  # aws-kms:
+  #   region: us-east-1
+  #   timeout: 10s
+  #   keys:
+  #     ans-ra-signer: alias/ans-ra-signer
 
 store:
   type: sqlite

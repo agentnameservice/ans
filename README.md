@@ -268,11 +268,73 @@ of them at the port boundary without touching the service layer.
 | Identity cert issuance | File-backed self-signed CA | Cloud KMS-backed CA |
 | Server cert issuance | Self-signed CA + BYOC PEM | ACME / public CA / BYOC PEM |
 | DNS verification | `noop` and `lookup` (real miekg/dns queries with DNSSEC AD-bit propagation) | `lookup` against your authoritative DNS |
-| Signing keys | File-based ECDSA P-256 | Cloud KMS adapter |
+| Signing keys | File-based ECDSA P-256 | AWS KMS (`keys.type: aws-kms`) |
 | Storage | SQLite | Postgres / managed RDBMS |
 
-Cloud-KMS, Postgres, and managed-DNS adapters are
+Other cloud-KMS, Postgres, and managed-DNS adapters are
 contribution-shaped — see `CONTRIBUTING.md`.
+
+### Signing keys in AWS KMS
+
+`keys.type: aws-kms` signs with existing AWS KMS keys instead of PEM
+files. Each key ID the service signs with (`attestation.keyId` on the
+TL, `signer.keyId` on the RA) maps to a KMS key ID, key ARN, or alias.
+The key ID stays the published name: the RA still sends it as the event
+JWS `kid`, and the KMS reference stays inside the process.
+
+```yaml
+keys:
+  type: aws-kms
+  aws-kms:
+    region: us-east-1               # optional; defaults to the credential chain's region
+    timeout: 10s                    # optional; limit for each KMS call, retries included
+    keys:
+      ans-tl-attestation: alias/ans-tl-signing
+```
+
+- Create each key as `ECC_NIST_P256` with key usage `SIGN_VERIFY`. The
+  service checks spec, usage, and state at startup and does not create
+  keys.
+- Credentials come from the standard AWS credential chain (environment,
+  shared config, IAM role). The service needs `kms:DescribeKey`,
+  `kms:GetPublicKey`, and `kms:Sign` on its own key only:
+
+  ```json
+  {
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Action": ["kms:DescribeKey", "kms:GetPublicKey", "kms:Sign"],
+      "Resource": "arn:aws:kms:us-east-1:111122223333:key/<key-id>"
+    }]
+  }
+  ```
+
+- The RA does not write `ans-ra-signer.pub` when its key is in KMS.
+  Take the PEM for the TL's `producerKeys` from KMS instead:
+
+  ```bash
+  { echo "-----BEGIN PUBLIC KEY-----"
+    aws kms get-public-key --key-id alias/ans-ra-signer \
+      --query PublicKey --output text | fold -w 64
+    echo "-----END PUBLIC KEY-----"; } > ans-ra-signer.pub
+  ```
+
+- Changing the KMS key behind a key ID, by editing the map or by
+  re-pointing an alias, takes effect on the next restart: the service
+  resolves an alias to its key ARN at startup.
+- Rotate the RA key under a new key ID. The TL seeds `producerKeys`
+  only for key IDs it does not already store, so a new public key under
+  an existing ID is skipped and the TL rejects events signed with it.
+  1. Register the new public key with the TL under the new key ID,
+     through `POST /internal/v1/producer-keys` or a new `producerKeys`
+     entry.
+  2. Add the new key ID to the RA's `keys.aws-kms.keys`, set
+     `signer.keyId` to it, and restart the RA.
+  3. Keep the old key registered until the RA has delivered every event
+     it signed with the old key. The outbox replays those events with
+     their original signatures.
+  4. Revoke the old key with `DELETE /internal/v1/producer-keys/{key_id}`.
 
 ## Development
 
@@ -306,7 +368,7 @@ lookup, Merkle tiles • Producer-key admin CRUD
 verifies both receipts and status tokens • `ans-dns` dev DNS server
 with `install` / `clear` for verify-dns end-to-end testing.
 
-Follow-up opportunities (community): cloud-KMS / Postgres /
+Follow-up opportunities (community): other cloud-KMS / Postgres /
 managed-DNS adapters, real ACME DNS-01 verifier wiring, additional
 schema versions.
 
