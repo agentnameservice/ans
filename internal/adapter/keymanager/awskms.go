@@ -118,8 +118,8 @@ func NewAWSKMSKeyManager(client AWSKMSClient, keys map[string]string, opts ...AW
 }
 
 // EnsureKey checks that keyID maps to an enabled ECC_NIST_P256 key with
-// SIGN_VERIFY usage, pins keyID to the key ARN, and loads the public
-// key. It never creates a key.
+// SIGN_VERIFY usage, pins keyID to the key ARN, loads the public key,
+// and checks that the caller may sign with it. It never creates a key.
 func (m *AWSKMSKeyManager) EnsureKey(ctx context.Context, keyID, algorithm string) (string, error) {
 	if algorithm != port.AlgorithmECDSAP256 {
 		return "", fmt.Errorf("%w: %s (aws kms adapter supports %s)", ErrUnsupportedAlgorithm, algorithm, port.AlgorithmECDSAP256)
@@ -139,9 +139,15 @@ func (m *AWSKMSKeyManager) EnsureKey(ctx context.Context, keyID, algorithm strin
 		m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("KMS key cannot sign for this key ID")
 		return "", fmt.Errorf("keymanager: %s: %w", keyID, err)
 	}
-	m.pin(keyID, aws.ToString(out.KeyMetadata.Arn))
+	if arn := aws.ToString(out.KeyMetadata.Arn); arn != "" {
+		m.pin(keyID, arn)
+		ref = arn
+	}
 	pub, err := m.GetPublicKey(ctx, keyID)
 	if err != nil {
+		return "", err
+	}
+	if err := m.checkSignPermission(ctx, keyID, ref); err != nil {
 		return "", err
 	}
 	m.logger.Info().
@@ -150,6 +156,27 @@ func (m *AWSKMSKeyManager) EnsureKey(ctx context.Context, keyID, algorithm strin
 		Str("fingerprint", KeyFingerprint(pub)).
 		Msg("KMS signing key ready")
 	return keyID, nil
+}
+
+// checkSignPermission sends a DryRun Sign request for ref. KMS answers
+// DryRunOperationException when the request would succeed.
+func (m *AWSKMSKeyManager) checkSignPermission(ctx context.Context, keyID, ref string) error {
+	callCtx, cancel := context.WithTimeout(ctx, m.timeout)
+	defer cancel()
+	var digest [sha256.Size]byte
+	_, err := m.client.Sign(callCtx, &kms.SignInput{
+		KeyId:            aws.String(ref),
+		Message:          digest[:],
+		MessageType:      types.MessageTypeDigest,
+		SigningAlgorithm: types.SigningAlgorithmSpecEcdsaSha256,
+		DryRun:           aws.Bool(true),
+	})
+	var dryRun *types.DryRunOperationException
+	if err == nil || errors.As(err, &dryRun) {
+		return nil
+	}
+	m.logger.Error().Err(err).Str("keyId", keyID).Str("kmsKey", ref).Msg("KMS sign permission check failed")
+	return m.wrapKMSError("sign dry run", keyID, err)
 }
 
 // CreateKey returns ErrUnsupportedOperation.
@@ -247,9 +274,6 @@ func (m *AWSKMSKeyManager) publicKey(ctx context.Context, keyID string) (*ecdsa.
 // pin records the key ARN for keyID and drops a public key loaded for
 // a different key.
 func (m *AWSKMSKeyManager) pin(keyID, arn string) {
-	if arn == "" {
-		return
-	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.arns[keyID] != arn {

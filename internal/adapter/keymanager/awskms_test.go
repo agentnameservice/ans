@@ -52,6 +52,8 @@ type stubKMS struct {
 
 	describeCalls, publicCalls, signCalls int
 	lastSign                              *kms.SignInput
+	dryRuns                               []*kms.SignInput
+	dryRunReturnsNil                      bool // answer DryRun with success instead of DryRunOperationException
 
 	stall     bool        // calls wait for their context to end, like an unanswered request
 	deadlines []time.Time // deadline of each call's context; zero when it has none
@@ -164,6 +166,19 @@ func (s *stubKMS) Sign(ctx context.Context, in *kms.SignInput, _ ...func(*kms.Op
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if aws.ToBool(in.DryRun) {
+		s.dryRuns = append(s.dryRuns, in)
+		if s.signErr != nil {
+			return nil, s.signErr
+		}
+		if _, err := s.key(in.KeyId); err != nil {
+			return nil, err
+		}
+		if s.dryRunReturnsNil {
+			return &kms.SignOutput{}, nil
+		}
+		return nil, &types.DryRunOperationException{Message: aws.String("The request would have succeeded, but the DryRun option is set.")}
+	}
 	s.signCalls++
 	s.lastSign = in
 	if s.signErr != nil {
@@ -590,6 +605,12 @@ func TestAWSKMS_ErrorsOmitAWSMessage(t *testing.T) {
 				_, err := km.Sign(ctx, tlKeyID, digest[:])
 				return err
 			}},
+		{label: "sign dry run", op: "Sign",
+			inject: func(s *stubKMS, err error) { s.signErr = err },
+			call: func(ctx context.Context, km *AWSKMSKeyManager) error {
+				_, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256)
+				return err
+			}},
 	}
 	for _, tc := range tests {
 		for _, c := range calls {
@@ -600,6 +621,12 @@ func TestAWSKMS_ErrorsOmitAWSMessage(t *testing.T) {
 				km := newAWSKMS(t, stub, WithAWSKMSLogger(zerolog.New(&logs)))
 
 				err := c.call(context.Background(), km)
+				if tc.name == "DryRunOperationException" && c.label == "sign dry run" {
+					if err != nil {
+						t.Fatalf("a DryRunOperationException answer means the signing permission exists, got %v", err)
+					}
+					return
+				}
 				prefix := "keymanager: "
 				if errors.Is(tc.wantIs, ErrKeyNotFound) {
 					prefix = ErrKeyNotFound.Error() + ": "
@@ -619,6 +646,51 @@ func TestAWSKMS_ErrorsOmitAWSMessage(t *testing.T) {
 	}
 }
 
+func TestAWSKMS_EnsureKeyChecksSignPermission(t *testing.T) {
+	ctx := context.Background()
+	stub := newStub(t, tlRef, raRef)
+	km := newAWSKMS(t, stub)
+	if _, err := km.EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatal(err)
+	}
+	if len(stub.dryRuns) != 1 {
+		t.Fatalf("DryRun Sign requests = %d, want 1", len(stub.dryRuns))
+	}
+	in := stub.dryRuns[0]
+	if got, want := aws.ToString(in.KeyId), aws.ToString(stub.keys[tlRef].md.Arn); got != want {
+		t.Errorf("DryRun KeyId = %q, want the pinned ARN %q", got, want)
+	}
+	if in.MessageType != types.MessageTypeDigest || in.SigningAlgorithm != types.SigningAlgorithmSpecEcdsaSha256 || len(in.Message) != sha256.Size {
+		t.Errorf("DryRun request = %+v, want a SHA-256 digest with ECDSA_SHA_256", in)
+	}
+	if stub.signCalls != 0 {
+		t.Errorf("EnsureKey made %d real Sign calls, want 0", stub.signCalls)
+	}
+
+	stub = newStub(t, tlRef, raRef)
+	stub.dryRunReturnsNil = true
+	if _, err := newAWSKMS(t, stub).EnsureKey(ctx, tlKeyID, port.AlgorithmECDSAP256); err != nil {
+		t.Fatalf("EnsureKey with a successful DryRun answer = %v", err)
+	}
+}
+
+// A role with kms:DescribeKey and kms:GetPublicKey but not kms:Sign must
+// fail EnsureKey, so the service does not start and report ready.
+func TestAWSKMS_EnsureKeyFailsWithoutSignPermission(t *testing.T) {
+	var logs bytes.Buffer
+	stub := newStub(t, tlRef, raRef)
+	stub.signErr = kmsCallError("Sign", accessDenied("kms:Sign"))
+	km := newAWSKMS(t, stub, WithAWSKMSLogger(zerolog.New(&logs)))
+
+	_, err := km.EnsureKey(context.Background(), tlKeyID, port.AlgorithmECDSAP256)
+	if err == nil || err.Error() != "keymanager: ans-tl-attestation: kms sign dry run: AccessDeniedException" {
+		t.Fatalf("EnsureKey error = %v", err)
+	}
+	if !strings.Contains(logs.String(), "KMS sign permission check failed") || strings.Contains(logs.String(), "KMS signing key ready") {
+		t.Fatalf("logs = %s", logs.String())
+	}
+}
+
 func TestAWSKMS_CallsHaveDefaultDeadline(t *testing.T) {
 	ctx := context.Background()
 	stub := newStub(t, tlRef, raRef)
@@ -631,8 +703,8 @@ func TestAWSKMS_CallsHaveDefaultDeadline(t *testing.T) {
 	if _, err := km.Sign(ctx, tlKeyID, digest[:]); err != nil {
 		t.Fatal(err)
 	}
-	if len(stub.deadlines) != 3 {
-		t.Fatalf("KMS calls = %d, want 3 (DescribeKey, GetPublicKey, Sign)", len(stub.deadlines))
+	if len(stub.deadlines) != 4 {
+		t.Fatalf("KMS calls = %d, want 4 (DescribeKey, GetPublicKey, DryRun Sign, Sign)", len(stub.deadlines))
 	}
 	for i, d := range stub.deadlines {
 		if d.IsZero() || d.Before(start.Add(defaultAWSKMSTimeout)) || d.After(time.Now().Add(defaultAWSKMSTimeout)) {
