@@ -112,11 +112,11 @@ build` only — they are not in the compose stack.
 
 ## Architecture
 
-![ANS reference implementation: system topology](docs/architecture/reference-implementation.svg)
+![Agent Name Service: how the pieces fit](docs/architecture/overview.svg)
 
-*Three daemons (`ans-ra`, `ans-tl`, `ans-finder`), an offline verifier,
-and the numbered register → seal → discover → verify lifecycle. Editable
-source: [`reference-implementation.drawio`](docs/architecture/reference-implementation.drawio).*
+*The overview. [docs/architecture](docs/architecture/README.md) zooms
+into each component and walks through registering an agent, then
+finding and trusting one.*
 
 Hexagonal / ports-and-adapters. The domain model (`internal/domain`)
 has zero framework or storage dependencies. Services depend on port
@@ -130,8 +130,7 @@ layer; `cmd/ans-dns` is a miekg/dns authoritative server with
 RA-driven record `install` / `clear`.
 
 See `spec/api-spec-v2.yaml` + `spec/api-spec-tl-v2.yaml` for the
-authoritative OpenAPI contracts. `docs/architecture/ans-finder.md`
-covers the discovery service in depth.
+authoritative OpenAPI contracts.
 
 ## Core contracts
 
