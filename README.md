@@ -112,21 +112,22 @@ build` only — they are not in the compose stack.
 
 ## Architecture
 
+![Agent Name Service: how the pieces fit](docs/architecture/overview.svg)
+
+*The overview. [docs/architecture](docs/architecture/README.md) zooms
+into each component and walks through registering an agent, then
+finding and trusting one.*
+
 Hexagonal / ports-and-adapters. The domain model (`internal/domain`)
 has zero framework or storage dependencies. Services depend on port
 interfaces (`internal/port`) which adapters in `internal/adapter/`
-implement against real drivers.
-
-```
-cmd/ans-ra/main.go ───────┐
-                          ├─► internal/ra/service ─► port.AgentStore     ─► internal/adapter/store/sqlite
-cmd/ans-tl/main.go ───────┤                          port.KeyManager     ─► internal/adapter/keymanager
-                          │                          port.DNSVerifier    ─► internal/adapter/dns
-                          └─► internal/tl/service ─► port.RenewalStore   ─► …
-
-cmd/ans-verify/main.go ─► internal/tl/receipt   (Verify, ExtractKID, ComputeLeafHash)
-cmd/ans-dns/main.go    ─► miekg/dns authoritative server + RA-driven record install/clear
-```
+implement against real drivers: `cmd/ans-ra` and `cmd/ans-tl` wire
+`internal/ra/service` and `internal/tl/service` to the SQLite, file
+key-manager, DNS, and certificate adapters; `cmd/ans-verify` verifies
+receipts through `internal/tl/receipt` and checkpoints through
+`internal/lognote`, with no dependency on the TL's storage or service
+layer; `cmd/ans-dns` is a miekg/dns authoritative server with
+RA-driven record `install` / `clear`.
 
 See `spec/api-spec-v2.yaml` + `spec/api-spec-tl-v2.yaml` for the
 authoritative OpenAPI contracts.
